@@ -55,6 +55,37 @@ ship an SDK. The workflow does not need to live in a browser.
 If a human can operate it on screen, `computer.cpp` can help make it
 programmable.
 
+## Table Of Contents
+
+- [The Magic](#the-magic)
+- [What Actually Happens](#what-actually-happens)
+- [Why This Exists](#why-this-exists)
+- [Desktop Apps For Agents](#desktop-apps-for-agents)
+- [CLI, HTTP, And MCP](#cli-http-and-mcp)
+  - [CLI](#cli)
+  - [Local HTTP API](#local-http-api)
+  - [MCP Server](#mcp-server)
+- [Examples](#examples)
+- [Quick Start](#quick-start)
+- [Define An App API](#define-an-app-api)
+- [Operations](#operations)
+- [Micro-Agents](#micro-agents)
+- [Core Desktop Control](#core-desktop-control)
+- [LLM Configuration](#llm-configuration)
+  - [CLI and TOML](#cli-and-toml)
+  - [Tray Settings](#tray-settings)
+- [Lua Scripts](#lua-scripts)
+- [Protocol](#protocol)
+- [Tracing And Artifacts](#tracing-and-artifacts)
+- [Security Model](#security-model)
+- [Why C++?](#why-c)
+- [Project Status](#project-status)
+- [Alternatives And Comparisons](#alternatives-and-comparisons)
+- [Philosophy](#philosophy)
+- [Community And Contributions](#community-and-contributions)
+- [Stargazers](#stargazers)
+- [License](#license)
+
 ## The Magic
 
 The outside world sees a clean command:
