@@ -11,6 +11,11 @@ option(COMPUTER_CPP_CODE_SIGN_APP "Code sign the macOS ComputerCpp.app bundle af
 option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project targets" ON)
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
 
+if(APPLE AND NOT DEFINED CACHE{CMAKE_FIND_FRAMEWORK})
+    # Prefer SDK/Homebrew libraries over stale third-party framework bundles in /Library/Frameworks.
+    set(CMAKE_FIND_FRAMEWORK LAST)
+endif()
+
 function(computer_cpp_target_defaults target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
 
