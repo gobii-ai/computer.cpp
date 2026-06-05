@@ -4,8 +4,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XTest.h>
+#include <X11/keysym.h>
 #include <X11/Xutil.h>
 
 #include <algorithm>
@@ -21,7 +23,6 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
-#include <map>
 #include <cmath>
 #include <optional>
 #include <sstream>
@@ -437,19 +438,234 @@ std::optional<unsigned long> ParseWindowId(const std::string& value) {
 }
 
 std::optional<unsigned long> WindowIdForAppQuery(const std::string& query);
+std::string Lower(std::string value);
 
-std::optional<unsigned long> ActiveWindowId() {
-    auto result = RunCommand("xdotool getactivewindow");
-    if (result.status == 0) {
-        if (auto id = ParseWindowId(result.output)) {
-            return id;
+bool WithDisplay(const std::function<bool(Display*)>& fn) {
+    Display* display = XOpenDisplay(nullptr);
+    if (!display) {
+        return false;
+    }
+    bool ok = fn(display);
+    XCloseDisplay(display);
+    return ok;
+}
+
+std::optional<Window> WindowProperty(Display* display, Window window, const char* name) {
+    Atom property = XInternAtom(display, name, True);
+    if (property == None) {
+        return std::nullopt;
+    }
+    Atom actualType = None;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesAfter = 0;
+    unsigned char* data = nullptr;
+    int status = XGetWindowProperty(
+        display,
+        window,
+        property,
+        0,
+        1,
+        False,
+        XA_WINDOW,
+        &actualType,
+        &actualFormat,
+        &itemCount,
+        &bytesAfter,
+        &data);
+    std::optional<Window> result;
+    if (status == Success && data && itemCount > 0 && actualFormat == 32) {
+        result = *reinterpret_cast<unsigned long*>(data);
+    }
+    if (data) {
+        XFree(data);
+    }
+    return result;
+}
+
+std::optional<unsigned long> CardinalProperty(Display* display, Window window, const char* name) {
+    Atom property = XInternAtom(display, name, True);
+    if (property == None) {
+        return std::nullopt;
+    }
+    Atom actualType = None;
+    int actualFormat = 0;
+    unsigned long itemCount = 0;
+    unsigned long bytesAfter = 0;
+    unsigned char* data = nullptr;
+    int status = XGetWindowProperty(
+        display,
+        window,
+        property,
+        0,
+        1,
+        False,
+        XA_CARDINAL,
+        &actualType,
+        &actualFormat,
+        &itemCount,
+        &bytesAfter,
+        &data);
+    std::optional<unsigned long> result;
+    if (status == Success && data && itemCount > 0 && actualFormat == 32) {
+        result = *reinterpret_cast<unsigned long*>(data);
+    }
+    if (data) {
+        XFree(data);
+    }
+    return result;
+}
+
+std::string TextProperty(Display* display, Window window, const char* name) {
+    Atom property = XInternAtom(display, name, True);
+    if (property != None) {
+        Atom utf8 = XInternAtom(display, "UTF8_STRING", True);
+        Atom actualType = None;
+        int actualFormat = 0;
+        unsigned long itemCount = 0;
+        unsigned long bytesAfter = 0;
+        unsigned char* data = nullptr;
+        int status = XGetWindowProperty(
+            display,
+            window,
+            property,
+            0,
+            4096,
+            False,
+            utf8 == None ? AnyPropertyType : utf8,
+            &actualType,
+            &actualFormat,
+            &itemCount,
+            &bytesAfter,
+            &data);
+        std::string result;
+        if (status == Success && data && itemCount > 0 && actualFormat == 8) {
+            result.assign(reinterpret_cast<char*>(data), itemCount);
+        }
+        if (data) {
+            XFree(data);
+        }
+        if (!result.empty()) {
+            return result;
         }
     }
-    result = RunCommand("xdotool getwindowfocus");
-    if (result.status == 0) {
-        if (auto id = ParseWindowId(result.output)) {
-            return id;
+    char* legacy = nullptr;
+    if (XFetchName(display, window, &legacy) && legacy) {
+        std::string result = legacy;
+        XFree(legacy);
+        return result;
+    }
+    return {};
+}
+
+void CollectXWindows(Display* display, Window parent, std::vector<Window>& windows, bool visibleOnly) {
+    Window root = None;
+    Window returnedParent = None;
+    Window* children = nullptr;
+    unsigned int childCount = 0;
+    if (!XQueryTree(display, parent, &root, &returnedParent, &children, &childCount)) {
+        return;
+    }
+    for (unsigned int i = 0; i < childCount; ++i) {
+        Window child = children[i];
+        XWindowAttributes attrs {};
+        bool include = XGetWindowAttributes(display, child, &attrs) != 0;
+        if (include && (!visibleOnly || attrs.map_state == IsViewable) && !attrs.override_redirect) {
+            windows.push_back(child);
         }
+        CollectXWindows(display, child, windows, visibleOnly);
+    }
+    if (children) {
+        XFree(children);
+    }
+}
+
+std::vector<Window> QueryXWindows(Display* display, bool visibleOnly) {
+    std::vector<Window> windows;
+    CollectXWindows(display, DefaultRootWindow(display), windows, visibleOnly);
+    return windows;
+}
+
+std::string WindowClass(Display* display, Window window) {
+    XClassHint hint {};
+    if (XGetClassHint(display, window, &hint)) {
+        std::string result;
+        if (hint.res_class) {
+            result = hint.res_class;
+        } else if (hint.res_name) {
+            result = hint.res_name;
+        }
+        if (hint.res_name) {
+            XFree(hint.res_name);
+        }
+        if (hint.res_class) {
+            XFree(hint.res_class);
+        }
+        return result;
+    }
+    return {};
+}
+
+std::string WindowName(Display* display, Window window) {
+    std::string name = TextProperty(display, window, "_NET_WM_NAME");
+    if (!name.empty()) {
+        return name;
+    }
+    return TextProperty(display, window, "WM_NAME");
+}
+
+int WindowPid(Display* display, Window window) {
+    auto pid = CardinalProperty(display, window, "_NET_WM_PID");
+    if (!pid) {
+        return -1;
+    }
+    return static_cast<int>(*pid);
+}
+
+Bounds WindowBounds(Display* display, Window window) {
+    XWindowAttributes attrs {};
+    if (!XGetWindowAttributes(display, window, &attrs)) {
+        return {};
+    }
+    Window root = DefaultRootWindow(display);
+    int rootX = attrs.x;
+    int rootY = attrs.y;
+    Window child = None;
+    XTranslateCoordinates(display, window, root, 0, 0, &rootX, &rootY, &child);
+    return {
+        true,
+        static_cast<double>(rootX),
+        static_cast<double>(rootY),
+        static_cast<double>(attrs.width),
+        static_cast<double>(attrs.height)
+    };
+}
+
+bool WindowMatchesQuery(Display* display, Window window, const std::string& query) {
+    std::string needle = Lower(query);
+    std::string haystack = Lower(WindowClass(display, window) + " " + WindowName(display, window));
+    return haystack.find(needle) != std::string::npos;
+}
+
+std::optional<unsigned long> ActiveWindowId() {
+    std::optional<unsigned long> active;
+    WithDisplay([&](Display* display) {
+        Window root = DefaultRootWindow(display);
+        if (auto netActive = WindowProperty(display, root, "_NET_ACTIVE_WINDOW")) {
+            active = *netActive;
+            return true;
+        }
+        Window focus = None;
+        int revert = 0;
+        XGetInputFocus(display, &focus, &revert);
+        if (focus != None && focus != PointerRoot) {
+            active = focus;
+            return true;
+        }
+        return false;
+    });
+    if (active) {
+        return active;
     }
     auto firefox = WindowIdForAppQuery("firefox");
     if (firefox) {
@@ -462,125 +678,71 @@ std::optional<unsigned long> WindowIdForPid(int pid) {
     if (pid <= 0) {
         return std::nullopt;
     }
-    auto result = RunCommand("xdotool search --onlyvisible --pid " + std::to_string(pid) + " | tail -n 1");
-    if (result.status != 0) {
-        result = RunCommand("xdotool search --pid " + std::to_string(pid) + " | tail -n 1");
-    }
-    if (result.status != 0) {
-        return std::nullopt;
-    }
-    return ParseWindowId(result.output);
+    std::optional<unsigned long> found;
+    WithDisplay([&](Display* display) {
+        for (bool visibleOnly : {true, false}) {
+            auto windows = QueryXWindows(display, visibleOnly);
+            for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+                if (WindowPid(display, *it) == pid) {
+                    found = *it;
+                    return true;
+                }
+            }
+        }
+        return false;
+    });
+    return found;
 }
 
 std::optional<unsigned long> WindowIdForAppQuery(const std::string& query) {
-    auto classResult = RunCommand("xdotool search --onlyvisible --class " + ShellQuote(query) + " | tail -n 1");
-    if (classResult.status == 0) {
-        if (auto id = ParseWindowId(classResult.output)) {
-            return id;
+    std::optional<unsigned long> found;
+    WithDisplay([&](Display* display) {
+        auto windows = QueryXWindows(display, true);
+        for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+            if (WindowMatchesQuery(display, *it, query)) {
+                found = *it;
+                return true;
+            }
         }
-    }
-    auto nameResult = RunCommand("xdotool search --onlyvisible --name " + ShellQuote(query) + " | tail -n 1");
-    if (nameResult.status == 0) {
-        return ParseWindowId(nameResult.output);
-    }
-    return std::nullopt;
-}
-
-std::map<std::string, std::string> ParseShellAssignments(const std::string& output) {
-    std::map<std::string, std::string> values;
-    std::istringstream in(output);
-    std::string line;
-    while (std::getline(in, line)) {
-        auto pos = line.find('=');
-        if (pos == std::string::npos) {
-            continue;
-        }
-        values[line.substr(0, pos)] = line.substr(pos + 1);
-    }
-    return values;
+        return false;
+    });
+    return found;
 }
 
 std::string WindowClass(unsigned long window) {
-    auto result = RunCommand("xprop -id " + std::to_string(window) + " WM_CLASS");
-    auto text = result.output;
-    auto first = text.find('"');
-    auto second = first == std::string::npos ? std::string::npos : text.find('"', first + 1);
-    auto third = second == std::string::npos ? std::string::npos : text.find('"', second + 1);
-    auto fourth = third == std::string::npos ? std::string::npos : text.find('"', third + 1);
-    if (third != std::string::npos && fourth != std::string::npos) {
-        return text.substr(third + 1, fourth - third - 1);
-    }
-    if (first != std::string::npos && second != std::string::npos) {
-        return text.substr(first + 1, second - first - 1);
-    }
-    return Trim(text);
-}
-
-std::optional<int> ParseIntStrict(const std::string& value) {
-    std::string trimmed = Trim(value);
-    int parsed = 0;
-    auto* begin = trimmed.data();
-    auto* end = begin + trimmed.size();
-    auto [ptr, ec] = std::from_chars(begin, end, parsed);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return parsed;
-}
-
-std::optional<double> ParseDoubleStrict(const std::string& value) {
-    std::string trimmed = Trim(value);
-    double parsed = 0.0;
-    auto* begin = trimmed.data();
-    auto* end = begin + trimmed.size();
-    auto [ptr, ec] = std::from_chars(begin, end, parsed);
-    if (ec != std::errc{} || ptr != end || !std::isfinite(parsed)) {
-        return std::nullopt;
-    }
-    return parsed;
-}
-
-int ToInt(const std::string& value, int fallback = 0) {
-    return ParseIntStrict(value).value_or(fallback);
-}
-
-double ToDouble(const std::string& value, double fallback = 0.0) {
-    return ParseDoubleStrict(value).value_or(fallback);
+    std::string result;
+    WithDisplay([&](Display* display) {
+        result = WindowClass(display, static_cast<Window>(window));
+        return !result.empty();
+    });
+    return result;
 }
 
 int WindowPid(unsigned long window) {
-    auto result = RunCommand("xdotool getwindowpid " + std::to_string(window));
-    if (result.status != 0) {
-        return -1;
-    }
-    return ToInt(result.output, -1);
+    int pid = -1;
+    WithDisplay([&](Display* display) {
+        pid = WindowPid(display, static_cast<Window>(window));
+        return pid > 0;
+    });
+    return pid;
 }
 
 std::string WindowName(unsigned long window) {
-    auto result = RunCommand("xdotool getwindowname " + std::to_string(window));
-    return Trim(result.output);
+    std::string result;
+    WithDisplay([&](Display* display) {
+        result = WindowName(display, static_cast<Window>(window));
+        return !result.empty();
+    });
+    return result;
 }
 
 Bounds WindowBounds(unsigned long window) {
-    auto result = RunCommand("xdotool getwindowgeometry --shell " + std::to_string(window));
-    if (result.status != 0) {
-        return {};
-    }
-    auto values = ParseShellAssignments(result.output);
-    auto x = ParseIntStrict(values["X"]);
-    auto y = ParseIntStrict(values["Y"]);
-    auto width = ParseIntStrict(values["WIDTH"]);
-    auto height = ParseIntStrict(values["HEIGHT"]);
-    if (!x || !y || !width || !height) {
-        return {};
-    }
-    return {
-        true,
-        static_cast<double>(*x),
-        static_cast<double>(*y),
-        static_cast<double>(*width),
-        static_cast<double>(*height)
-    };
+    Bounds result;
+    WithDisplay([&](Display* display) {
+        result = WindowBounds(display, static_cast<Window>(window));
+        return result.available;
+    });
+    return result;
 }
 
 WindowInfo WindowInfoForXWindow(unsigned long window) {
@@ -696,8 +858,17 @@ bool XWindowExists(const std::string& id) {
     if (id.empty()) {
         return false;
     }
-    auto result = RunCommand("xdotool getwindowname " + ShellQuote(id));
-    return result.status == 0;
+    auto window = ParseWindowId(id);
+    if (!window) {
+        return false;
+    }
+    bool exists = false;
+    WithDisplay([&](Display* display) {
+        XWindowAttributes attrs {};
+        exists = XGetWindowAttributes(display, static_cast<Window>(*window), &attrs) != 0;
+        return exists;
+    });
+    return exists;
 }
 
 std::string Lower(std::string value) {
@@ -725,13 +896,6 @@ std::string NormalizeKey(const std::string& key) {
     return key;
 }
 
-std::string ButtonName(const std::string& button) {
-    std::string lower = Lower(button);
-    if (lower == "right") return "3";
-    if (lower == "middle") return "2";
-    return "1";
-}
-
 unsigned int ButtonNumber(const std::string& button) {
     std::string lower = Lower(button);
     if (lower == "right" || lower == "secondary") return 3;
@@ -741,16 +905,6 @@ unsigned int ButtonNumber(const std::string& button) {
     if (lower == "wheel-left") return 6;
     if (lower == "wheel-right") return 7;
     return 1;
-}
-
-bool WithDisplay(const std::function<bool(Display*)>& fn) {
-    Display* display = XOpenDisplay(nullptr);
-    if (!display) {
-        return false;
-    }
-    bool ok = fn(display);
-    XCloseDisplay(display);
-    return ok;
 }
 
 bool XTestMoveMouse(double x, double y) {
@@ -795,6 +949,234 @@ bool XTestClick(double x, double y, const std::string& button, int clickCount) {
             XFlush(display);
             if (i + 1 < std::max(1, clickCount)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(70));
+            }
+        }
+        return true;
+    });
+}
+
+bool XSendClientMessage(Display* display, Window window, const char* messageName, long data0, long data1 = 0, long data2 = 0, long data3 = 0, long data4 = 0) {
+    Atom message = XInternAtom(display, messageName, False);
+    if (message == None) {
+        return false;
+    }
+    XEvent event {};
+    event.xclient.type = ClientMessage;
+    event.xclient.window = window;
+    event.xclient.message_type = message;
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = data0;
+    event.xclient.data.l[1] = data1;
+    event.xclient.data.l[2] = data2;
+    event.xclient.data.l[3] = data3;
+    event.xclient.data.l[4] = data4;
+    Window root = DefaultRootWindow(display);
+    int sent = XSendEvent(display, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &event);
+    XFlush(display);
+    return sent != 0;
+}
+
+bool XRequestCloseWindow(Window window) {
+    return WithDisplay([&](Display* display) {
+        return XSendClientMessage(display, window, "_NET_CLOSE_WINDOW", CurrentTime, 2);
+    });
+}
+
+void XRemoveWindowStates(Display* display, Window window) {
+    Atom maximizedVert = XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_VERT", True);
+    Atom maximizedHorz = XInternAtom(display, "_NET_WM_STATE_MAXIMIZED_HORZ", True);
+    Atom fullscreen = XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", True);
+    if (maximizedVert != None || maximizedHorz != None) {
+        XSendClientMessage(display, window, "_NET_WM_STATE", 0, maximizedVert, maximizedHorz, 1);
+    }
+    if (fullscreen != None) {
+        XSendClientMessage(display, window, "_NET_WM_STATE", 0, fullscreen, 0, 1);
+    }
+}
+
+bool XActivateWindow(Window window) {
+    return WithDisplay([&](Display* display) {
+        XRaiseWindow(display, window);
+        XSendClientMessage(display, window, "_NET_ACTIVE_WINDOW", 1, CurrentTime, 0);
+        XSetInputFocus(display, window, RevertToParent, CurrentTime);
+        XFlush(display);
+        return true;
+    });
+}
+
+bool XSetWindowBounds(Window window, const Bounds& bounds, bool activate) {
+    if (!bounds.available) {
+        return false;
+    }
+    return WithDisplay([&](Display* display) {
+        if (activate) {
+            XRaiseWindow(display, window);
+            XSendClientMessage(display, window, "_NET_ACTIVE_WINDOW", 1, CurrentTime, 0);
+            XSetInputFocus(display, window, RevertToParent, CurrentTime);
+        }
+        XRemoveWindowStates(display, window);
+        XMoveResizeWindow(
+            display,
+            window,
+            static_cast<int>(std::round(bounds.x)),
+            static_cast<int>(std::round(bounds.y)),
+            static_cast<unsigned int>(std::max(1, static_cast<int>(std::round(bounds.width)))),
+            static_cast<unsigned int>(std::max(1, static_cast<int>(std::round(bounds.height)))));
+        XFlush(display);
+        return true;
+    });
+}
+
+struct KeyStroke {
+    KeySym symbol = NoSymbol;
+    bool shift = false;
+};
+
+std::optional<KeyStroke> KeyStrokeForAscii(unsigned char ch) {
+    if (ch >= 'a' && ch <= 'z') return KeyStroke{static_cast<KeySym>(XK_a + (ch - 'a')), false};
+    if (ch >= 'A' && ch <= 'Z') return KeyStroke{static_cast<KeySym>(XK_a + (ch - 'A')), true};
+    if (ch >= '0' && ch <= '9') return KeyStroke{static_cast<KeySym>(XK_0 + (ch - '0')), false};
+    switch (ch) {
+        case ' ': return KeyStroke{XK_space, false};
+        case '\n': return KeyStroke{XK_Return, false};
+        case '\t': return KeyStroke{XK_Tab, false};
+        case '-': return KeyStroke{XK_minus, false};
+        case '_': return KeyStroke{XK_minus, true};
+        case '=': return KeyStroke{XK_equal, false};
+        case '+': return KeyStroke{XK_equal, true};
+        case '[': return KeyStroke{XK_bracketleft, false};
+        case '{': return KeyStroke{XK_bracketleft, true};
+        case ']': return KeyStroke{XK_bracketright, false};
+        case '}': return KeyStroke{XK_bracketright, true};
+        case '\\': return KeyStroke{XK_backslash, false};
+        case '|': return KeyStroke{XK_backslash, true};
+        case ';': return KeyStroke{XK_semicolon, false};
+        case ':': return KeyStroke{XK_semicolon, true};
+        case '\'': return KeyStroke{XK_apostrophe, false};
+        case '"': return KeyStroke{XK_apostrophe, true};
+        case ',': return KeyStroke{XK_comma, false};
+        case '<': return KeyStroke{XK_comma, true};
+        case '.': return KeyStroke{XK_period, false};
+        case '>': return KeyStroke{XK_period, true};
+        case '/': return KeyStroke{XK_slash, false};
+        case '?': return KeyStroke{XK_slash, true};
+        case '`': return KeyStroke{XK_grave, false};
+        case '~': return KeyStroke{XK_grave, true};
+        case '!': return KeyStroke{XK_1, true};
+        case '@': return KeyStroke{XK_2, true};
+        case '#': return KeyStroke{XK_3, true};
+        case '$': return KeyStroke{XK_4, true};
+        case '%': return KeyStroke{XK_5, true};
+        case '^': return KeyStroke{XK_6, true};
+        case '&': return KeyStroke{XK_7, true};
+        case '*': return KeyStroke{XK_8, true};
+        case '(': return KeyStroke{XK_9, true};
+        case ')': return KeyStroke{XK_0, true};
+        default: return std::nullopt;
+    }
+}
+
+std::optional<KeySym> KeySymForToken(const std::string& token) {
+    std::string lower = Lower(token);
+    if (lower == "ctrl" || lower == "control") return XK_Control_L;
+    if (lower == "alt" || lower == "option") return XK_Alt_L;
+    if (lower == "shift") return XK_Shift_L;
+    if (lower == "return" || lower == "enter") return XK_Return;
+    if (lower == "escape" || lower == "esc") return XK_Escape;
+    if (lower == "tab") return XK_Tab;
+    if (lower == "space") return XK_space;
+    if (lower == "backspace") return XK_BackSpace;
+    if (lower == "delete") return XK_Delete;
+    if (lower == "left") return XK_Left;
+    if (lower == "right") return XK_Right;
+    if (lower == "up") return XK_Up;
+    if (lower == "down") return XK_Down;
+    if (token.size() == 1) {
+        if (auto stroke = KeyStrokeForAscii(static_cast<unsigned char>(token[0]))) {
+            return stroke->symbol;
+        }
+    }
+    KeySym symbol = XStringToKeysym(token.c_str());
+    if (symbol == NoSymbol) {
+        symbol = XStringToKeysym(lower.c_str());
+    }
+    if (symbol == NoSymbol) {
+        return std::nullopt;
+    }
+    return symbol;
+}
+
+bool XKeyEvent(Display* display, KeySym symbol, bool pressed) {
+    KeyCode code = XKeysymToKeycode(display, symbol);
+    if (code == 0) {
+        return false;
+    }
+    return XTestFakeKeyEvent(display, code, pressed ? True : False, CurrentTime) != 0;
+}
+
+bool XSendHotkey(const std::vector<std::string>& keys, int holdMs) {
+    return WithDisplay([&](Display* display) {
+        std::vector<KeySym> modifiers;
+        std::optional<KeySym> mainKey;
+        for (const auto& key : keys) {
+            std::string normalized = NormalizeKey(key);
+            std::string lower = Lower(normalized);
+            if (lower == "ctrl" || lower == "control") {
+                modifiers.push_back(XK_Control_L);
+            } else if (lower == "alt" || lower == "option") {
+                modifiers.push_back(XK_Alt_L);
+            } else if (lower == "shift") {
+                modifiers.push_back(XK_Shift_L);
+            } else {
+                mainKey = KeySymForToken(normalized);
+            }
+        }
+        if (!mainKey) {
+            return false;
+        }
+        for (auto modifier : modifiers) {
+            if (!XKeyEvent(display, modifier, true)) return false;
+        }
+        bool ok = XKeyEvent(display, *mainKey, true);
+        if (holdMs > 0) {
+            XFlush(display);
+            std::this_thread::sleep_for(std::chrono::milliseconds(holdMs));
+        }
+        ok = XKeyEvent(display, *mainKey, false) && ok;
+        for (auto it = modifiers.rbegin(); it != modifiers.rend(); ++it) {
+            ok = XKeyEvent(display, *it, false) && ok;
+        }
+        XFlush(display);
+        return ok;
+    });
+}
+
+bool XTypeText(const std::string& text, int holdMs) {
+    return WithDisplay([&](Display* display) {
+        for (unsigned char ch : text) {
+            auto stroke = KeyStrokeForAscii(ch);
+            if (!stroke) {
+                return false;
+            }
+            bool ok = true;
+            if (stroke->shift) {
+                ok = XKeyEvent(display, XK_Shift_L, true);
+            }
+            ok = XKeyEvent(display, stroke->symbol, true) && ok;
+            if (holdMs > 0) {
+                XFlush(display);
+                std::this_thread::sleep_for(std::chrono::milliseconds(holdMs));
+            }
+            ok = XKeyEvent(display, stroke->symbol, false) && ok;
+            if (stroke->shift) {
+                ok = XKeyEvent(display, XK_Shift_L, false) && ok;
+            }
+            XFlush(display);
+            if (!ok) {
+                return false;
+            }
+            if (holdMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(holdMs, 12)));
             }
         }
         return true;
@@ -964,7 +1346,7 @@ bool CloseWindow(const std::string& id) {
     }
     bool closeRequested = useKWin
         ? KWinCloseWindow(id)
-        : RunGuiOk("xdotool windowclose " + ShellQuote(id));
+        : (ParseWindowId(id) ? XRequestCloseWindow(static_cast<Window>(*ParseWindowId(id))) : false);
     if (!closeRequested) {
         return false;
     }
@@ -986,12 +1368,7 @@ bool SetFrontmostWindowBounds(const Bounds& bounds) {
     if (!window || !bounds.available) {
         return false;
     }
-    RunOk("wmctrl -ir " + std::to_string(*window) + " -b remove,maximized_vert,maximized_horz,fullscreen");
-    return RunOk("wmctrl -ir " + std::to_string(*window) + " -e 0," +
-                 std::to_string(static_cast<int>(bounds.x)) + "," +
-                 std::to_string(static_cast<int>(bounds.y)) + "," +
-                 std::to_string(static_cast<int>(bounds.width)) + "," +
-                 std::to_string(static_cast<int>(bounds.height)));
+    return XSetWindowBounds(static_cast<Window>(*window), bounds, false);
 }
 bool SetWindowBoundsForPid(int pid, const Bounds& bounds) {
     if (IsWaylandSession()) {
@@ -1004,13 +1381,7 @@ bool SetWindowBoundsForPid(int pid, const Bounds& bounds) {
     if (!window || !bounds.available) {
         return false;
     }
-    RunOk("xdotool windowactivate --sync " + std::to_string(*window));
-    RunOk("wmctrl -ir " + std::to_string(*window) + " -b remove,maximized_vert,maximized_horz,fullscreen");
-    return RunOk("wmctrl -ir " + std::to_string(*window) + " -e 0," +
-                 std::to_string(static_cast<int>(bounds.x)) + "," +
-                 std::to_string(static_cast<int>(bounds.y)) + "," +
-                 std::to_string(static_cast<int>(bounds.width)) + "," +
-                 std::to_string(static_cast<int>(bounds.height)));
+    return XSetWindowBounds(static_cast<Window>(*window), bounds, true);
 }
 int GetFrontmostAppPid() {
     auto app = GetFrontmostApp();
@@ -1021,7 +1392,7 @@ bool ActivateAppByPid(int pid) {
         return false;
     }
     auto window = WindowIdForPid(pid);
-    return window ? RunOk("xdotool windowactivate --sync " + std::to_string(*window)) : false;
+    return window ? XActivateWindow(static_cast<Window>(*window)) : false;
 }
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     if (IsWaylandSession()) {
@@ -1039,7 +1410,7 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
         return true;
     }
     if (auto window = WindowIdForAppQuery(query)) {
-        if (RunOk("xdotool windowactivate --sync " + std::to_string(*window))) {
+        if (XActivateWindow(static_cast<Window>(*window))) {
             appInfo = GetFrontmostApp();
             return true;
         }
@@ -1055,7 +1426,7 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     for (int i = 0; i < 50; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (auto window = WindowIdForAppQuery(query)) {
-            RunOk("xdotool windowactivate --sync " + std::to_string(*window));
+            XActivateWindow(static_cast<Window>(*window));
             appInfo = GetFrontmostApp();
             return appInfo.available;
         }
@@ -1136,10 +1507,22 @@ void GetCursorPosition(double& x, double& y) {
         y = gWaylandCursorY.value_or(0.0);
         return;
     }
-    auto result = RunCommand("xdotool getmouselocation --shell");
-    auto values = ParseShellAssignments(result.output);
-    x = ToDouble(values["X"]);
-    y = ToDouble(values["Y"]);
+    WithDisplay([&](Display* display) {
+        Window root = DefaultRootWindow(display);
+        Window returnedRoot = None;
+        Window returnedChild = None;
+        int rootX = 0;
+        int rootY = 0;
+        int winX = 0;
+        int winY = 0;
+        unsigned int mask = 0;
+        bool ok = XQueryPointer(display, root, &returnedRoot, &returnedChild, &rootX, &rootY, &winX, &winY, &mask) != 0;
+        if (ok) {
+            x = rootX;
+            y = rootY;
+        }
+        return ok;
+    });
 }
 void MoveMouse(double x, double y) {
     if (IsWaylandSession()) {
@@ -1376,7 +1759,7 @@ bool SendHotkey(const std::vector<std::string>& keys, int holdMs) {
         }
         return ok;
     }
-    bool ok = RunOk("xdotool key --clearmodifiers " + ShellQuote(chord));
+    bool ok = XSendHotkey(keys, holdMs);
     if (holdMs > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(holdMs));
     }
@@ -1387,7 +1770,7 @@ bool TypeText(const std::string& text, int holdMs) {
     if (IsWaylandSession()) {
         return RunWaylandInput({"type", text, std::to_string(std::max(1, holdMs))});
     }
-    return RunOk("xdotool type --clearmodifiers --delay " + std::to_string(std::max(0, holdMs)) + " -- " + ShellQuote(text));
+    return XTypeText(text, std::max(0, holdMs));
 }
 bool PasteText(const std::string& text) {
     if (IsWaylandSession()) {
