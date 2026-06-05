@@ -15,8 +15,8 @@
 #include <chrono>
 #include <cctype>
 #include <charconv>
+#include <cerrno>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -31,7 +31,7 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <sys/file.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace ComputerCpp::Platform {
@@ -40,11 +40,6 @@ namespace {
 
 std::optional<double> gWaylandCursorX;
 std::optional<double> gWaylandCursorY;
-
-struct CommandResult {
-    int status = -1;
-    std::string output;
-};
 
 std::string Trim(std::string value) {
     while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
@@ -56,121 +51,88 @@ std::string Trim(std::string value) {
     return value;
 }
 
-std::string ShellQuote(const std::string& value) {
-    std::string out = "'";
-    for (char ch : value) {
-        if (ch == '\'') {
-            out += "'\\''";
-        } else {
-            out += ch;
+std::vector<char*> ExecArgv(const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& arg : args) {
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    }
+    argv.push_back(nullptr);
+    return argv;
+}
+
+void RedirectStandardStreamsToNull() {
+    int fd = ::open("/dev/null", O_RDWR);
+    if (fd < 0) {
+        return;
+    }
+    ::dup2(fd, STDIN_FILENO);
+    ::dup2(fd, STDOUT_FILENO);
+    ::dup2(fd, STDERR_FILENO);
+    if (fd > STDERR_FILENO) {
+        ::close(fd);
+    }
+}
+
+void CloseNonStandardFileDescriptors() {
+    long maxFd = ::sysconf(_SC_OPEN_MAX);
+    if (maxFd < 0) {
+        maxFd = 4096;
+    }
+    maxFd = std::min<long>(maxFd, 65536);
+    for (int fd = STDERR_FILENO + 1; fd < maxFd; ++fd) {
+        ::close(fd);
+    }
+}
+
+bool SpawnDetached(const std::vector<std::string>& args) {
+    if (args.empty() || args.front().empty()) {
+        return false;
+    }
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        return false;
+    }
+    if (pid == 0) {
+        ::setsid();
+        RedirectStandardStreamsToNull();
+        CloseNonStandardFileDescriptors();
+        auto argv = ExecArgv(args);
+        ::execvp(argv[0], argv.data());
+        _exit(127);
+    }
+    return true;
+}
+
+int RunProcessWait(const std::vector<std::string>& args) {
+    if (args.empty() || args.front().empty()) {
+        return 127;
+    }
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        return 127;
+    }
+    if (pid == 0) {
+        RedirectStandardStreamsToNull();
+        CloseNonStandardFileDescriptors();
+        auto argv = ExecArgv(args);
+        ::execvp(argv[0], argv.data());
+        _exit(127);
+    }
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return 127;
         }
     }
-    out += "'";
-    return out;
-}
-
-std::string JsonStringLiteral(const std::string& value) {
-    return json(value).dump();
-}
-
-CommandResult RunCommand(const std::string& command) {
-    CommandResult result;
-    std::array<char, 4096> buffer {};
-    FILE* pipe = popen((command + " 2>/dev/null").c_str(), "r");
-    if (!pipe) {
-        return result;
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
     }
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
-        result.output += buffer.data();
-    }
-    result.status = pclose(pipe);
-    return result;
-}
-
-bool RunOk(const std::string& command) {
-    return RunCommand(command + " >/dev/null").status == 0;
-}
-
-std::string GuiSessionEnvPrefix() {
-    return "if command -v systemctl >/dev/null 2>&1; then "
-           "__ac_env=$(systemctl --user show-environment 2>/dev/null | "
-           "grep -E '^(DISPLAY|WAYLAND_DISPLAY|XDG_CURRENT_DESKTOP|XDG_SESSION_TYPE|DBUS_SESSION_BUS_ADDRESS|XAUTHORITY)=' | "
-           "sed 's/^/export /'); eval \"$__ac_env\"; fi; ";
-}
-
-CommandResult RunGuiCommand(const std::string& command) {
-    return RunCommand(GuiSessionEnvPrefix() + command);
-}
-
-bool RunGuiOk(const std::string& command) {
-    return RunOk(GuiSessionEnvPrefix() + command);
-}
-
-std::string RunKWinScript(const std::string& scriptBody) {
-    auto qdbus = RunGuiCommand("command -v qdbus6");
-    if (qdbus.status != 0 || Trim(qdbus.output).empty()) {
-        return "";
-    }
-    auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    std::string marker = "COMPUTER_CPP_KWIN_" + std::to_string(::getpid()) + "_" + std::to_string(stamp);
-    std::string plugin = "computer.cpp-kwin-" + std::to_string(::getpid()) + "-" + std::to_string(stamp);
-    std::filesystem::path scriptPath = std::filesystem::temp_directory_path() /
-        ("computer.cpp-kwin-" + std::to_string(::getpid()) + "-" + std::to_string(stamp) + ".js");
-    {
-        std::ofstream script(scriptPath);
-        if (!script) {
-            return "";
-        }
-        script << "const __agentComputerMarker = " << JsonStringLiteral(marker) << ";\n";
-        script << scriptBody << "\n";
-    }
-    RunGuiOk("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript " + ShellQuote(plugin));
-    bool loaded = RunGuiOk("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript " +
-        ShellQuote(scriptPath.string()) + " " + ShellQuote(plugin));
-    if (!loaded) {
-        std::filesystem::remove(scriptPath);
-        return "";
-    }
-    RunGuiOk("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.start");
-    std::this_thread::sleep_for(std::chrono::milliseconds(350));
-    std::string sedExpr = "s/^.*" + marker + " //p";
-    auto result = RunGuiCommand("journalctl --user -n 500 --no-pager | sed -n " +
-        ShellQuote(sedExpr) + " | tail -1");
-    RunGuiOk("qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript " + ShellQuote(plugin));
-    std::filesystem::remove(scriptPath);
-    return Trim(result.output);
+    return 127;
 }
 
 std::optional<std::pair<double, double>> KWinCursorPosition() {
-    std::string output = RunKWinScript(
-        "const p = workspace.cursorPos;\n"
-        "print(__agentComputerMarker + ' ' + p.x + ' ' + p.y);");
-    if (output.empty()) {
-        return std::nullopt;
-    }
-    std::istringstream in(output);
-    double x = 0.0;
-    double y = 0.0;
-    if (!(in >> x >> y)) {
-        return std::nullopt;
-    }
-    return std::pair<double, double>{x, y};
-}
-
-std::string StripAnsi(std::string value) {
-    std::string out;
-    for (size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '\x1b' && i + 1 < value.size() && value[i + 1] == '[') {
-            i += 2;
-            while (i < value.size() && !std::isalpha(static_cast<unsigned char>(value[i]))) {
-                ++i;
-            }
-            continue;
-        }
-        out.push_back(value[i]);
-    }
-    return out;
+    return std::nullopt;
 }
 
 bool EnvEquals(const char* name, const std::string& expected) {
@@ -189,8 +151,7 @@ bool IsWaylandSession() {
     if (EnvEquals("XDG_SESSION_TYPE", "wayland") || std::getenv("WAYLAND_DISPLAY")) {
         return true;
     }
-    auto result = RunCommand("systemctl --user show-environment 2>/dev/null | grep -E '^(XDG_SESSION_TYPE=wayland|WAYLAND_DISPLAY=)'");
-    return result.status == 0 && !Trim(result.output).empty();
+    return false;
 }
 
 double WaylandScrollScale() {
@@ -242,11 +203,6 @@ std::string FindWaylandInputHelper() {
             return sibling.string();
         }
     }
-    auto result = RunGuiCommand("command -v computer.cpp-wayland-input");
-    std::string path = Trim(result.output);
-    if (result.status == 0 && !path.empty()) {
-        return path;
-    }
     return {};
 }
 
@@ -255,11 +211,11 @@ bool RunWaylandInput(const std::vector<std::string>& args) {
     if (helper.empty()) {
         return false;
     }
-    std::string command = ShellQuote(helper);
-    for (const auto& arg : args) {
-        command += " " + ShellQuote(arg);
-    }
-    return RunGuiOk(command);
+    std::vector<std::string> command;
+    command.reserve(args.size() + 1);
+    command.push_back(helper);
+    command.insert(command.end(), args.begin(), args.end());
+    return RunProcessWait(command) == 0;
 }
 
 std::string TempPngPath(const std::string& label) {
@@ -268,82 +224,18 @@ std::string TempPngPath(const std::string& label) {
             ("computer.cpp-" + label + "-" + std::to_string(stamp) + ".png")).string();
 }
 
-std::string TempRawPath(const std::string& label) {
-    auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    return (std::filesystem::temp_directory_path() /
-            ("computer.cpp-" + label + "-" + std::to_string(stamp) + ".rgb")).string();
-}
-
-std::string ImageMagickCommand() {
-    auto magick = RunGuiCommand("command -v magick");
-    if (magick.status == 0 && !Trim(magick.output).empty()) {
-        return Trim(magick.output);
-    }
-    auto convert = RunGuiCommand("command -v convert");
-    if (convert.status == 0 && !Trim(convert.output).empty()) {
-        return Trim(convert.output);
-    }
-    return {};
-}
-
-bool WithSpectacleLock(const std::function<bool()>& fn) {
-    int fd = ::open("/tmp/computer.cpp-spectacle.lock", O_CREAT | O_RDWR, 0600);
-    if (fd < 0) {
-        return fn();
-    }
-    if (::flock(fd, LOCK_EX) != 0) {
-        ::close(fd);
-        return fn();
-    }
-    bool ok = fn();
-    ::flock(fd, LOCK_UN);
-    ::close(fd);
-    return ok;
-}
-
 bool CaptureWaylandFull(const std::string& filePath) {
-    for (int attempt = 0; attempt < 5; ++attempt) {
-        bool ok = WithSpectacleLock([&]() {
-            std::error_code removeEc;
-            std::filesystem::remove(filePath, removeEc);
-            if (!RunGuiOk("spectacle -b -n -f -o " + ShellQuote(filePath))) {
-                return false;
-            }
-            std::error_code ec;
-            return std::filesystem::exists(filePath, ec) && std::filesystem::file_size(filePath, ec) > 0;
-        });
-        if (ok) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(120 + attempt * 80));
-    }
+    (void)filePath;
     return false;
 }
 
 bool TransformImage(const std::string& src, const std::string& dst, const Bounds& crop, int maxDimension) {
-    std::string tool = ImageMagickCommand();
-    if (tool.empty()) {
-        if (!crop.available && maxDimension <= 0 && src != dst) {
-            std::error_code ec;
-            std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
-            return !ec;
-        }
-        return src == dst;
+    if (!crop.available && maxDimension <= 0 && src != dst) {
+        std::error_code ec;
+        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
+        return !ec;
     }
-    std::string command = ShellQuote(tool) + " " + ShellQuote(src);
-    if (crop.available && crop.width > 1.0 && crop.height > 1.0) {
-        int x = std::max(0, static_cast<int>(std::round(crop.x)));
-        int y = std::max(0, static_cast<int>(std::round(crop.y)));
-        int width = std::max(1, static_cast<int>(std::round(crop.width)));
-        int height = std::max(1, static_cast<int>(std::round(crop.height)));
-        command += " -crop " + ShellQuote(std::to_string(width) + "x" + std::to_string(height) + "+" + std::to_string(x) + "+" + std::to_string(y));
-        command += " +repage";
-    }
-    if (maxDimension > 0) {
-        command += " -resize " + ShellQuote(std::to_string(maxDimension) + "x" + std::to_string(maxDimension) + ">");
-    }
-    command += " " + ShellQuote(dst);
-    return RunGuiOk(command);
+    return src == dst;
 }
 
 bool SaveWaylandScreenshot(const std::string& filePath, Bounds crop = {}, int maxDimension = 0) {
@@ -358,63 +250,7 @@ bool SaveWaylandScreenshot(const std::string& filePath, Bounds crop = {}, int ma
 }
 
 std::optional<Bounds> KScreenEnabledGeometry() {
-    auto result = RunGuiCommand("kscreen-doctor -o");
-    if (result.status != 0 || result.output.empty()) {
-        return std::nullopt;
-    }
-    std::istringstream in(StripAnsi(result.output));
-    std::string line;
-    bool enabled = false;
-    bool any = false;
-    int left = 0;
-    int top = 0;
-    int right = 0;
-    int bottom = 0;
-    while (std::getline(in, line)) {
-        if (line.find("Output:") != std::string::npos) {
-            enabled = false;
-            continue;
-        }
-        if (line.find("enabled") != std::string::npos) {
-            enabled = true;
-            continue;
-        }
-        if (line.find("disabled") != std::string::npos) {
-            enabled = false;
-            continue;
-        }
-        auto pos = line.find("Geometry:");
-        if (!enabled || pos == std::string::npos) {
-            continue;
-        }
-        std::string rest = line.substr(pos + 9);
-        for (char& ch : rest) {
-            if (ch == ',' || ch == 'x') ch = ' ';
-        }
-        std::istringstream values(rest);
-        int x = 0;
-        int y = 0;
-        int width = 0;
-        int height = 0;
-        if (values >> x >> y >> width >> height) {
-            if (!any) {
-                left = x;
-                top = y;
-                right = x + width;
-                bottom = y + height;
-                any = true;
-            } else {
-                left = std::min(left, x);
-                top = std::min(top, y);
-                right = std::max(right, x + width);
-                bottom = std::max(bottom, y + height);
-            }
-        }
-    }
-    if (!any || right <= left || bottom <= top) {
-        return std::nullopt;
-    }
-    return Bounds{true, static_cast<double>(left), static_cast<double>(top), static_cast<double>(right - left), static_cast<double>(bottom - top)};
+    return std::nullopt;
 }
 
 std::optional<unsigned long> ParseWindowId(const std::string& value) {
@@ -757,89 +593,13 @@ WindowInfo WindowInfoForXWindow(unsigned long window) {
     return info;
 }
 
-WindowInfo WindowInfoFromKWinJson(const json& item) {
-    WindowInfo info;
-    info.available = true;
-    info.id = item.value("id", item.value("internal_id", ""));
-    info.title = item.value("title", item.value("caption", ""));
-    info.appClass = item.value("appClass", item.value("resourceClass", ""));
-    info.pid = item.value("pid", -1);
-    info.active = item.value("active", false);
-    info.bounds = {
-        true,
-        item.value("x", 0.0),
-        item.value("y", 0.0),
-        item.value("width", 0.0),
-        item.value("height", 0.0)
-    };
-    return info;
-}
-
 std::vector<WindowInfo> QueryKWinWindows() {
-    const std::string script = R"JS(
-try {
-  const wins = workspace.windowList ? workspace.windowList() : workspace.clientList();
-  const data = wins.map(w => ({
-    id: String(w.internalId || ""),
-    title: String(w.caption || ""),
-    appClass: String(w.resourceClass || ""),
-    pid: w.pid || -1,
-    active: workspace.activeWindow === w,
-    x: w.x || 0,
-    y: w.y || 0,
-    width: w.width || 0,
-    height: w.height || 0
-  }));
-  print(__agentComputerMarker + " " + JSON.stringify(data));
-} catch (e) {
-  print(__agentComputerMarker + " " + JSON.stringify({ok:false,error:String(e)}));
-}
-)JS";
-    std::string output = RunKWinScript(script);
-    if (output.empty()) {
-        return {};
-    }
-    auto parsed = json::parse(output, nullptr, false);
-    if (!parsed.is_array()) {
-        return {};
-    }
-    std::vector<WindowInfo> windows;
-    for (const auto& item : parsed) {
-        auto info = WindowInfoFromKWinJson(item);
-        if (!info.id.empty()) {
-            windows.push_back(std::move(info));
-        }
-    }
-    return windows;
+    return {};
 }
 
 bool KWinCloseWindow(const std::string& id) {
-    std::string script = R"JS(
-try {
-  const target = )JS" + JsonStringLiteral(id) + R"JS(;
-  const wins = workspace.windowList ? workspace.windowList() : workspace.clientList();
-  let found = false;
-  for (const w of wins) {
-    if (String(w.internalId || "") === target) {
-      found = true;
-      w.closeWindow();
-      break;
-    }
-  }
-  print(__agentComputerMarker + " " + JSON.stringify({ok:found, id:target}));
-} catch (e) {
-  print(__agentComputerMarker + " " + JSON.stringify({ok:false,error:String(e)}));
-}
-)JS";
-    std::string output = RunKWinScript(script);
-    if (output.empty()) {
-        return false;
-    }
-    auto parsed = json::parse(output, nullptr, false);
-    if (!parsed.is_object()) {
-        return false;
-    }
-    return parsed.value("ok", false);
+    (void)id;
+    return false;
 }
 
 bool KWinWindowExists(const std::string& id) {
@@ -1398,13 +1158,13 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     if (IsWaylandSession()) {
         std::string lower = Lower(query);
         if (lower.find("chrome") != std::string::npos) {
-            if (!RunGuiOk("nohup google-chrome >/dev/null 2>&1 &")) {
-                RunGuiOk("nohup chromium >/dev/null 2>&1 &");
-            }
+            SpawnDetached({"google-chrome"});
+            SpawnDetached({"chromium"});
         } else if (lower.find("firefox") != std::string::npos) {
-            RunGuiOk("nohup firefox >/dev/null 2>&1 &");
+            SpawnDetached({"firefox"});
+            SpawnDetached({"firefox-esr"});
         } else {
-            RunGuiOk("nohup " + ShellQuote(query) + " >/dev/null 2>&1 &");
+            SpawnDetached({query});
         }
         appInfo = {};
         return true;
@@ -1420,8 +1180,11 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     if (lower.find("firefox") != std::string::npos) {
         command = "firefox-esr";
     }
-    if (!RunOk("nohup " + command + " >/dev/null 2>&1 &")) {
+    if (!SpawnDetached({command})) {
         return false;
+    }
+    if (command == "firefox-esr") {
+        SpawnDetached({"firefox"});
     }
     for (int i = 0; i < 50; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1448,24 +1211,26 @@ bool OpenUrl(const std::string& url, const std::string& browser, bool newWindow,
     if (url.empty()) {
         return false;
     }
-    std::string command;
     std::string chosen = browser.empty() ? "firefox" : browser;
-    if (chosen.find('/') != std::string::npos) {
-        command = ShellQuote(chosen);
-    } else {
-        command = chosen;
+    if (chosen == "firefox") {
+        chosen = "firefox-esr";
     }
+    std::vector<std::string> args{chosen};
     if (newInstance && LooksLikeFirefoxBrowser(chosen)) {
-        command += " --new-instance";
+        args.push_back("--new-instance");
     }
     if (newWindow) {
-        command += " --new-window";
+        args.push_back("--new-window");
     }
-    command += " " + ShellQuote(url) + " >/tmp/computer.cpp-firefox.log 2>&1 &";
-    if (IsWaylandSession()) {
-        return RunGuiOk("nohup " + command);
+    args.push_back(url);
+    if (SpawnDetached(args)) {
+        return true;
     }
-    return RunOk("nohup " + command);
+    if (chosen == "firefox-esr") {
+        args[0] = "firefox";
+        return SpawnDetached(args);
+    }
+    return false;
 }
 void ActivateAgentApp() {}
 void DeactivateAgentApp() {}
@@ -1774,29 +1539,22 @@ bool TypeText(const std::string& text, int holdMs) {
 }
 bool PasteText(const std::string& text) {
     if (IsWaylandSession()) {
-        return RunGuiOk("qdbus6 org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents " + ShellQuote(text)) &&
-               RunWaylandInput({"key", "ctrl+v"});
+        return false;
     }
     return TypeText(text, 1);
 }
 std::vector<std::string> GetSelectAllHotkey() { return {"control", "a"}; }
 bool ReadClipboardText(std::string& text) {
+    (void)text;
     if (IsWaylandSession()) {
-        auto result = RunGuiCommand("qdbus6 org.kde.klipper /klipper org.kde.klipper.klipper.getClipboardContents");
-        if (result.status != 0) {
-            return false;
-        }
-        text = result.output;
-        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
-            text.pop_back();
-        }
-        return true;
+        return false;
     }
     return false;
 }
 bool WriteClipboardText(const std::string& text) {
+    (void)text;
     if (IsWaylandSession()) {
-        return RunGuiOk("qdbus6 org.kde.klipper /klipper org.kde.klipper.klipper.setClipboardContents " + ShellQuote(text));
+        return false;
     }
     return false;
 }
@@ -1840,25 +1598,7 @@ std::vector<uint8_t> CaptureScreenRaw(int& width, int& height) {
     if (IsWaylandSession()) {
         width = 0;
         height = 0;
-        std::string png = TempPngPath("raw");
-        std::string raw = TempRawPath("raw");
-        std::vector<uint8_t> bytes;
-        std::string tool = ImageMagickCommand();
-        if (!tool.empty() && CaptureWaylandFull(png) && LinuxPng::ReadPngSize(png, width, height)) {
-            if (RunGuiOk(ShellQuote(tool) + " " + ShellQuote(png) + " -depth 8 rgb:" + ShellQuote(raw))) {
-                std::ifstream in(raw, std::ios::binary);
-                bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-                if (bytes.size() != static_cast<size_t>(width * height * 3)) {
-                    bytes.clear();
-                    width = 0;
-                    height = 0;
-                }
-            }
-        }
-        std::error_code ec;
-        std::filesystem::remove(png, ec);
-        std::filesystem::remove(raw, ec);
-        return bytes;
+        return {};
     }
     std::vector<uint8_t> rgb;
     if (!CaptureRootRgb(rgb, width, height)) {

@@ -10,6 +10,7 @@ set(COMPUTER_CPP_CODE_SIGN_IDENTITY "auto" CACHE STRING "macOS code signing iden
 option(COMPUTER_CPP_CODE_SIGN_APP "Code sign the macOS ComputerCpp.app bundle after building" ON)
 option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project targets" ON)
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
+option(COMPUTER_CPP_BUILD_GUI "Build the ComputerCpp desktop tray application when wxWidgets is available" ON)
 
 function(computer_cpp_target_defaults target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
@@ -36,7 +37,7 @@ function(computer_cpp_target_defaults target_name)
 endfunction()
 
 find_package(wxWidgets QUIET COMPONENTS core base adv)
-if(wxWidgets_FOUND)
+if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     include(${wxWidgets_USE_FILE})
 endif()
 find_package(SQLite3 REQUIRED)
@@ -261,7 +262,7 @@ if(TARGET computer.cpp-wayland-input)
     install(TARGETS computer.cpp-wayland-input RUNTIME DESTINATION bin)
 endif()
 
-if(wxWidgets_FOUND)
+if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     add_executable(ComputerCpp MACOSX_BUNDLE
         src/app/Main.cpp
         src/app/TrayIcon.cpp
