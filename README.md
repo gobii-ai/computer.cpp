@@ -507,7 +507,7 @@ signing. Ad-hoc signing is not recommended for macOS permission onboarding.
 Launch the tray app from the build directory:
 
 ```bash
-open -n build/debug/ComputerCpp.app
+open -n build/debug/computer.cpp
 ```
 
 Use the tray menu's `Permissions` item to grant and verify macOS permissions.
