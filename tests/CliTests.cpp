@@ -2088,6 +2088,7 @@ void TestMicroAgentLuaDryRun() {
     assert(data["ok"] == true);
     assert(data["rows"] == 1);
     assert(data["request_count"] == 1);
+    assert(data["first_tool_choice"] == "required");
     assert(data["first_tool_type"] == "function");
     assert(data["first_tool_name"] == "report_rows");
     assert(data["first_message_image_type"] == "image_path");

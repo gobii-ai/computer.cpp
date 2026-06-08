@@ -2317,7 +2317,7 @@ function MicroAgent:run_loop(ctx, opts)
       max_tokens = self.spec.max_tokens or 1200,
       messages = messages,
       tools = model_tools,
-      tool_choice = "auto",
+      tool_choice = opts.tool_choice or self.spec.tool_choice or "auto",
     }
     if opts.chat_template_kwargs ~= nil then
       request.chat_template_kwargs = opts.chat_template_kwargs
@@ -2472,6 +2472,7 @@ function ac.micro_agent.run(ctx, spec)
     max_steps = spec.max_steps or 12,
     max_images = spec.max_images or 3,
     temperature = spec.temperature or 0,
+    tool_choice = spec.tool_choice,
     chat_template_kwargs = spec.chat_template_kwargs or { enable_thinking = false },
     tools = spec.tools or {},
   }):run_loop(ctx, {
@@ -2479,6 +2480,7 @@ function ac.micro_agent.run(ctx, spec)
     state = spec.state,
     user_content = spec.user_content,
     max_steps = spec.max_steps,
+    tool_choice = spec.tool_choice,
     on_tool_call = spec.on_tool_call,
   })
   if result.ok then
