@@ -89,11 +89,22 @@ end
 
 return {
   baseline = run_case("baseline", {}),
+  enable_thinking_false = run_case("enable_thinking_false", {
+    chat_template_kwargs = { enable_thinking = false },
+  }),
+  enable_thinking_false_short = run_case("enable_thinking_false_short", {
+    max_tokens = 220,
+    chat_template_kwargs = { enable_thinking = false },
+  }),
   preserve_thinking = run_case("preserve_thinking", {
     chat_template_kwargs = { preserve_thinking = true },
   }),
   no_think_prompt = run_case("no_think_prompt", {
     system_suffix = "/no_think",
+  }),
+  no_think_enable_false = run_case("no_think_enable_false", {
+    system_suffix = "/no_think",
+    chat_template_kwargs = { enable_thinking = false },
   }),
   preserve_no_think = run_case("preserve_no_think", {
     system_suffix = "/no_think",
