@@ -15,6 +15,8 @@ end
 local function run_missing_tool_call_case()
   local requests = {}
   local retry_message = ""
+  local preserved_assistant = ""
+  local preserved_empty_tool_calls = true
   ac.llm.chat = function(request)
     requests[#requests + 1] = request
     if #requests == 1 then
@@ -27,6 +29,12 @@ local function run_missing_tool_call_case()
       }
     end
     retry_message = request.messages[#request.messages].content
+    for _, message in ipairs(request.messages) do
+      if message.role == "assistant" then
+        preserved_assistant = message.content or ""
+        preserved_empty_tool_calls = type(message.tool_calls) == "table" and #message.tool_calls == 0
+      end
+    end
     return {
       message = {
         role = "assistant",
@@ -64,6 +72,8 @@ local function run_missing_tool_call_case()
     reason = result.result and result.result.reason or "",
     request_count = #requests,
     retry_message = retry_message,
+    preserved_assistant = preserved_assistant,
+    preserved_empty_tool_calls = preserved_empty_tool_calls,
     trace_count = #trace,
   }
 end

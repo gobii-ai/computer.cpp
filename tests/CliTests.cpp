@@ -2113,6 +2113,8 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
     assert(data["missing"]["reason"] == "recovered");
     assert(data["missing"]["request_count"] == 2);
     assert(data["missing"]["retry_message"].get<std::string>().find("exactly one available tool") != std::string::npos);
+    assert(data["missing"]["preserved_assistant"] == "I should inspect the screen before continuing.");
+    assert(data["missing"]["preserved_empty_tool_calls"] == false);
     assert(data["missing"]["trace_count"] >= 3);
 
     assert(data["pseudo"]["ok"] == false);

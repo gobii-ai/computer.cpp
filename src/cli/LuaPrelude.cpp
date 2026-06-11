@@ -2237,6 +2237,24 @@ local function trim_image_messages(messages, max_images)
   return messages
 end
 
+local function preserve_assistant_retry_message(message)
+  if type(message) ~= "table" then
+    return { role = "assistant", content = "" }
+  end
+  local preserved = {}
+  for key, value in pairs(message) do
+    preserved[key] = value
+  end
+  preserved.role = preserved.role or "assistant"
+  if preserved.content == nil then
+    preserved.content = ""
+  end
+  if type(preserved.tool_calls) == "table" and #preserved.tool_calls == 0 then
+    preserved.tool_calls = nil
+  end
+  return preserved
+end
+
 function MicroAgent:dispatch_tool(ctx, opts, parsed)
   local tool = self.tool_map[parsed.name]
   if not tool then
@@ -2348,10 +2366,7 @@ function MicroAgent:run_loop(ctx, opts)
       missing_tool_replies = missing_tool_replies + 1
       log_line("agent", "missing tool call", { name = self.name, step = step })
       if missing_tool_replies <= max_missing_tool_replies and step < max_steps then
-        messages[#messages + 1] = {
-          role = "assistant",
-          content = type(message.content) == "string" and message.content or "",
-        }
+        messages[#messages + 1] = preserve_assistant_retry_message(message)
         messages[#messages + 1] = {
           role = "user",
           content = "Your previous response did not call a tool. Continue by calling exactly one available tool and do not answer in prose. Available tools: " .. table.concat(tool_names, ", "),
