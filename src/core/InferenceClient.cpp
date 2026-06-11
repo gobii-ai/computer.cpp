@@ -155,6 +155,8 @@ AssistantMessage ExtractAssistantMessage(const json& response) {
         }
         if (out.message.contains("reasoning_content") && out.message["reasoning_content"].is_string()) {
             out.reasoningContent = out.message["reasoning_content"].get<std::string>();
+        } else if (out.message.contains("reasoning") && out.message["reasoning"].is_string()) {
+            out.reasoningContent = out.message["reasoning"].get<std::string>();
         }
         return out;
     }

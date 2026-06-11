@@ -498,6 +498,7 @@ local function reasoning_char_count(message)
   if type(message) ~= "table" then return 0 end
   if type(message.reasoning_content) == "string" then return #message.reasoning_content end
   if type(message.reasoningContent) == "string" then return #message.reasoningContent end
+  if type(message.reasoning) == "string" then return #message.reasoning end
   return 0
 end
 
@@ -1810,6 +1811,9 @@ function ac.llm.chat(spec)
 
   local data = result.data or result
   local message = data.message or {}
+  if type(message) == "table" and message.finish_reason == nil then
+    message.finish_reason = data.finishReason
+  end
   local usage = usage_fields(data.usage)
   log_line("inference", "response", {
     elapsed_ms = elapsed_ms,

@@ -2118,6 +2118,16 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
     assert(data["missing"]["preserved_empty_tool_calls"] == false);
     assert(data["missing"]["trace_count"] >= 3);
 
+    assert(data["reasoning_only"]["ok"] == true);
+    assert(data["reasoning_only"]["count"] == 1);
+    assert(data["reasoning_only"]["request_count"] == 2);
+    assert(data["reasoning_only"]["first_preserve_thinking"] == true);
+    assert(data["reasoning_only"]["second_preserve_thinking"] == true);
+    assert(data["reasoning_only"]["second_request_reasoning"].get<std::string>().find("Ada Lovelace") != std::string::npos);
+    assert(data["reasoning_only"]["second_request_retry_prompt"].get<std::string>().find("exactly one available tool") != std::string::npos);
+    assert(data["reasoning_only"]["reported_author"] == "Ada Lovelace");
+    assert(data["reasoning_only"]["trace_count"] >= 3);
+
     assert(data["pseudo"]["ok"] == false);
     assert(data["pseudo"]["code"] == "missing_tool_call");
     assert(data["pseudo"]["request_count"] == 3);
