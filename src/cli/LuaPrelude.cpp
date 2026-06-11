@@ -494,6 +494,13 @@ local function content_char_count(message)
   return count
 end
 
+local function reasoning_char_count(message)
+  if type(message) ~= "table" then return 0 end
+  if type(message.reasoning_content) == "string" then return #message.reasoning_content end
+  if type(message.reasoningContent) == "string" then return #message.reasoningContent end
+  return 0
+end
+
 local function summarize_action_params(method, params)
   params = params or {}
   if method == "llm_chat" then
@@ -1809,6 +1816,8 @@ function ac.llm.chat(spec)
     provider = data.provider or spec.provider,
     model = data.model or spec.model,
     content_chars = content_char_count(message),
+    reasoning_chars = reasoning_char_count(message),
+    finish_reason = data.finishReason,
     tool_calls = count_tool_calls(message),
     prompt_tokens = usage.prompt_tokens,
     completion_tokens = usage.completion_tokens,
