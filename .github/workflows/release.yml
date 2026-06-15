@@ -1,0 +1,305 @@
+name: Release computer.cpp
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+        default: minor
+        required: true
+      notes:
+        description: Release notes
+        type: string
+        required: false
+      title:
+        description: Release title
+        type: string
+        required: false
+
+concurrency:
+  group: computer-cpp-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release computer.cpp
+    runs-on: macos-26
+    env:
+      BUILD_DIR: build/release
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake wxwidgets
+
+      - name: Bump version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          bump = os.environ["BUMP"]
+          cmake_path = Path("CMakeLists.txt")
+          cmake_text = cmake_path.read_text(encoding="utf-8")
+
+          version_match = re.search(
+              r"(?ms)^(project\(computer\.cpp\s+VERSION\s+)"
+              r"(?P<version>\d+\.\d+\.\d+)"
+              r"(\s+DESCRIPTION\s+)",
+              cmake_text,
+          )
+          if not version_match:
+              print("Version not found in CMakeLists.txt project(computer.cpp VERSION X.Y.Z)", file=sys.stderr)
+              sys.exit(1)
+
+          version = version_match.group("version")
+          major, minor, patch = (int(part) for part in version.split("."))
+
+          if bump == "major":
+              major += 1
+              minor = 0
+              patch = 0
+          elif bump == "minor":
+              minor += 1
+              patch = 0
+          elif bump == "patch":
+              patch += 1
+          else:
+              print(f"Unsupported bump: {bump}", file=sys.stderr)
+              sys.exit(1)
+
+          new_version = f"{major}.{minor}.{patch}"
+          updated = (
+              cmake_text[:version_match.start("version")]
+              + new_version
+              + cmake_text[version_match.end("version"):]
+          )
+          if updated == cmake_text:
+              print("Version update failed: CMakeLists.txt was unchanged", file=sys.stderr)
+              sys.exit(1)
+
+          cmake_path.write_text(updated, encoding="utf-8")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8", newline="\n") as env:
+              env.write(f"NEW_VERSION={new_version}\n")
+          print(f"Bumped version to {new_version}")
+          PY
+
+      - name: Validate signing secrets
+        env:
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          required = [
+              "MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64",
+              "MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD",
+              "MACOS_KEYCHAIN_PASSWORD",
+              "MACOS_NOTARY_KEY_BASE64",
+              "MACOS_NOTARY_KEY_ID",
+              "MACOS_NOTARY_ISSUER_ID",
+          ]
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              print("Missing required macOS release secrets:", ", ".join(missing), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Import signing certificate
+        env:
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id-application.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/release-signing.keychain-db"
+
+          printf '%s' "$MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD" \
+            -A \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "Developer ID Application signing identity was not found in imported certificate" >&2
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2
+            exit 1
+          fi
+
+          {
+            echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure release build
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCOMPUTER_CPP_CODE_SIGN_APP=OFF
+
+      - name: Build release targets
+        run: |
+          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp computer_cpp_tests --config Release
+
+      - name: Run tests
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure
+
+      - name: Prepare notary credentials
+        env:
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          printf '%s' "$MACOS_NOTARY_KEY_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          chmod 600 "$NOTARY_KEY_PATH"
+
+          {
+            echo "NOTARY_KEY_PATH=$NOTARY_KEY_PATH"
+            echo "MACOS_NOTARY_KEY_ID=$MACOS_NOTARY_KEY_ID"
+            echo "MACOS_NOTARY_ISSUER_ID=$MACOS_NOTARY_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign, notarize, and package macOS asset
+        run: |
+          set -euo pipefail
+
+          DIST_ROOT="dist"
+          ASSET_BASENAME="computer.cpp-${NEW_VERSION}-macos-arm64"
+          DIST_DIR="${DIST_ROOT}/${ASSET_BASENAME}"
+          NOTARY_ZIP="${RUNNER_TEMP}/${ASSET_BASENAME}-notary.zip"
+          ASSET_PATH="${DIST_ROOT}/${ASSET_BASENAME}.zip"
+
+          rm -rf "$DIST_ROOT"
+          mkdir -p "$DIST_DIR"
+          cp "$BUILD_DIR/computer.cpp" "$DIST_DIR/computer.cpp"
+          ditto "$BUILD_DIR/ComputerCpp.app" "$DIST_DIR/ComputerCpp.app"
+
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/computer.cpp"
+          codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/ComputerCpp.app"
+
+          codesign --verify --deep --strict --verbose=4 "$DIST_DIR/ComputerCpp.app"
+          codesign --verify --strict --verbose=4 "$DIST_DIR/computer.cpp"
+
+          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$ASSET_BASENAME" "$NOTARY_ZIP")
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --issuer "$MACOS_NOTARY_ISSUER_ID" \
+            --wait
+
+          xcrun stapler staple "$DIST_DIR/ComputerCpp.app"
+          xcrun stapler validate "$DIST_DIR/ComputerCpp.app"
+          spctl --assess --type execute --verbose=4 "$DIST_DIR/ComputerCpp.app"
+
+          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$ASSET_BASENAME" "${ASSET_BASENAME}.zip")
+
+          {
+            echo "RELEASE_ASSET=$ASSET_PATH"
+            echo "RELEASE_ASSET_NAME=${ASSET_BASENAME}.zip"
+          } >> "$GITHUB_ENV"
+
+      - name: Commit version bump
+        run: |
+          NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CMakeLists.txt
+          git commit -m "chore(release): ${NEW_VERSION}"
+          git tag -a "${NEW_VERSION}" -m "Release ${NEW_VERSION}"
+
+      - name: Push release commit and tag
+        run: |
+          git push origin HEAD:master
+          git push origin --tags
+
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="${NEW_VERSION}" \
+            --jq .body > release-notes-auto.md
+
+      - name: Assemble release notes file
+        env:
+          NOTES: ${{ inputs.notes }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ.get("NEW_VERSION", "").strip()
+          title = os.environ.get("TITLE", "").strip()
+          notes = os.environ.get("NOTES", "").strip()
+
+          parts = []
+          if version:
+              header = f"## {version}" + (f" - {title}" if title else "")
+              parts.append(header)
+          if notes:
+              parts.extend(["", notes])
+
+          auto_path = Path("release-notes-auto.md")
+          if auto_path.exists():
+              auto_notes = auto_path.read_text(encoding="utf-8").strip()
+              if auto_notes:
+                  parts.extend(["", auto_notes])
+
+          content = "\n".join(part for part in parts if part is not None).lstrip()
+          if content and not content.endswith("\n"):
+              content += "\n"
+          Path("release-notes.md").write_text(content, encoding="utf-8")
+          PY
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
+          RELEASE_TITLE="$(printf '%s' "$TITLE" | tr -d '\r\n')"
+          if [ -z "$RELEASE_TITLE" ]; then
+            RELEASE_TITLE="$NEW_VERSION"
+          fi
+
+          gh release create "${NEW_VERSION}" \
+            "$RELEASE_ASSET#${RELEASE_ASSET_NAME}" \
+            --title "$RELEASE_TITLE" \
+            --notes-file release-notes.md
