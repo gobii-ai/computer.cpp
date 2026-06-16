@@ -1,4 +1,4 @@
-name: CI
+name: Tests
 
 on:
   push:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   macos:
-    name: macOS Debug
+    name: macOS Tests
     runs-on: macos-26
     env:
       BUILD_DIR: build/debug
