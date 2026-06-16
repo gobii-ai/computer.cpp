@@ -907,6 +907,17 @@ For a local or OpenAI-compatible endpoint, use `type = "openai-compatible"` and
 set `base_url` to the endpoint's `/v1` URL. Omit `api_key` when the endpoint is
 local or otherwise does not require a key.
 
+```bash
+computer.cpp config set-provider local-llm \
+  --type openai-compatible \
+  --base-url http://127.0.0.1:8000/v1 \
+  --no-api-key
+computer.cpp config set-profile main \
+  --provider local-llm \
+  --model qwen36-27b \
+  --default
+```
+
 Legacy LLM environment variables are only a one-time import path:
 
 ```bash

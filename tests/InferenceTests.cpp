@@ -94,6 +94,30 @@ void TestInferenceConfigFileProfiles() {
     assert(config.defaultParams["temperature"] == 0.1);
     assert(config.defaultParams["max_output_tokens"] == 333);
 
+    appConfig.providers["compatible"].name = "compatible";
+    appConfig.providers["compatible"].type = "openai-compatible";
+    appConfig.providers["compatible"].baseUrl = "https://inference.example.test/v1";
+    appConfig.providers["compatible"].apiKey = "compatible-key";
+    appConfig.profiles["compatible"].name = "compatible";
+    appConfig.profiles["compatible"].provider = "compatible";
+    appConfig.profiles["compatible"].model = "custom-chat-model";
+    appConfig.defaultProfile = "compatible";
+    assert(ComputerCpp::SaveAppConfig(appConfig, &saveError));
+    assert(saveError.empty());
+
+    error.clear();
+    config = ComputerCpp::Inference::ResolveConfig(nlohmann::json::object(), &error);
+    assert(error.empty());
+    assert(config.profile == "compatible");
+    assert(config.provider == "openai-compatible");
+    assert(config.baseUrl == "https://inference.example.test/v1");
+    assert(config.model == "custom-chat-model");
+    assert(config.apiKey == "compatible-key");
+
+    appConfig.defaultProfile = "main";
+    assert(ComputerCpp::SaveAppConfig(appConfig, &saveError));
+    assert(saveError.empty());
+
     auto body = ComputerCpp::Inference::BuildChatRequestBody({
         {"messages", nlohmann::json::array({
             {{"role", "user"}, {"content", "ping"}}

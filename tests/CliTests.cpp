@@ -2067,6 +2067,48 @@ void TestConfigCliCanonicalFile() {
     assert(payload["data"]["defaultParams"]["parallel_tool_calls"] == true);
     assert(payload["data"]["openRouterProvider"]["allow_fallbacks"] == false);
 
+    auto compatibleProvider = RunConfigCommand({
+        "config",
+        "set-provider",
+        "compatible",
+        "--type",
+        "openai-compatible",
+        "--base-url",
+        "https://inference.example.test/v1",
+        "--api-key",
+        "compatible-secret"
+    });
+    assert(compatibleProvider.exitCode == 0);
+
+    auto compatibleProfile = RunConfigCommand({
+        "config",
+        "set-profile",
+        "compatible-vision",
+        "--provider",
+        "compatible",
+        "--model",
+        "custom-chat-model"
+    });
+    assert(compatibleProfile.exitCode == 0);
+
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(config.providers["compatible"].type == "openai-compatible");
+    assert(config.providers["compatible"].baseUrl == "https://inference.example.test/v1");
+    assert(config.providers["compatible"].apiKey == "compatible-secret");
+    assert(config.profiles["compatible-vision"].provider == "compatible");
+    assert(config.profiles["compatible-vision"].model == "custom-chat-model");
+
+    auto compatibleTest = RunConfigCommand({"config", "test", "compatible-vision"});
+    assert(compatibleTest.exitCode == 0);
+    auto compatiblePayload = nlohmann::json::parse(compatibleTest.stdoutText);
+    assert(compatiblePayload["ok"] == true);
+    assert(compatiblePayload["data"]["profile"] == "compatible-vision");
+    assert(compatiblePayload["data"]["provider"] == "openai-compatible");
+    assert(compatiblePayload["data"]["baseUrl"] == "https://inference.example.test/v1");
+    assert(compatiblePayload["data"]["model"] == "custom-chat-model");
+    assert(compatiblePayload["data"]["hasApiKey"] == true);
+
     auto path = RunConfigCommand({"config", "path"}, false);
     assert(path.exitCode == 0);
     assert(path.stdoutText.find(ComputerCpp::ConfigPath().string()) != std::string::npos);
