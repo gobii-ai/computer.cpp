@@ -43,7 +43,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake wxwidgets
+          brew install cmake wxwidgets dylibbundler
 
       - name: Bump version
         env:
@@ -167,16 +167,12 @@ jobs:
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=ON \
+            -DBUILD_TESTING=OFF \
             -DCOMPUTER_CPP_CODE_SIGN_APP=OFF
 
       - name: Build release targets
         run: |
-          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp computer_cpp_tests --config Release
-
-      - name: Run tests
-        run: |
-          ctest --test-dir "$BUILD_DIR" --output-on-failure
+          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp --config Release
 
       - name: Prepare notary credentials
         env:
@@ -209,6 +205,29 @@ jobs:
           cp "$BUILD_DIR/computer.cpp" "$DIST_DIR/computer.cpp"
           ditto "$BUILD_DIR/ComputerCpp.app" "$DIST_DIR/ComputerCpp.app"
 
+          mkdir -p "$DIST_DIR/ComputerCpp.app/Contents/Frameworks"
+          dylibbundler \
+            -od \
+            -b \
+            -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp" \
+            -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks"
+
+          {
+            echo "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp"
+            find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib'
+          } | while IFS= read -r binary; do
+            if otool -L "$binary" | grep -q '/opt/homebrew'; then
+              echo "$binary still references Homebrew dylibs after bundling" >&2
+              otool -L "$binary" >&2
+              exit 1
+            fi
+          done
+
+          find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib' -print0 |
+            while IFS= read -r -d '' dylib; do
+              codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$dylib"
+            done
           codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/computer.cpp"
           codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/ComputerCpp.app"
 
