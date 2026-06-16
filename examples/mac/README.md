@@ -62,11 +62,15 @@ and `Profiles`, click `Set Active` on the profile to use, then click
 
 ## CLI API
 
-Install the build and Lua runtime dependencies, then run the example with
-`computer.cpp app run`:
+Install the build and Lua runtime dependencies:
 
 ```sh
 brew install cmake wxwidgets lua
+```
+
+Then build the project and run the example with `computer.cpp app run`:
+
+```sh
 cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
 cmake --build build/debug
 ./build/debug/computer.cpp app run examples/mac/reminders.lua
