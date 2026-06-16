@@ -8,6 +8,7 @@ cmake-build-*/
 CMakeFiles/
 out/
 dist/
+.idea/
 CMakeUserPresets.json
 compile_commands.json
 *.log
