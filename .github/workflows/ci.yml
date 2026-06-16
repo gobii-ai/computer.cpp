@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS Tests
+    runs-on: macos-26
+    env:
+      BUILD_DIR: build/debug
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake wxwidgets lua
+
+      - name: Configure debug build
+        run: |
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON \
+            -DCOMPUTER_CPP_CODE_SIGN_APP=OFF
+
+      - name: Build
+        run: |
+          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp computer_cpp_tests --config Debug
+
+      - name: Test
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure

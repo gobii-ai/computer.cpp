@@ -467,6 +467,12 @@ These are not generic computer-use actions. They are app APIs.
 
 ## Quick Start
 
+Install the local build and Lua runtime dependencies. On macOS with Homebrew:
+
+```bash
+brew install cmake wxwidgets lua
+```
+
 On macOS, create a reusable local signing identity before the first build if
 you do not already have an Apple Development or Developer ID Application
 certificate:

@@ -167,16 +167,12 @@ jobs:
         run: |
           cmake -S . -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=ON \
+            -DBUILD_TESTING=OFF \
             -DCOMPUTER_CPP_CODE_SIGN_APP=OFF
 
       - name: Build release targets
         run: |
-          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp computer_cpp_tests --config Release
-
-      - name: Run tests
-        run: |
-          ctest --test-dir "$BUILD_DIR" --output-on-failure
+          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp --config Release
 
       - name: Prepare notary credentials
         env:
