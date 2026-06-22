@@ -2486,16 +2486,9 @@ void TrayIcon::StartOwnedDaemon() {
 
 wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenu* menu = new wxMenu;
-    menu->Append(ID_PERMISSIONS, "Permissions");
-    menu->Append(ID_SETTINGS, "Settings...");
-#ifdef __APPLE__
-    menu->Append(ID_SHOW_LOGS, "Show Logs");
-#endif
-    menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
-    menu->AppendSeparator();
     wxString serverStatus = serverPid_ > 0 && !serverUrl_.empty()
-        ? "Server running at " + serverUrl_
-        : "Server not running";
+        ? "🟢 Server running at " + serverUrl_
+        : "🔴 Server not running";
     wxMenuItem* serverStatusItem = menu->Append(wxID_ANY, serverStatus);
     serverStatusItem->Enable(false);
     wxMenuItem* startServer = menu->Append(ID_START_SERVER, "Start Server...");
@@ -2503,10 +2496,21 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenuItem* stopServer = menu->Append(ID_STOP_SERVER, "Stop Server");
     stopServer->Enable(serverPid_ > 0);
     menu->AppendSeparator();
-    menu->Append(ID_STATE, "Show State");
-    menu->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
-    menu->Append(ID_TEST_MOUSE, "Test Mouse Move");
+
+    menu->Append(ID_PERMISSIONS, "Permissions");
+    menu->Append(ID_SETTINGS, "Settings...");
+
+    wxMenu* advanced = new wxMenu;
+    advanced->Append(ID_STATE, "Show State");
+    advanced->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
+    advanced->Append(ID_TEST_MOUSE, "Test Mouse Move");
+#ifdef __APPLE__
+    advanced->Append(ID_SHOW_LOGS, "Show Logs");
+#endif
+    menu->AppendSubMenu(advanced, "Advanced");
+
     menu->AppendSeparator();
+    menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
     menu->Append(ID_QUIT, "Quit");
     return menu;
 }
