@@ -76,7 +76,6 @@ void TrayUpdateFlow::CheckForUpdates() {
                 wxString message;
                 message << "ComputerCpp " << result.latestVersion << " is available.\n\n";
                 message << "Current version: " << result.currentVersion << "\n";
-                message << "Release: " << result.release.htmlUrl << "\n\n";
                 message << "Install it now?";
                 wxMessageDialog dialog(nullptr,
                                        message,
@@ -118,7 +117,7 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
         "Downloading update...",
         100,
         nullptr,
-        wxPD_APP_MODAL | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
+        wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
     updateProgressDialog_->Pulse("Downloading update...");
 
     auto alive = alive_;
@@ -184,13 +183,12 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
             return;
         }
 
-        postProgress("Preparing installer...");
-        auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
-        wxTheApp->CallAfter([this, alive, install] {
+        wxTheApp->CallAfter([this, alive, staged] {
             if (!alive->load()) {
                 return;
             }
             CloseUpdateProgress();
+            auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
             if (install.manualInstallRequired) {
                 updateInProgress_ = false;
                 if (!install.zipPath.empty()) {
@@ -208,9 +206,7 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
                              wxOK | wxICON_ERROR);
                 return;
             }
-            wxMessageBox("ComputerCpp will quit, install the update, and relaunch.",
-                         "ComputerCpp Update",
-                         wxOK | wxICON_INFORMATION);
+            updateInProgress_ = false;
             if (quitForInstall_) {
                 quitForInstall_();
             }

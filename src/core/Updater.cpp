@@ -621,7 +621,9 @@ InstallResult LaunchInstallAndRelaunch(const StageResult& staged, int currentPid
 #if defined(__APPLE__)
     chmod(helperPath.c_str(), 0700);
 #endif
-    std::string launch = "/bin/sh " + ShellQuote(helperPath.string()) + " >/dev/null 2>&1 &";
+    fs::path logPath = helperPath.parent_path() / "install-update.log";
+    std::string launch = "/bin/sh " + ShellQuote(helperPath.string()) +
+        " >" + ShellQuote(logPath.string()) + " 2>&1 &";
     if (!RunCommand(launch)) {
         result.error = "could not launch update installer helper";
         return result;
@@ -629,6 +631,7 @@ InstallResult LaunchInstallAndRelaunch(const StageResult& staged, int currentPid
 
     result.ok = true;
     result.helperPath = helperPath;
+    result.logPath = logPath;
     return result;
 }
 
@@ -693,7 +696,23 @@ std::string BuildInstallHelperScript(
     script << "backup_root=" << ShellQuote(backupRoot.string()) << "\n";
     script << "backup_app=" << ShellQuote(backupApp.string()) << "\n";
     script << "backup_cli=" << ShellQuote(backupCli.string()) << "\n";
-    script << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n";
+    script << "echo \"waiting for ComputerCpp pid $pid to exit\"\n";
+    script << "wait_count=0\n";
+    script << "while kill -0 \"$pid\" 2>/dev/null && [ \"$wait_count\" -lt 50 ]; do wait_count=$((wait_count + 1)); sleep 0.2; done\n";
+    script << "if kill -0 \"$pid\" 2>/dev/null; then\n";
+    script << "  echo \"requesting old app shutdown\"\n";
+    script << "  kill \"$pid\" 2>/dev/null || true\n";
+    script << "  wait_count=0\n";
+    script << "  while kill -0 \"$pid\" 2>/dev/null && [ \"$wait_count\" -lt 25 ]; do wait_count=$((wait_count + 1)); sleep 0.2; done\n";
+    script << "fi\n";
+    script << "if kill -0 \"$pid\" 2>/dev/null; then\n";
+    script << "  echo \"forcing old app shutdown\"\n";
+    script << "  kill -9 \"$pid\" 2>/dev/null || true\n";
+    script << "  wait_count=0\n";
+    script << "  while kill -0 \"$pid\" 2>/dev/null && [ \"$wait_count\" -lt 10 ]; do wait_count=$((wait_count + 1)); sleep 0.2; done\n";
+    script << "fi\n";
+    script << "if kill -0 \"$pid\" 2>/dev/null; then echo \"old app did not exit\"; exit 1; fi\n";
+    script << "echo \"installing update to $target_app\"\n";
     script << "rm -rf \"$backup_root\"\n";
     script << "mkdir -p \"$backup_root\"\n";
     script << "if [ -d \"$target_app\" ]; then /usr/bin/ditto \"$target_app\" \"$backup_app\" || exit 1; fi\n";
@@ -713,6 +732,7 @@ std::string BuildInstallHelperScript(
     script << "    exit 1\n";
     script << "  fi\n";
     script << "fi\n";
+    script << "echo \"relaunching $target_app\"\n";
     script << "/usr/bin/open -n \"$target_app\"\n";
     return script.str();
 }

@@ -60,6 +60,7 @@ struct InstallResult {
     bool manualInstallRequired = false;
     std::string error;
     std::filesystem::path helperPath;
+    std::filesystem::path logPath;
     std::filesystem::path zipPath;
 };
 
