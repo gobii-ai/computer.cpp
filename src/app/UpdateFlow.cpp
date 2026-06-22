@@ -1,6 +1,8 @@
 #include "UpdateFlow.h"
 
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <utility>
 
 #include <wx/msgdlg.h>
@@ -76,7 +78,6 @@ void TrayUpdateFlow::CheckForUpdates() {
                 wxString message;
                 message << "ComputerCpp " << result.latestVersion << " is available.\n\n";
                 message << "Current version: " << result.currentVersion << "\n";
-                message << "Release: " << result.release.htmlUrl << "\n\n";
                 message << "Install it now?";
                 wxMessageDialog dialog(nullptr,
                                        message,
@@ -118,7 +119,7 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
         "Downloading update...",
         100,
         nullptr,
-        wxPD_APP_MODAL | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
+        wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
     updateProgressDialog_->Pulse("Downloading update...");
 
     auto alive = alive_;
@@ -184,13 +185,23 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
             return;
         }
 
-        postProgress("Preparing installer...");
+        auto progressClosed = std::make_shared<std::promise<void>>();
+        auto progressClosedFuture = progressClosed->get_future();
+        wxTheApp->CallAfter([this, alive, progressClosed] {
+            if (!alive->load()) {
+                progressClosed->set_value();
+                return;
+            }
+            CloseUpdateProgress();
+            progressClosed->set_value();
+        });
+        progressClosedFuture.wait_for(std::chrono::seconds(5));
+
         auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
         wxTheApp->CallAfter([this, alive, install] {
             if (!alive->load()) {
                 return;
             }
-            CloseUpdateProgress();
             if (install.manualInstallRequired) {
                 updateInProgress_ = false;
                 if (!install.zipPath.empty()) {
@@ -208,9 +219,7 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
                              wxOK | wxICON_ERROR);
                 return;
             }
-            wxMessageBox("ComputerCpp will quit, install the update, and relaunch.",
-                         "ComputerCpp Update",
-                         wxOK | wxICON_INFORMATION);
+            updateInProgress_ = false;
             if (quitForInstall_) {
                 quitForInstall_();
             }

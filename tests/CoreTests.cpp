@@ -287,6 +287,10 @@ void TestUpdaterInstallHelperScript() {
     assert(script.find("staged_app='/tmp/staged dir/ComputerCpp.app'") != std::string::npos);
     assert(script.find("target_app='/Applications/Computer Cpp.app'") != std::string::npos);
     assert(script.find("target_cli='/Applications/computer cpp'") != std::string::npos);
+    assert(script.find("if [ \"$pid\" -le 0 ]") != std::string::npos);
+    assert(script.find("wait_count=0") != std::string::npos);
+    assert(script.find("kill -9 \"$pid\"") != std::string::npos);
+    assert(script.find("echo \"relaunching $target_app\"") != std::string::npos);
 }
 
 void TestUpdaterStagingValidation() {
