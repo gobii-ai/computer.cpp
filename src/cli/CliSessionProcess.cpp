@@ -91,31 +91,6 @@ void TerminateChildGroup(pid_t pid, int graceMs = 5000) {
 }
 #endif
 
-#if defined(_WIN32)
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const wchar_t* name, const std::wstring& value) : name_(name) {
-        DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
-        if (needed > 0) {
-            hadPrevious_ = true;
-            previous_.resize(needed);
-            DWORD written = GetEnvironmentVariableW(name, previous_.data(), needed);
-            previous_.resize(written);
-        }
-        SetEnvironmentVariableW(name, value.c_str());
-    }
-
-    ~ScopedEnvVar() {
-        SetEnvironmentVariableW(name_.c_str(), hadPrevious_ ? previous_.c_str() : nullptr);
-    }
-
-private:
-    std::wstring name_;
-    std::wstring previous_;
-    bool hadPrevious_ = false;
-};
-#endif
-
 } // namespace
 
 int RunChildWithControlSession(
@@ -202,25 +177,17 @@ int RunChildWithControlSession(
         return 2;
     }
 
-    ScopedEnvVar tokenEnv(L"COMPUTER_CPP_CONTROL_SESSION", Windows::Utf8ToWide(token));
-    ScopedEnvVar scopeEnv(L"COMPUTER_CPP_CONTROL_SCOPE", Windows::Utf8ToWide(scope));
-    std::wstring application = Windows::Utf8ToWide(command[0]);
-    std::wstring commandLine = Windows::CommandLineForArgs(command);
+    Windows::ScopedEnvVar tokenEnv(L"COMPUTER_CPP_CONTROL_SESSION", Windows::Utf8ToWide(token));
+    Windows::ScopedEnvVar scopeEnv(L"COMPUTER_CPP_CONTROL_SCOPE", Windows::Utf8ToWide(scope));
 
     STARTUPINFOW startupInfo{};
     startupInfo.cb = sizeof(startupInfo);
     PROCESS_INFORMATION processInfo{};
-    if (!CreateProcessW(
-            application.c_str(),
-            commandLine.data(),
-            nullptr,
-            nullptr,
-            TRUE,
-            CREATE_SUSPENDED,
-            nullptr,
-            nullptr,
-            &startupInfo,
-            &processInfo)) {
+    Windows::ProcessOptions processOptions;
+    processOptions.inheritHandles = true;
+    processOptions.creationFlags = CREATE_SUSPENDED;
+    processOptions.startupInfo = &startupInfo;
+    if (!Windows::StartProcess(command, processOptions, processInfo)) {
         std::cerr << "Error: failed to start child command: " << command[0] << "\n";
         return 127;
     }
@@ -244,13 +211,12 @@ int RunChildWithControlSession(
     while (true) {
         DWORD wait = WaitForSingleObject(processInfo.hProcess, 100);
         if (wait == WAIT_OBJECT_0) {
-            DWORD exitCode = 1;
-            GetExitCodeProcess(processInfo.hProcess, &exitCode);
+            int exitCode = Windows::ProcessExitCode(processInfo.hProcess);
             CloseHandle(processInfo.hProcess);
             if (job) {
                 CloseHandle(job);
             }
-            return static_cast<int>(exitCode);
+            return exitCode;
         }
         if (wait != WAIT_TIMEOUT) {
             std::cerr << "Error: failed waiting for child command\n";

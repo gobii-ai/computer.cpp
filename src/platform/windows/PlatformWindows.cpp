@@ -65,10 +65,6 @@ private:
     T* ptr_ = nullptr;
 };
 
-std::string WideToUtf8(const wchar_t* value) {
-    return value ? Windows::WideToUtf8(value) : std::string();
-}
-
 std::wstring Utf8ToWide(const std::string& value) {
     return Windows::Utf8ToWide(value);
 }
@@ -312,6 +308,10 @@ std::string BstrToUtf8(BSTR value) {
     return out;
 }
 
+bool OpenSettingsUri(const wchar_t* uri) {
+    return reinterpret_cast<intptr_t>(ShellExecuteW(nullptr, L"open", uri, nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+
 Bounds UiaBounds(IUIAutomationElement* element) {
     RECT rect{};
     if (!element || FAILED(element->get_CurrentBoundingRectangle(&rect))) {
@@ -386,8 +386,8 @@ void AppendElementLines(IUIAutomation* automation, IUIAutomationElement* element
 }
 
 PermissionStatus CheckPermissions(bool) { return {true, true}; }
-bool OpenPermissionsSettings() { return reinterpret_cast<intptr_t>(ShellExecuteW(nullptr, L"open", L"ms-settings:easeofaccess", nullptr, nullptr, SW_SHOWNORMAL)) > 32; }
-bool OpenAccessibilitySettings() { return reinterpret_cast<intptr_t>(ShellExecuteW(nullptr, L"open", L"ms-settings:easeofaccess", nullptr, nullptr, SW_SHOWNORMAL)) > 32; }
+bool OpenPermissionsSettings() { return OpenSettingsUri(L"ms-settings:easeofaccess"); }
+bool OpenAccessibilitySettings() { return OpenPermissionsSettings(); }
 bool OpenScreenCaptureSettings() { return true; }
 bool RequestAccessibilityPermission() { return true; }
 bool RequestScreenCapturePermission() { return true; }

@@ -214,33 +214,6 @@ HANDLE ConnectNamedPipeClient(const std::string& session) {
     return INVALID_HANDLE_VALUE;
 }
 
-std::string ReadLineFromPipe(HANDLE pipe) {
-    std::string line;
-    char ch = 0;
-    DWORD read = 0;
-    while (ReadFile(pipe, &ch, 1, &read, nullptr) && read == 1) {
-        if (ch == '\n') {
-            break;
-        }
-        line.push_back(ch);
-    }
-    return line;
-}
-
-bool WriteAllToPipe(HANDLE pipe, const std::string& payload) {
-    const char* ptr = payload.data();
-    size_t remaining = payload.size();
-    while (remaining > 0) {
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64 * 1024));
-        DWORD written = 0;
-        if (!WriteFile(pipe, ptr, chunk, &written, nullptr) || written == 0) {
-            return false;
-        }
-        ptr += written;
-        remaining -= written;
-    }
-    return true;
-}
 #endif
 
 }
@@ -350,27 +323,10 @@ DaemonStartResult EnsureDaemon(const std::string& session, const std::string& ex
     return result;
 #elif defined(_WIN32)
     std::vector<std::string> command = {executablePath, "daemon", "--session", session};
-    std::wstring application = Windows::Utf8ToWide(executablePath);
-    std::wstring commandLine = Windows::CommandLineForArgs(command);
-    STARTUPINFOW startupInfo{};
-    startupInfo.cb = sizeof(startupInfo);
-    PROCESS_INFORMATION processInfo{};
-    if (!CreateProcessW(
-            application.c_str(),
-            commandLine.data(),
-            nullptr,
-            nullptr,
-            FALSE,
-            CREATE_NO_WINDOW | DETACHED_PROCESS,
-            nullptr,
-            nullptr,
-            &startupInfo,
-            &processInfo)) {
+    if (!Windows::LaunchDetached(command)) {
         result.error = "failed to start daemon";
         return result;
     }
-    CloseHandle(processInfo.hThread);
-    CloseHandle(processInfo.hProcess);
 
     result.started = true;
     for (int i = 0; i < 50; ++i) {

@@ -844,27 +844,10 @@ bool StartOperationProcess(
     command.push_back(appId);
     command.push_back(operationId);
 
-    std::wstring application = Windows::Utf8ToWide(executablePath);
-    std::wstring commandLine = Windows::CommandLineForArgs(command);
-    STARTUPINFOW startupInfo{};
-    startupInfo.cb = sizeof(startupInfo);
-    PROCESS_INFORMATION processInfo{};
-    if (!CreateProcessW(
-            application.c_str(),
-            commandLine.data(),
-            nullptr,
-            nullptr,
-            FALSE,
-            CREATE_NO_WINDOW | DETACHED_PROCESS,
-            nullptr,
-            nullptr,
-            &startupInfo,
-            &processInfo)) {
+    if (!Windows::LaunchDetached(command)) {
         error = "failed to start operation runner";
         return false;
     }
-    CloseHandle(processInfo.hThread);
-    CloseHandle(processInfo.hProcess);
     return true;
 #else
     (void)options;

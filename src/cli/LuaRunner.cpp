@@ -185,58 +185,6 @@ fs::path TempPreludePath() {
     return fs::temp_directory_path() / ("computer.cpp-lua-" + std::to_string(pid) + "-" + std::to_string(stamp) + ".lua");
 }
 
-#if defined(_WIN32)
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const wchar_t* name, const wchar_t* value) : name_(name) {
-        DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
-        if (needed > 0) {
-            hadPrevious_ = true;
-            previous_.resize(needed);
-            DWORD written = GetEnvironmentVariableW(name, previous_.data(), needed);
-            previous_.resize(written);
-        }
-        SetEnvironmentVariableW(name, value);
-    }
-
-    ~ScopedEnvVar() {
-        SetEnvironmentVariableW(name_.c_str(), hadPrevious_ ? previous_.c_str() : nullptr);
-    }
-
-private:
-    std::wstring name_;
-    std::wstring previous_;
-    bool hadPrevious_ = false;
-};
-
-int ExitCodeFromProcess(HANDLE process) {
-    DWORD exitCode = 1;
-    if (!GetExitCodeProcess(process, &exitCode)) {
-        return 1;
-    }
-    return static_cast<int>(exitCode);
-}
-
-bool StartProcess(const std::vector<std::string>& args, STARTUPINFOW& startupInfo, PROCESS_INFORMATION& processInfo) {
-    if (args.empty()) {
-        return false;
-    }
-    std::wstring application = Windows::Utf8ToWide(args[0]);
-    std::wstring commandLine = Windows::CommandLineForArgs(args);
-    return CreateProcessW(
-        application.c_str(),
-        commandLine.data(),
-        nullptr,
-        nullptr,
-        TRUE,
-        0,
-        nullptr,
-        nullptr,
-        &startupInfo,
-        &processInfo) != FALSE;
-}
-#endif
-
 int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
 #if defined(__unix__) || defined(__APPLE__)
     Cli::PosixArgv argv(args);
@@ -272,16 +220,19 @@ int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
     STARTUPINFOW startupInfo{};
     startupInfo.cb = sizeof(startupInfo);
     PROCESS_INFORMATION processInfo{};
-    std::unique_ptr<ScopedEnvVar> agentEnv;
+    std::unique_ptr<Windows::ScopedEnvVar> agentEnv;
     if (agentStdio) {
-        agentEnv = std::make_unique<ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
+        agentEnv = std::make_unique<Windows::ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
     }
-    if (!StartProcess(args, startupInfo, processInfo)) {
+    Windows::ProcessOptions processOptions;
+    processOptions.inheritHandles = true;
+    processOptions.startupInfo = &startupInfo;
+    if (!Windows::StartProcess(args, processOptions, processInfo)) {
         std::cerr << "Error: failed to start Lua interpreter: " << args[0] << "\n";
         return 127;
     }
     WaitForSingleObject(processInfo.hProcess, INFINITE);
-    int exitCode = ExitCodeFromProcess(processInfo.hProcess);
+    int exitCode = Windows::ProcessExitCode(processInfo.hProcess);
     CloseHandle(processInfo.hThread);
     CloseHandle(processInfo.hProcess);
     return exitCode;
@@ -421,16 +372,19 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     startupInfo.hStdOutput = stdoutHandle;
     startupInfo.hStdError = streamStderr ? GetStdHandle(STD_ERROR_HANDLE) : stderrHandle;
     PROCESS_INFORMATION processInfo{};
-    std::unique_ptr<ScopedEnvVar> agentEnv;
+    std::unique_ptr<Windows::ScopedEnvVar> agentEnv;
     if (agentStdio) {
-        agentEnv = std::make_unique<ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
+        agentEnv = std::make_unique<Windows::ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
     }
-    if (!StartProcess(args, startupInfo, processInfo)) {
+    Windows::ProcessOptions processOptions;
+    processOptions.inheritHandles = true;
+    processOptions.startupInfo = &startupInfo;
+    if (!Windows::StartProcess(args, processOptions, processInfo)) {
         result.exitCode = 127;
         result.stderrText = "Error: failed to start Lua interpreter: " + args[0] + "\n";
     } else {
         WaitForSingleObject(processInfo.hProcess, INFINITE);
-        result.exitCode = ExitCodeFromProcess(processInfo.hProcess);
+        result.exitCode = Windows::ProcessExitCode(processInfo.hProcess);
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
     }

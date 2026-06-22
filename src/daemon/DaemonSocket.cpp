@@ -2,11 +2,13 @@
 
 #include "computer_cpp/AppPaths.h"
 
+#include <algorithm>
 #include <cctype>
 #include <functional>
 #include <iomanip>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <string_view>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <fcntl.h>
@@ -109,5 +111,41 @@ std::filesystem::path PidPathForSession(const std::string& session) {
 std::string PipeNameForSession(const std::string& session) {
     return "\\\\.\\pipe\\computer.cpp-" + session;
 }
+
+#if defined(_WIN32)
+std::string ReadLineFromPipe(HANDLE pipe) {
+    std::string line;
+    char ch = 0;
+    DWORD read = 0;
+    while (ReadFile(pipe, &ch, 1, &read, nullptr) && read == 1) {
+        if (ch == '\n') {
+            break;
+        }
+        line.push_back(ch);
+    }
+    return line;
+}
+
+bool WriteAllToPipe(HANDLE pipe, std::string_view payload) {
+    const char* ptr = payload.data();
+    size_t remaining = payload.size();
+    while (remaining > 0) {
+        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64 * 1024));
+        DWORD written = 0;
+        if (!WriteFile(pipe, ptr, chunk, &written, nullptr) || written == 0) {
+            return false;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+    return true;
+}
+
+void WriteJsonLineToPipe(HANDLE pipe, const nlohmann::json& response) {
+    std::string line = response.dump();
+    line.push_back('\n');
+    WriteAllToPipe(pipe, line);
+}
+#endif
 
 } // namespace ComputerCpp

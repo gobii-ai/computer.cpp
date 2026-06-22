@@ -29,8 +29,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Release computer.cpp
+  macos:
+    name: macOS Release Artifact
     runs-on: macos-26
     outputs:
       new_version: ${{ steps.bump_version.outputs.new_version }}
@@ -72,9 +72,7 @@ jobs:
               print("Version not found in CMakeLists.txt project(computer.cpp VERSION X.Y.Z)", file=sys.stderr)
               sys.exit(1)
 
-          version = version_match.group("version")
-          major, minor, patch = (int(part) for part in version.split("."))
-
+          major, minor, patch = (int(part) for part in version_match.group("version").split("."))
           if bump == "major":
               major += 1
               minor = 0
@@ -89,16 +87,12 @@ jobs:
               sys.exit(1)
 
           new_version = f"{major}.{minor}.{patch}"
-          updated = (
+          cmake_path.write_text(
               cmake_text[:version_match.start("version")]
               + new_version
-              + cmake_text[version_match.end("version"):]
+              + cmake_text[version_match.end("version"):],
+              encoding="utf-8",
           )
-          if updated == cmake_text:
-              print("Version update failed: CMakeLists.txt was unchanged", file=sys.stderr)
-              sys.exit(1)
-
-          cmake_path.write_text(updated, encoding="utf-8")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8", newline="\n") as env:
               env.write(f"NEW_VERSION={new_version}\n")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
@@ -143,7 +137,6 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/release-signing.keychain-db"
 
           printf '%s' "$MACOS_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-
           security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -196,7 +189,6 @@ jobs:
           ASSET_BASENAME="computer.cpp-${NEW_VERSION}-macos-arm64"
           DIST_DIR="${DIST_ROOT}/${ASSET_BASENAME}"
           NOTARY_ZIP="${RUNNER_TEMP}/${ASSET_BASENAME}-notary.zip"
-          ASSET_PATH="${DIST_ROOT}/${ASSET_BASENAME}.zip"
 
           rm -rf "$DIST_ROOT"
           mkdir -p "$DIST_DIR"
@@ -261,11 +253,6 @@ jobs:
 
           (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$ASSET_BASENAME" "${ASSET_BASENAME}.zip")
 
-          {
-            echo "RELEASE_ASSET=$ASSET_PATH"
-            echo "RELEASE_ASSET_NAME=${ASSET_BASENAME}.zip"
-          } >> "$GITHUB_ENV"
-
       - name: Commit version bump
         run: |
           NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
@@ -280,76 +267,26 @@ jobs:
           git push origin HEAD:master
           git push origin --tags
 
-      - name: Generate release notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
-          gh api "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="${NEW_VERSION}" \
-            --jq .body > release-notes-auto.md
-
-      - name: Assemble release notes file
-        env:
-          NOTES: ${{ inputs.notes }}
-          TITLE: ${{ inputs.title }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          version = os.environ.get("NEW_VERSION", "").strip()
-          title = os.environ.get("TITLE", "").strip()
-          notes = os.environ.get("NOTES", "").strip()
-
-          parts = []
-          if version:
-              header = f"## {version}" + (f" - {title}" if title else "")
-              parts.append(header)
-          if notes:
-              parts.extend(["", notes])
-
-          auto_path = Path("release-notes-auto.md")
-          if auto_path.exists():
-              auto_notes = auto_path.read_text(encoding="utf-8").strip()
-              if auto_notes:
-                  parts.extend(["", auto_notes])
-
-          content = "\n".join(part for part in parts if part is not None).lstrip()
-          if content and not content.endswith("\n"):
-              content += "\n"
-          Path("release-notes.md").write_text(content, encoding="utf-8")
-          PY
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TITLE: ${{ inputs.title }}
-        run: |
-          NEW_VERSION="$(printf '%s' "$NEW_VERSION" | tr -d '\r\n')"
-          RELEASE_TITLE="$(printf '%s' "$TITLE" | tr -d '\r\n')"
-          if [ -z "$RELEASE_TITLE" ]; then
-            RELEASE_TITLE="$NEW_VERSION"
-          fi
-
-          gh release create "${NEW_VERSION}" \
-            "$RELEASE_ASSET#${RELEASE_ASSET_NAME}" \
-            --title "$RELEASE_TITLE" \
-            --notes-file release-notes.md
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-assets
+          path: dist/computer.cpp-${{ steps.bump_version.outputs.new_version }}-macos-arm64.zip
+          if-no-files-found: error
 
   windows:
     name: Windows Release Artifacts
     runs-on: windows-latest
-    needs: release
+    needs: macos
     env:
       BUILD_DIR: build/windows-release
       VCPKG_DEFAULT_TRIPLET: x64-windows
-      NEW_VERSION: ${{ needs.release.outputs.new_version }}
+      NEW_VERSION: ${{ needs.macos.outputs.new_version }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release.outputs.new_version }}
+          ref: ${{ needs.macos.outputs.new_version }}
 
       - name: Install build dependencies
         shell: pwsh
@@ -404,13 +341,88 @@ jobs:
           & $cli.FullName ping
           & $cli.FullName close
 
-      - name: Upload Windows release assets
-        shell: pwsh
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: |
+            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.zip
+            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.msi
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - macos
+      - windows
+    env:
+      NEW_VERSION: ${{ needs.macos.outputs.new_version }}
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-release-assets
+          path: artifacts/macos
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-assets
+          path: artifacts/windows
+
+      - name: Generate release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $zip = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.zip" | Select-Object -First 1
-          $msi = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.msi" | Select-Object -First 1
-          if (-not $zip) { throw "Windows zip artifact not found" }
-          if (-not $msi) { throw "Windows MSI artifact not found" }
-          gh release upload "$env:NEW_VERSION" "$($zip.FullName)#computer.cpp-$env:NEW_VERSION-windows-x64.zip" "$($msi.FullName)#computer.cpp-$env:NEW_VERSION-windows-x64.msi" --clobber
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="${NEW_VERSION}" \
+            --jq .body > release-notes-auto.md
+
+      - name: Assemble release notes file
+        env:
+          NOTES: ${{ inputs.notes }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ.get("NEW_VERSION", "").strip()
+          title = os.environ.get("TITLE", "").strip()
+          notes = os.environ.get("NOTES", "").strip()
+
+          parts = []
+          if version:
+              parts.append(f"## {version}" + (f" - {title}" if title else ""))
+          if notes:
+              parts.extend(["", notes])
+
+          auto_path = Path("release-notes-auto.md")
+          if auto_path.exists():
+              auto_notes = auto_path.read_text(encoding="utf-8").strip()
+              if auto_notes:
+                  parts.extend(["", auto_notes])
+
+          content = "\n".join(parts).lstrip()
+          if content and not content.endswith("\n"):
+              content += "\n"
+          Path("release-notes.md").write_text(content, encoding="utf-8")
+          PY
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ inputs.title }}
+        run: |
+          RELEASE_TITLE="$(printf '%s' "$TITLE" | tr -d '\r\n')"
+          if [ -z "$RELEASE_TITLE" ]; then
+            RELEASE_TITLE="$NEW_VERSION"
+          fi
+
+          gh release create "${NEW_VERSION}" \
+            "artifacts/macos/computer.cpp-${NEW_VERSION}-macos-arm64.zip#computer.cpp-${NEW_VERSION}-macos-arm64.zip" \
+            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.zip#computer.cpp-${NEW_VERSION}-windows-x64.zip" \
+            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.msi#computer.cpp-${NEW_VERSION}-windows-x64.msi" \
+            --title "$RELEASE_TITLE" \
+            --notes-file release-notes.md

@@ -105,37 +105,6 @@ std::optional<json> RunNoParamsRoute(std::string_view method) {
     return std::nullopt;
 }
 
-#if defined(_WIN32)
-std::string ReadLineFromPipe(HANDLE pipe) {
-    std::string line;
-    char ch = 0;
-    DWORD read = 0;
-    while (ReadFile(pipe, &ch, 1, &read, nullptr) && read == 1) {
-        if (ch == '\n') {
-            break;
-        }
-        line.push_back(ch);
-    }
-    return line;
-}
-
-void WriteJsonLineToPipe(HANDLE pipe, const json& response) {
-    std::string line = response.dump();
-    line.push_back('\n');
-    const char* ptr = line.data();
-    size_t remaining = line.size();
-    while (remaining > 0) {
-        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64 * 1024));
-        DWORD written = 0;
-        if (!WriteFile(pipe, ptr, chunk, &written, nullptr) || written == 0) {
-            break;
-        }
-        ptr += written;
-        remaining -= written;
-    }
-}
-#endif
-
 } // namespace
 
 json HandleDaemonRequest(const std::string& session, const json& request) {
