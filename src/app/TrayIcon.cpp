@@ -9,8 +9,12 @@
 #include "computer_cpp/Transport.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <ctime>
@@ -19,12 +23,16 @@
 #include <sstream>
 #include <thread>
 #include <vector>
+#include <wx/choicdlg.h>
+#include <wx/clipbrd.h>
 #include <wx/dcmemory.h>
+#include <wx/filedlg.h>
 #include <wx/graphics.h>
 #include <wx/icon.h>
 #include <wx/listbox.h>
 #include <wx/msgdlg.h>
 #include <wx/notebook.h>
+#include <wx/process.h>
 #include <wx/scrolwin.h>
 #include <wx/stdpaths.h>
 #include <wx/settings.h>
@@ -32,6 +40,9 @@
 #include <wx/wx.h>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -43,6 +54,11 @@ enum {
     ID_PERMISSIONS = 1001,
     ID_SETTINGS,
     ID_CHECK_UPDATES,
+    ID_START_SERVER,
+    ID_STOP_SERVER,
+    ID_COPY_SERVER_URL,
+    ID_COPY_SERVER_TOKEN,
+    ID_SERVER_PROCESS,
     ID_STATE,
     ID_TEST_SCREENSHOT,
     ID_TEST_MOUSE,
@@ -171,6 +187,156 @@ std::string ComputerCppBundlePath() {
         return "";
     }
     return path.substr(0, bundleMarker + 4);
+}
+
+std::filesystem::path ComputerCppCliHelperPath() {
+    std::filesystem::path executablePath(wxStandardPaths::Get().GetExecutablePath().ToStdString());
+    std::string bundlePath = ComputerCppBundlePath();
+    if (!bundlePath.empty()) {
+        std::filesystem::path bundled = std::filesystem::path(bundlePath) / "Contents" / "MacOS" / "computer.cpp";
+        std::error_code ec;
+        if (std::filesystem::exists(bundled, ec) && !ec) {
+            return bundled;
+        }
+    }
+    return executablePath.parent_path() / "computer.cpp";
+}
+
+std::string NormalizeBindHost(std::string host) {
+    host = ComputerCpp::Trim(host);
+    if (host.empty()) {
+        return "127.0.0.1";
+    }
+    return host == "localhost" ? "127.0.0.1" : host;
+}
+
+bool IsTcpPortAvailable(const std::string& host, int port) {
+#if defined(__unix__) || defined(__APPLE__)
+    if (port <= 0 || port > 65535) {
+        return false;
+    }
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    int reuse = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    std::string bindHost = NormalizeBindHost(host);
+    if (::inet_pton(AF_INET, bindHost.c_str(), &addr.sin_addr) != 1) {
+        ::close(fd);
+        return false;
+    }
+    bool available = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    ::close(fd);
+    return available;
+#else
+    (void)host;
+    (void)port;
+    return true;
+#endif
+}
+
+std::optional<int> ChooseServerPort(const ServerConfig& server, const ServerAppConfig& app) {
+    std::string host = NormalizeBindHost(server.host);
+    if (app.port.has_value()) {
+        if (IsTcpPortAvailable(host, *app.port)) {
+            return *app.port;
+        }
+        return std::nullopt;
+    }
+    int start = server.basePort > 0 && server.basePort <= 65535 ? server.basePort : 8787;
+    for (int port = start; port <= 65535 && port < start + 100; ++port) {
+        if (IsTcpPortAvailable(host, port)) {
+            return port;
+        }
+    }
+    return std::nullopt;
+}
+
+std::string ServerDisplayUrl(const std::string& host, int port) {
+    return "http://" + NormalizeBindHost(host) + ":" + std::to_string(port);
+}
+
+bool IsReadableLuaFile(const std::string& path, std::string* error) {
+    if (ComputerCpp::Trim(path).empty()) {
+        if (error) {
+            *error = "Lua app path is required.";
+        }
+        return false;
+    }
+    std::filesystem::path appPath(path);
+    std::error_code ec;
+    if (!std::filesystem::exists(appPath, ec) || ec) {
+        if (error) {
+            *error = "Lua app path does not exist: " + path;
+        }
+        return false;
+    }
+    if (!std::filesystem::is_regular_file(appPath, ec) || ec) {
+        if (error) {
+            *error = "Lua app path is not a file: " + path;
+        }
+        return false;
+    }
+    if (appPath.extension() != ".lua") {
+        if (error) {
+            *error = "Lua app path must end in .lua: " + path;
+        }
+        return false;
+    }
+    std::ifstream in(appPath);
+    if (!in.good()) {
+        if (error) {
+            *error = "Lua app file is not readable: " + path;
+        }
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> SplitTextList(const std::string& raw) {
+    std::vector<std::string> out;
+    std::string current;
+    auto flush = [&] {
+        std::string value = ComputerCpp::Trim(current);
+        if (!value.empty()) {
+            out.push_back(value);
+        }
+        current.clear();
+    };
+    for (char ch : raw) {
+        if (ch == '\n' || ch == '\r' || ch == ',') {
+            flush();
+        } else {
+            current.push_back(ch);
+        }
+    }
+    flush();
+    return out;
+}
+
+wxString JoinTextList(const std::vector<std::string>& values) {
+    wxString out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out += "\n";
+        }
+        out += values[i];
+    }
+    return out;
+}
+
+bool CopyTextToClipboard(const std::string& value) {
+    if (!wxTheClipboard || !wxTheClipboard->Open()) {
+        return false;
+    }
+    wxTheClipboard->SetData(new wxTextDataObject(value));
+    wxTheClipboard->Close();
+    return true;
 }
 
 bool ResetMacPermissionService(const std::string& service) {
@@ -353,7 +519,7 @@ public:
 
         auto* root = new wxBoxSizer(wxVERTICAL);
         auto* titleRow = new wxBoxSizer(wxHORIZONTAL);
-        auto* title = new wxStaticText(this, wxID_ANY, "LLM Configuration");
+        auto* title = new wxStaticText(this, wxID_ANY, "ComputerCpp Configuration");
         wxFont titleFont = title->GetFont();
         titleFont.SetPointSize(titleFont.GetPointSize() + 3);
         titleFont.SetWeight(wxFONTWEIGHT_BOLD);
@@ -369,6 +535,7 @@ public:
         notebook_ = new wxNotebook(this, wxID_ANY);
         BuildProfilesPage();
         BuildProvidersPage();
+        BuildServerPage();
         BuildConfigPage();
         root->Add(notebook_, 1, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 18);
 
@@ -498,6 +665,41 @@ private:
             }
         }
         return base + "-new";
+    }
+
+    static std::string UniqueName(const std::map<std::string, ServerAppConfig>& items, const std::string& base) {
+        if (!items.contains(base)) {
+            return base;
+        }
+        for (int i = 2; i < 1000; ++i) {
+            std::string candidate = base + "-" + std::to_string(i);
+            if (!items.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return base + "-new";
+    }
+
+    static wxString OptionalIntText(const std::optional<int>& value) {
+        return value.has_value() ? wxString::Format("%d", *value) : "";
+    }
+
+    static std::optional<int> ParsePortField(const wxTextCtrl* field, const std::string& label, std::string* error) {
+        std::string value = FieldValue(field);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        int64_t parsed = 0;
+        auto* begin = value.data();
+        auto* end = begin + value.size();
+        auto [ptr, ec] = std::from_chars(begin, end, parsed);
+        if (ec != std::errc{} || ptr != end || parsed <= 0 || parsed > 65535) {
+            if (error) {
+                *error = label + " must be a port number from 1 to 65535.";
+            }
+            return std::nullopt;
+        }
+        return static_cast<int>(parsed);
     }
 
     wxTextCtrl* AddTextField(wxWindow* parent, wxFlexGridSizer* grid, const wxString& label, long style = 0, int minHeight = -1) {
@@ -648,6 +850,77 @@ private:
         remove->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnDeleteProvider, this);
     }
 
+    void BuildServerPage() {
+        auto* page = AddNotebookPage("Server");
+        auto* root = new wxBoxSizer(wxHORIZONTAL);
+
+        auto* listColumn = new wxBoxSizer(wxVERTICAL);
+        listColumn->Add(new wxStaticText(page, wxID_ANY, "Apps"), 0, wxBOTTOM, 6);
+        serverAppList_ = new wxListBox(page, wxID_ANY, wxDefaultPosition, wxSize(220, -1));
+        listColumn->Add(serverAppList_, 1, wxEXPAND);
+        auto* listButtons = new wxBoxSizer(wxHORIZONTAL);
+        auto* add = new wxButton(page, wxID_ANY, "New");
+        auto* remove = new wxButton(page, wxID_ANY, "Delete");
+        listButtons->Add(add, 1, wxRIGHT, 6);
+        listButtons->Add(remove, 1);
+        listColumn->Add(listButtons, 0, wxTOP | wxEXPAND, 8);
+        root->Add(listColumn, 0, wxALL | wxEXPAND, 14);
+
+        auto* detailPane = AddScrollableDetailPane(page, root);
+        auto* detail = new wxBoxSizer(wxVERTICAL);
+
+        auto* serverBox = new wxStaticBoxSizer(wxVERTICAL, detailPane, "Server Settings");
+        auto* serverGrid = new wxFlexGridSizer(2, 8, 10);
+        serverGrid->AddGrowableCol(1, 1);
+        serverHost_ = AddTextField(detailPane, serverGrid, "Host");
+        serverBasePort_ = AddTextField(detailPane, serverGrid, "Base Port");
+        serverAuthToken_ = AddTextField(detailPane, serverGrid, "Bearer Token");
+        serverAllowedOrigins_ = AddTextField(detailPane, serverGrid, "Allowed Origins", wxTE_MULTILINE, 64);
+        serverBox->Add(serverGrid, 0, wxALL | wxEXPAND, 12);
+        auto* tokenButtons = new wxBoxSizer(wxHORIZONTAL);
+        regenerateServerToken_ = new wxButton(detailPane, wxID_ANY, "Regenerate Token");
+        auto* copyToken = new wxButton(detailPane, wxID_ANY, "Copy Token");
+        tokenButtons->Add(regenerateServerToken_, 0, wxRIGHT, 8);
+        tokenButtons->Add(copyToken, 0);
+        tokenButtons->AddStretchSpacer();
+        serverBox->Add(tokenButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+        detail->Add(serverBox, 0, wxEXPAND | wxBOTTOM, 12);
+
+        auto* appBox = new wxStaticBoxSizer(wxVERTICAL, detailPane, "Selected App");
+        auto* appGrid = new wxFlexGridSizer(2, 8, 10);
+        appGrid->AddGrowableCol(1, 1);
+        serverAppName_ = AddTextField(detailPane, appGrid, "Stable Name");
+        serverAppDisplayName_ = AddTextField(detailPane, appGrid, "Display Name");
+        serverAppPath_ = AddTextField(detailPane, appGrid, "Lua Path");
+        serverAppPort_ = AddTextField(detailPane, appGrid, "Port");
+        appBox->Add(appGrid, 0, wxALL | wxEXPAND, 12);
+        auto* appButtons = new wxBoxSizer(wxHORIZONTAL);
+        browseServerApp_ = new wxButton(detailPane, wxID_ANY, "Browse...");
+        appButtons->Add(browseServerApp_, 0);
+        appButtons->AddStretchSpacer();
+        appBox->Add(appButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+        detail->Add(appBox, 0, wxEXPAND);
+
+        FinishScrollableDetailPane(detailPane, detail);
+        page->SetSizer(root);
+
+        serverAppList_->Bind(wxEVT_LISTBOX, &LlmSettingsDialog::OnServerAppSelected, this);
+        add->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnAddServerApp, this);
+        remove->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnDeleteServerApp, this);
+        browseServerApp_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnBrowseServerApp, this);
+        regenerateServerToken_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnRegenerateServerToken, this);
+        copyToken->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnCopyServerTokenFromSettings, this);
+
+        BindDirty(serverHost_);
+        BindDirty(serverBasePort_);
+        BindDirty(serverAuthToken_);
+        BindDirty(serverAllowedOrigins_);
+        BindDirty(serverAppName_);
+        BindDirty(serverAppDisplayName_);
+        BindDirty(serverAppPath_);
+        BindDirty(serverAppPort_);
+    }
+
     void BuildConfigPage() {
         auto* page = AddNotebookPage("Config");
         auto* root = new wxBoxSizer(wxVERTICAL);
@@ -729,12 +1002,18 @@ private:
         if (config_.profiles.empty()) {
             config_.profiles = DefaultAppConfig().profiles;
         }
+        if (ComputerCpp::EnsureServerAuthToken(config_)) {
+            std::string saveError;
+            SaveAppConfig(config_, &saveError);
+        }
         if (configPath_) {
             configPath_->ChangeValue(ConfigPath().string());
         }
         PopulateProviderLists(FirstProviderName());
         PopulateProviderChoices();
         PopulateProfileList(config_.defaultProfile.empty() ? FirstProfileName() : config_.defaultProfile);
+        LoadServerFields();
+        PopulateServerAppList(FirstServerAppName());
         SetDirty(false, loadStatus.empty() ? "All changes saved. Config file: " + ConfigPath().string() : loadStatus);
     }
 
@@ -744,6 +1023,10 @@ private:
 
     std::string FirstProviderName() const {
         return config_.providers.empty() ? std::string() : config_.providers.begin()->first;
+    }
+
+    std::string FirstServerAppName() const {
+        return config_.server.apps.empty() ? std::string() : config_.server.apps.begin()->first;
     }
 
     std::string SelectedString(wxListBox* list) const {
@@ -793,6 +1076,68 @@ private:
         }
         if (!selected.empty()) {
             profileProvider_->SetStringSelection(selected);
+        }
+    }
+
+    void LoadServerFields() {
+        loading_ = true;
+        serverHost_->ChangeValue(config_.server.host);
+        serverBasePort_->ChangeValue(wxString::Format("%d", config_.server.basePort));
+        serverAuthToken_->ChangeValue(config_.server.authToken);
+        serverAllowedOrigins_->ChangeValue(JoinTextList(config_.server.allowedOrigins));
+        loading_ = false;
+    }
+
+    void PopulateServerAppList(const std::string& selected) {
+        loading_ = true;
+        serverAppList_->Clear();
+        for (const auto& name : SortedNames(config_.server.apps)) {
+            const ServerAppConfig& app = config_.server.apps[name];
+            serverAppList_->Append(app.displayName.empty() ? name : app.displayName);
+        }
+        loading_ = false;
+
+        std::string target = selected.empty() ? FirstServerAppName() : selected;
+        int index = 0;
+        for (const auto& name : SortedNames(config_.server.apps)) {
+            if (name == target) {
+                serverAppList_->SetSelection(index);
+                break;
+            }
+            ++index;
+        }
+        LoadServerAppFields(target);
+    }
+
+    void LoadServerAppFields(const std::string& name) {
+        loading_ = true;
+        activeServerApp_ = name;
+        if (name.empty() || !config_.server.apps.contains(name)) {
+            serverAppName_->ChangeValue("");
+            serverAppDisplayName_->ChangeValue("");
+            serverAppPath_->ChangeValue("");
+            serverAppPort_->ChangeValue("");
+            EnableServerAppFields(false);
+            loading_ = false;
+            return;
+        }
+        const ServerAppConfig& app = config_.server.apps[name];
+        serverAppName_->ChangeValue(app.name);
+        serverAppDisplayName_->ChangeValue(app.displayName);
+        serverAppPath_->ChangeValue(app.path);
+        serverAppPort_->ChangeValue(OptionalIntText(app.port));
+        EnableServerAppFields(true);
+        loading_ = false;
+    }
+
+    void EnableServerAppFields(bool enabled) {
+        for (auto* field : {serverAppName_, serverAppDisplayName_, serverAppPath_, serverAppPort_}) {
+            if (field) {
+                field->Enable(enabled);
+            }
+        }
+        if (browseServerApp_) {
+            browseServerApp_->Enable(enabled);
         }
     }
 
@@ -975,6 +1320,87 @@ private:
         return true;
     }
 
+    bool FlushServerFields() {
+        std::string host = NormalizeBindHost(FieldValue(serverHost_));
+        if (host.empty()) {
+            host = "127.0.0.1";
+        }
+        std::string basePortError;
+        auto basePort = ParsePortField(serverBasePort_, "Base port", &basePortError);
+        if (!basePort.has_value()) {
+            SetStatus(basePortError.empty() ? "Base port is required." : basePortError);
+            return false;
+        }
+
+        config_.server.host = host;
+        config_.server.basePort = *basePort;
+        config_.server.authToken = FieldValue(serverAuthToken_);
+        if (config_.server.authToken.empty()) {
+            config_.server.authToken = GenerateServerAuthToken();
+            serverAuthToken_->ChangeValue(config_.server.authToken);
+        }
+        config_.server.allowedOrigins = SplitTextList(serverAllowedOrigins_->GetValue().ToStdString());
+
+        if (!FlushServerAppFields()) {
+            return false;
+        }
+        for (const auto& [name, app] : config_.server.apps) {
+            if (ComputerCpp::Trim(name).empty()) {
+                SetStatus("Server app stable name is required.");
+                return false;
+            }
+            std::string error;
+            if (!IsReadableLuaFile(app.path, &error)) {
+                SetStatus("Server app '" + name + "': " + error);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool FlushServerAppFields() {
+        if (activeServerApp_.empty()) {
+            return true;
+        }
+        std::string name = FieldValue(serverAppName_);
+        if (name.empty()) {
+            SetStatus("Server app stable name is required.");
+            return false;
+        }
+        if (name != activeServerApp_ && config_.server.apps.contains(name)) {
+            SetStatus("Server app '" + name + "' already exists.");
+            return false;
+        }
+        std::string displayName = FieldValue(serverAppDisplayName_);
+        if (displayName.empty()) {
+            displayName = name;
+        }
+        std::string path = FieldValue(serverAppPath_);
+        std::string fileError;
+        if (!IsReadableLuaFile(path, &fileError)) {
+            SetStatus(fileError);
+            return false;
+        }
+        std::string portError;
+        std::optional<int> port = ParsePortField(serverAppPort_, "App port", &portError);
+        if (!portError.empty()) {
+            SetStatus(portError);
+            return false;
+        }
+
+        ServerAppConfig app;
+        app.name = name;
+        app.displayName = displayName;
+        app.path = path;
+        app.port = port;
+        if (name != activeServerApp_) {
+            config_.server.apps.erase(activeServerApp_);
+        }
+        config_.server.apps[name] = app;
+        activeServerApp_ = name;
+        return true;
+    }
+
     bool SaveChanges(bool showStatus) {
         if (!FlushAllFields()) {
             return false;
@@ -991,13 +1417,15 @@ private:
     }
 
     bool FlushAllFields() {
-        return FlushProviderFields() && FlushProfileFields();
+        return FlushProviderFields() && FlushProfileFields() && FlushServerFields();
     }
 
     void RefreshAfterMutation(const std::string& profile, const std::string& provider) {
         PopulateProviderLists(provider.empty() ? activeProvider_ : provider);
         PopulateProviderChoices();
         PopulateProfileList(profile.empty() ? activeProfile_ : profile);
+        LoadServerFields();
+        PopulateServerAppList(activeServerApp_);
     }
 
     void OnProfileSelected(wxCommandEvent&) {
@@ -1027,6 +1455,28 @@ private:
         }
         PopulateProviderChoices();
         LoadProviderFields(SelectedString(providerList_));
+    }
+
+    void OnServerAppSelected(wxCommandEvent&) {
+        if (loading_) {
+            return;
+        }
+        std::string previous = activeServerApp_;
+        if (!FlushServerAppFields()) {
+            loading_ = true;
+            PopulateServerAppList(previous);
+            loading_ = false;
+            return;
+        }
+        int selection = serverAppList_->GetSelection();
+        std::string selected;
+        if (selection != wxNOT_FOUND) {
+            auto names = SortedNames(config_.server.apps);
+            if (static_cast<size_t>(selection) < names.size()) {
+                selected = names[static_cast<size_t>(selection)];
+            }
+        }
+        LoadServerAppFields(selected);
     }
 
     void OnProviderTypeChanged(wxCommandEvent&) {
@@ -1133,6 +1583,61 @@ private:
         activeProvider_.clear();
         RefreshAfterMutation(activeProfile_, FirstProviderName());
         MarkDirty("Deleted provider '" + removed + "'. Unsaved changes.");
+    }
+
+    void OnAddServerApp(wxCommandEvent&) {
+        if (!FlushAllFields()) {
+            return;
+        }
+        std::string name = UniqueName(config_.server.apps, "app");
+        ServerAppConfig app;
+        app.name = name;
+        app.displayName = "App";
+        config_.server.apps[name] = app;
+        activeServerApp_ = name;
+        PopulateServerAppList(name);
+        MarkDirty("Created server app '" + name + "'. Add a readable .lua path before saving.");
+    }
+
+    void OnDeleteServerApp(wxCommandEvent&) {
+        if (activeServerApp_.empty()) {
+            SetStatus("Choose a server app first.");
+            return;
+        }
+        std::string removed = activeServerApp_;
+        config_.server.apps.erase(removed);
+        activeServerApp_.clear();
+        PopulateServerAppList(FirstServerAppName());
+        MarkDirty("Deleted server app '" + removed + "'. Unsaved changes.");
+    }
+
+    void OnBrowseServerApp(wxCommandEvent&) {
+        wxFileDialog dialog(
+            this,
+            "Choose Lua app",
+            "",
+            serverAppPath_ ? serverAppPath_->GetValue() : "",
+            "Lua files (*.lua)|*.lua|All files|*",
+            wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dialog.ShowModal() != wxID_OK) {
+            return;
+        }
+        serverAppPath_->ChangeValue(dialog.GetPath());
+        MarkDirty("Server app path changed. Unsaved changes.");
+    }
+
+    void OnRegenerateServerToken(wxCommandEvent&) {
+        serverAuthToken_->ChangeValue(GenerateServerAuthToken());
+        MarkDirty("Bearer token regenerated. Save changes before using it.");
+    }
+
+    void OnCopyServerTokenFromSettings(wxCommandEvent&) {
+        std::string token = FieldValue(serverAuthToken_);
+        if (token.empty()) {
+            SetStatus("No bearer token to copy.");
+            return;
+        }
+        SetStatus(CopyTextToClipboard(token) ? "Bearer token copied." : "Could not open clipboard.");
     }
 
     void OnSave(wxCommandEvent&) {
@@ -1291,6 +1796,7 @@ private:
     bool dirty_ = false;
     std::string activeProfile_;
     std::string activeProvider_;
+    std::string activeServerApp_;
 
     wxNotebook* notebook_ = nullptr;
     wxListBox* profileList_ = nullptr;
@@ -1313,6 +1819,19 @@ private:
     wxTextCtrl* baseUrl_ = nullptr;
     wxTextCtrl* apiKey_ = nullptr;
     wxCheckBox* noApiKey_ = nullptr;
+
+    wxListBox* serverAppList_ = nullptr;
+    wxTextCtrl* serverHost_ = nullptr;
+    wxTextCtrl* serverBasePort_ = nullptr;
+    wxTextCtrl* serverAuthToken_ = nullptr;
+    wxTextCtrl* serverAllowedOrigins_ = nullptr;
+    wxTextCtrl* serverAppName_ = nullptr;
+    wxTextCtrl* serverAppDisplayName_ = nullptr;
+    wxTextCtrl* serverAppPath_ = nullptr;
+    wxTextCtrl* serverAppPort_ = nullptr;
+    wxButton* browseServerApp_ = nullptr;
+    wxButton* regenerateServerToken_ = nullptr;
+
     wxTextCtrl* configPath_ = nullptr;
     wxStaticText* dirtyBadge_ = nullptr;
     wxButton* save_ = nullptr;
@@ -1652,9 +2171,14 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_PERMISSIONS, TrayIcon::OnPermissions)
     EVT_MENU(ID_SETTINGS, TrayIcon::OnSettings)
     EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
+    EVT_MENU(ID_START_SERVER, TrayIcon::OnStartServer)
+    EVT_MENU(ID_STOP_SERVER, TrayIcon::OnStopServer)
+    EVT_MENU(ID_COPY_SERVER_URL, TrayIcon::OnCopyServerUrl)
+    EVT_MENU(ID_COPY_SERVER_TOKEN, TrayIcon::OnCopyServerToken)
     EVT_MENU(ID_STATE, TrayIcon::OnState)
     EVT_MENU(ID_TEST_SCREENSHOT, TrayIcon::OnTestScreenshot)
     EVT_MENU(ID_TEST_MOUSE, TrayIcon::OnTestMouse)
+    EVT_END_PROCESS(ID_SERVER_PROCESS, TrayIcon::OnServerProcessEnded)
     EVT_MENU(ID_QUIT, TrayIcon::OnQuit)
 wxEND_EVENT_TABLE()
 
@@ -1687,6 +2211,7 @@ TrayIcon::~TrayIcon() {
         settingsDialog_ = nullptr;
     }
     updateFlow_.reset();
+    StopServerProcess();
     StopDaemon("default");
     if (daemonThread_.joinable()) {
         daemonThread_.join();
@@ -1714,6 +2239,20 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     menu->Append(ID_PERMISSIONS, "Permissions");
     menu->Append(ID_SETTINGS, "Settings...");
     menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
+    menu->AppendSeparator();
+    wxString serverStatus = serverPid_ > 0 && !serverUrl_.empty()
+        ? "Server running at " + serverUrl_
+        : "Server not running";
+    wxMenuItem* serverStatusItem = menu->Append(wxID_ANY, serverStatus);
+    serverStatusItem->Enable(false);
+    wxMenuItem* startServer = menu->Append(ID_START_SERVER, "Start Server...");
+    startServer->Enable(serverPid_ == 0);
+    wxMenuItem* stopServer = menu->Append(ID_STOP_SERVER, "Stop Server");
+    stopServer->Enable(serverPid_ > 0);
+    wxMenuItem* copyServerUrl = menu->Append(ID_COPY_SERVER_URL, "Copy Server URL");
+    copyServerUrl->Enable(serverPid_ > 0 && !serverUrl_.empty());
+    wxMenuItem* copyServerToken = menu->Append(ID_COPY_SERVER_TOKEN, "Copy Bearer Token");
+    copyServerToken->Enable(serverPid_ > 0 && !serverToken_.empty());
     menu->AppendSeparator();
     menu->Append(ID_STATE, "Show State");
     menu->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
@@ -1743,6 +2282,176 @@ void TrayIcon::OnCheckForUpdates(wxCommandEvent&) {
     if (updateFlow_) {
         updateFlow_->CheckForUpdates();
     }
+}
+
+void TrayIcon::OnStartServer(wxCommandEvent&) {
+    if (serverPid_ > 0) {
+        wxMessageBox("Server is already running at " + serverUrl_, "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+
+    std::string error;
+    AppConfig config = LoadAppConfig(&error);
+    if (!error.empty()) {
+        wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
+    }
+    if (EnsureServerAuthToken(config)) {
+        std::string saveError;
+        if (!SaveAppConfig(config, &saveError)) {
+            wxMessageBox("Could not save generated server token:\n" + saveError, "ComputerCpp Server", wxOK | wxICON_ERROR);
+            return;
+        }
+    }
+    if (config.server.apps.empty()) {
+        wxMessageBox("Configure at least one Lua app in Settings > Server first.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+
+    std::vector<std::string> appKeys;
+    appKeys.reserve(config.server.apps.size());
+    for (const auto& [name, _] : config.server.apps) {
+        appKeys.push_back(name);
+    }
+    std::sort(appKeys.begin(), appKeys.end());
+    wxArrayString choices;
+    for (const auto& key : appKeys) {
+        const ServerAppConfig& app = config.server.apps[key];
+        choices.Add(app.displayName.empty() ? key : app.displayName);
+    }
+
+    wxSingleChoiceDialog picker(
+        nullptr,
+        "Choose the app server to start.",
+        "Start Server",
+        choices);
+    if (picker.ShowModal() != wxID_OK) {
+        return;
+    }
+    int selection = picker.GetSelection();
+    if (selection < 0 || static_cast<size_t>(selection) >= appKeys.size()) {
+        return;
+    }
+    const ServerAppConfig& app = config.server.apps[appKeys[static_cast<size_t>(selection)]];
+
+    std::string validationError;
+    if (!IsReadableLuaFile(app.path, &validationError)) {
+        wxMessageBox(validationError, "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
+    }
+    std::filesystem::path cliPath = ComputerCppCliHelperPath();
+    std::error_code ec;
+    if (!std::filesystem::exists(cliPath, ec) || ec) {
+        wxMessageBox("Could not find bundled CLI helper:\n" + cliPath.string(), "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    std::optional<int> port = ChooseServerPort(config.server, app);
+    if (!port.has_value()) {
+        wxString message;
+        if (app.port.has_value()) {
+            message << "Configured port " << *app.port << " is not available.";
+        } else {
+            message << "Could not find an available port starting at " << config.server.basePort << ".";
+        }
+        wxMessageBox(message, "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    std::string host = NormalizeBindHost(config.server.host);
+    std::string listen = host + ":" + std::to_string(*port);
+    std::string command = ShellQuote(cliPath.string()) +
+        " app serve " + ShellQuote(app.path) +
+        " --listen " + ShellQuote(listen) +
+        " --auth-token-env COMPUTER_CPP_TRAY_SERVER_TOKEN";
+    for (const auto& origin : config.server.allowedOrigins) {
+        command += " --allowed-origin " + ShellQuote(origin);
+    }
+
+    const char* previousTokenRaw = std::getenv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
+    const bool hadPreviousToken = previousTokenRaw != nullptr;
+    std::string previousToken = hadPreviousToken ? previousTokenRaw : "";
+    setenv("COMPUTER_CPP_TRAY_SERVER_TOKEN", config.server.authToken.c_str(), 1);
+
+    serverProcess_ = new wxProcess(this, ID_SERVER_PROCESS);
+    long pid = wxExecute(command, wxEXEC_ASYNC, serverProcess_);
+    if (hadPreviousToken) {
+        setenv("COMPUTER_CPP_TRAY_SERVER_TOKEN", previousToken.c_str(), 1);
+    } else {
+        unsetenv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
+    }
+
+    if (pid == 0) {
+        delete serverProcess_;
+        serverProcess_ = nullptr;
+        wxMessageBox("Failed to start app server.", "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    serverPid_ = pid;
+    serverUrl_ = ServerDisplayUrl(host, *port);
+    serverToken_ = config.server.authToken;
+    serverAppDisplayName_ = app.displayName.empty() ? app.name : app.displayName;
+    wxMessageBox(
+        "Started " + serverAppDisplayName_ + " at " + serverUrl_,
+        "ComputerCpp Server",
+        wxOK | wxICON_INFORMATION);
+}
+
+void TrayIcon::OnStopServer(wxCommandEvent&) {
+    if (serverPid_ == 0) {
+        wxMessageBox("Server is not running.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+    StopServerProcess();
+}
+
+void TrayIcon::OnCopyServerUrl(wxCommandEvent&) {
+    if (serverUrl_.empty()) {
+        wxMessageBox("Server is not running.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+    if (!CopyTextToClipboard(serverUrl_)) {
+        wxMessageBox("Could not open clipboard.", "ComputerCpp Server", wxOK | wxICON_ERROR);
+    }
+}
+
+void TrayIcon::OnCopyServerToken(wxCommandEvent&) {
+    if (serverToken_.empty()) {
+        wxMessageBox("No server token is available.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+    if (!CopyTextToClipboard(serverToken_)) {
+        wxMessageBox("Could not open clipboard.", "ComputerCpp Server", wxOK | wxICON_ERROR);
+    }
+}
+
+void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
+    if (serverPid_ == 0 || event.GetPid() != serverPid_) {
+        return;
+    }
+    ClearServerProcessState(true);
+}
+
+void TrayIcon::StopServerProcess() {
+    if (serverPid_ > 0) {
+        wxKill(serverPid_, wxSIGTERM, nullptr, wxKILL_CHILDREN);
+    }
+    ClearServerProcessState(true);
+}
+
+void TrayIcon::ClearServerProcessState(bool deleteProcess) {
+    if (serverProcess_) {
+        if (deleteProcess) {
+            serverProcess_->Detach();
+            delete serverProcess_;
+        }
+        serverProcess_ = nullptr;
+    }
+    serverPid_ = 0;
+    serverUrl_.clear();
+    serverToken_.clear();
+    serverAppDisplayName_.clear();
 }
 
 void TrayIcon::SetUpPermissionsIfNeeded(bool notifyWhenGranted) {

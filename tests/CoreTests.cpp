@@ -1,3 +1,4 @@
+#include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/HumanInput.h"
 #include "computer_cpp/Image.h"
@@ -45,6 +46,63 @@ void TestStringUtils() {
     assert(keys.size() == 3);
     assert(keys[0] == "Cmd");
     assert(ComputerCpp::Join(keys, ",") == "Cmd,Shift,G");
+}
+
+void TestAppConfigServerRoundTrip() {
+    std::string missingError;
+    ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
+    assert(missingError.empty());
+    assert(missing.server.host == "127.0.0.1");
+    assert(missing.server.basePort == 8787);
+    assert(missing.server.apps.empty());
+
+    ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
+    assert(defaults.server.host == "127.0.0.1");
+    assert(defaults.server.basePort == 8787);
+    assert(defaults.server.authToken.empty());
+
+    ComputerCpp::AppConfig config = defaults;
+    config.server.host = "0.0.0.0";
+    config.server.basePort = 8790;
+    config.server.authToken = "test-token";
+    config.server.allowedOrigins = {"https://mcp.example.com", "http://127.0.0.1:3000"};
+
+    ComputerCpp::ServerAppConfig linkedin;
+    linkedin.name = "linkedin";
+    linkedin.displayName = "LinkedIn Recruiter";
+    linkedin.path = "/tmp/linkedin-recruiter.lua";
+    linkedin.port = 8788;
+    config.server.apps[linkedin.name] = linkedin;
+
+    std::string toml = ComputerCpp::AppConfigToToml(config);
+    assert(toml.find("[server]") != std::string::npos);
+    assert(toml.find("[server.apps.linkedin]") != std::string::npos);
+    assert(toml.find("auth_token = \"test-token\"") != std::string::npos);
+
+    std::string error;
+    assert(ComputerCpp::SaveAppConfig(config, &error));
+    ComputerCpp::AppConfig loaded = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(loaded.server.host == "0.0.0.0");
+    assert(loaded.server.basePort == 8790);
+    assert(loaded.server.authToken == "test-token");
+    assert(loaded.server.allowedOrigins.size() == 2);
+    assert(loaded.server.apps.contains("linkedin"));
+    assert(loaded.server.apps["linkedin"].displayName == "LinkedIn Recruiter");
+    assert(loaded.server.apps["linkedin"].path == "/tmp/linkedin-recruiter.lua");
+    assert(loaded.server.apps["linkedin"].port == 8788);
+
+    auto redacted = ComputerCpp::AppConfigToJson(loaded);
+    assert(redacted["server"]["authToken"] == "<redacted>");
+    auto visible = ComputerCpp::AppConfigToJson(loaded, false);
+    assert(visible["server"]["authToken"] == "test-token");
+
+    ComputerCpp::AppConfig tokenConfig = ComputerCpp::DefaultAppConfig();
+    assert(ComputerCpp::EnsureServerAuthToken(tokenConfig));
+    assert(tokenConfig.server.authToken.size() >= 32);
+    std::string generated = tokenConfig.server.authToken;
+    assert(!ComputerCpp::EnsureServerAuthToken(tokenConfig));
+    assert(tokenConfig.server.authToken == generated);
 }
 
 void TestRefStore() {
@@ -366,6 +424,7 @@ int main() {
     setenv("COMPUTER_CPP_HOME", tempHome.c_str(), 1);
 
     TestStringUtils();
+    TestAppConfigServerRoundTrip();
     TestRefStore();
     TestNativeDependencies();
     TestUpdaterVersionParsing();

@@ -6,12 +6,14 @@
 #include <toml++/toml.hpp>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string_view>
 #include <vector>
@@ -102,6 +104,18 @@ std::string TomlString(const toml::table& table, const char* key, const std::str
         return *value;
     }
     return fallback;
+}
+
+std::vector<std::string> TomlStringArray(const toml::table& table, const char* key) {
+    std::vector<std::string> out;
+    if (auto array = table[key].as_array()) {
+        for (const auto& item : *array) {
+            if (auto value = item.value<std::string>()) {
+                out.push_back(*value);
+            }
+        }
+    }
+    return out;
 }
 
 json TomlNodeToJson(const toml::node& node) {
@@ -269,6 +283,40 @@ std::optional<double> ParseDouble(const std::string& raw) {
 
 } // namespace
 
+std::string GenerateServerAuthToken() {
+    std::array<unsigned char, 32> bytes {};
+    bool filled = false;
+    {
+        std::ifstream random("/dev/urandom", std::ios::binary);
+        if (random.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
+            filled = true;
+        }
+    }
+    if (!filled) {
+        std::random_device random;
+        for (unsigned char& byte : bytes) {
+            byte = static_cast<unsigned char>(random() & 0xFF);
+        }
+    }
+
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string token;
+    token.reserve(bytes.size() * 2);
+    for (unsigned char byte : bytes) {
+        token.push_back(hex[(byte >> 4) & 0x0F]);
+        token.push_back(hex[byte & 0x0F]);
+    }
+    return token;
+}
+
+bool EnsureServerAuthToken(AppConfig& config) {
+    if (!Trim(config.server.authToken).empty()) {
+        return false;
+    }
+    config.server.authToken = GenerateServerAuthToken();
+    return true;
+}
+
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error) {
     std::string provider = Lowercase(Trim(value));
     if (provider.empty() || provider == "auto") {
@@ -349,6 +397,7 @@ AppConfig LoadAppConfig(std::string* error) {
 
     config.providers.clear();
     config.profiles.clear();
+    config.server = ServerConfig{};
     config.version = static_cast<int>(parsed["version"].value_or<int64_t>(1));
     config.defaultProfile = parsed["default_profile"].value_or("main");
 
@@ -408,6 +457,35 @@ AppConfig LoadAppConfig(std::string* error) {
                 }
             }
             config.profiles[profile.name] = profile;
+        }
+    }
+
+    if (auto server = parsed["server"].as_table()) {
+        config.server.host = TomlString(*server, "host", config.server.host);
+        if (auto value = (*server)["base_port"].value<int64_t>()) {
+            if (*value > 0 && *value <= 65535) {
+                config.server.basePort = static_cast<int>(*value);
+            }
+        }
+        config.server.authToken = TomlString(*server, "auth_token");
+        config.server.allowedOrigins = TomlStringArray(*server, "allowed_origins");
+        if (auto apps = (*server)["apps"].as_table()) {
+            for (const auto& [key, node] : *apps) {
+                auto* table = node.as_table();
+                if (!table) {
+                    continue;
+                }
+                ServerAppConfig app;
+                app.name = TomlKeyName(key);
+                app.displayName = TomlString(*table, "display_name", app.name);
+                app.path = TomlString(*table, "path");
+                if (auto value = (*table)["port"].value<int64_t>()) {
+                    if (*value > 0 && *value <= 65535) {
+                        app.port = static_cast<int>(*value);
+                    }
+                }
+                config.server.apps[app.name] = app;
+            }
         }
     }
 
@@ -478,6 +556,23 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
         }
         out["profiles"][name] = item;
     }
+    out["server"] = {
+        {"host", config.server.host},
+        {"basePort", config.server.basePort},
+        {"authToken", redactSecrets && !config.server.authToken.empty() ? "<redacted>" : config.server.authToken},
+        {"allowedOrigins", config.server.allowedOrigins},
+        {"apps", json::object()},
+    };
+    for (const auto& [name, app] : config.server.apps) {
+        json item = {
+            {"displayName", app.displayName},
+            {"path", app.path},
+        };
+        if (app.port.has_value()) {
+            item["port"] = *app.port;
+        }
+        out["server"]["apps"][name] = item;
+    }
     return out;
 }
 
@@ -535,6 +630,24 @@ std::string AppConfigToToml(const AppConfig& config) {
             }
             out << "\n";
         }
+    }
+
+    out << TomlTablePath({"server"}) << "\n";
+    out << "host = " << TomlStringLiteral(config.server.host) << "\n";
+    out << "base_port = " << config.server.basePort << "\n";
+    if (!config.server.authToken.empty()) {
+        out << "auth_token = " << TomlStringLiteral(config.server.authToken) << "\n";
+    }
+    out << "allowed_origins = " << JsonToTomlValue(config.server.allowedOrigins) << "\n\n";
+
+    for (const auto& [name, app] : config.server.apps) {
+        out << TomlTablePath({"server", "apps", name}) << "\n";
+        out << "display_name = " << TomlStringLiteral(app.displayName) << "\n";
+        out << "path = " << TomlStringLiteral(app.path) << "\n";
+        if (app.port.has_value()) {
+            out << "port = " << *app.port << "\n";
+        }
+        out << "\n";
     }
 
     return out.str();
