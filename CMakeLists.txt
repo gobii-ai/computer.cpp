@@ -107,6 +107,7 @@ add_library(computer_cpp_core
     src/core/Sqlite.cpp
     src/core/StringUtils.cpp
     src/core/Timeline.cpp
+    src/core/TrayServerState.cpp
     src/core/Updater.cpp
     src/daemon/Daemon.cpp
     src/daemon/DaemonArtifacts.cpp

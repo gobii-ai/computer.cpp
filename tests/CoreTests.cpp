@@ -6,6 +6,7 @@
 #include "computer_cpp/RefStore.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/Timeline.h"
+#include "computer_cpp/TrayServerState.h"
 #include "computer_cpp/Updater.h"
 
 #include "LinuxPng.h"
@@ -103,6 +104,46 @@ void TestAppConfigServerRoundTrip() {
     std::string generated = tokenConfig.server.authToken;
     assert(!ComputerCpp::EnsureServerAuthToken(tokenConfig));
     assert(tokenConfig.server.authToken == generated);
+}
+
+void TestTrayServerState() {
+    fs::path path = ComputerCpp::SessionDir("unit") / "tray-server-state.json";
+    ComputerCpp::TrayAppServerState state;
+    state.pid = 12345;
+    state.host = "127.0.0.1";
+    state.port = 8787;
+    state.url = "http://127.0.0.1:8787";
+    state.appPath = "/tmp/app.lua";
+    state.appId = "app-id";
+    state.displayName = "Test App";
+    state.startedAt = "2026-06-22T00:00:00Z";
+
+    std::string error;
+    assert(ComputerCpp::SaveTrayAppServerState(state, path, &error));
+    auto loaded = ComputerCpp::LoadTrayAppServerState(path, &error);
+    assert(loaded.has_value());
+    assert(loaded->pid == state.pid);
+    assert(loaded->host == state.host);
+    assert(loaded->port == state.port);
+    assert(loaded->url == state.url);
+    assert(loaded->appPath == state.appPath);
+    assert(loaded->appId == state.appId);
+    assert(loaded->displayName == state.displayName);
+    assert(loaded->startedAt == state.startedAt);
+
+    assert(ComputerCpp::RemoveTrayAppServerStateForPid(path, 999, &error));
+    assert(fs::exists(path));
+    assert(ComputerCpp::RemoveTrayAppServerStateForPid(path, state.pid, &error));
+    assert(!fs::exists(path));
+
+    {
+        std::ofstream out(path);
+        out << "{\"pid\": -1}";
+    }
+    auto invalid = ComputerCpp::LoadTrayAppServerState(path, &error);
+    assert(!invalid.has_value());
+    assert(ComputerCpp::RemoveTrayAppServerState(path, &error));
+    assert(!ComputerCpp::IsProcessAlive(-1));
 }
 
 void TestRefStore() {
@@ -425,6 +466,7 @@ int main() {
 
     TestStringUtils();
     TestAppConfigServerRoundTrip();
+    TestTrayServerState();
     TestRefStore();
     TestNativeDependencies();
     TestUpdaterVersionParsing();

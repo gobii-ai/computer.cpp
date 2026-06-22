@@ -11,6 +11,11 @@ class wxDialog;
 class wxProcess;
 class wxProcessEvent;
 
+namespace ComputerCpp {
+struct ServerAppConfig;
+struct ServerConfig;
+}
+
 namespace ComputerCpp::App {
 
 class TrayIcon : public wxTaskBarIcon {
@@ -34,6 +39,8 @@ private:
     void OnTestMouse(wxCommandEvent& event);
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
+    bool TryAdoptExistingServer(bool removeInvalidState);
+    bool TryAdoptLegacyServer(const ComputerCpp::ServerConfig& server, const ComputerCpp::ServerAppConfig& app, int port);
     void StopServerProcess();
     void ClearServerProcessState(bool deleteProcess);
 

@@ -7,11 +7,13 @@
 #include "computer_cpp/Platform.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/Transport.h"
+#include "computer_cpp/TrayServerState.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +45,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -237,6 +241,172 @@ bool IsTcpPortAvailable(const std::string& host, int port) {
     (void)port;
     return true;
 #endif
+}
+
+std::string HealthConnectHost(const std::string& host) {
+    std::string normalized = NormalizeBindHost(host);
+    return normalized == "0.0.0.0" ? "127.0.0.1" : normalized;
+}
+
+bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToken) {
+#if defined(__unix__) || defined(__APPLE__)
+    if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
+        return false;
+    }
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+
+    timeval timeout {};
+    timeout.tv_sec = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(state.port));
+    std::string host = HealthConnectHost(state.host);
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        ::close(fd);
+        return false;
+    }
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return false;
+    }
+
+    std::string request =
+        "GET /health HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
+        "\r\nAuthorization: Bearer " + bearerToken +
+        "\r\nConnection: close\r\n\r\n";
+    const char* cursor = request.data();
+    size_t remaining = request.size();
+    while (remaining > 0) {
+        ssize_t sent = ::send(fd, cursor, remaining, 0);
+        if (sent <= 0) {
+            ::close(fd);
+            return false;
+        }
+        cursor += sent;
+        remaining -= static_cast<size_t>(sent);
+    }
+
+    char buffer[512];
+    ssize_t read = ::recv(fd, buffer, sizeof(buffer) - 1, 0);
+    ::close(fd);
+    if (read <= 0) {
+        return false;
+    }
+    buffer[read] = '\0';
+    std::string response(buffer);
+    return response.rfind("HTTP/1.1 200", 0) == 0 || response.rfind("HTTP/1.0 200", 0) == 0;
+#else
+    (void)state;
+    (void)bearerToken;
+    return false;
+#endif
+}
+
+std::string ProcessCommandLine(long pid) {
+#if defined(__APPLE__)
+    std::string command = "/bin/ps -p " + std::to_string(pid) + " -o command= 2>/dev/null";
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+        return {};
+    }
+    std::string out;
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        out += buffer;
+    }
+    pclose(pipe);
+    return ComputerCpp::Trim(out);
+#elif defined(__linux__)
+    std::ifstream in("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    if (!in) {
+        return {};
+    }
+    std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::replace(raw.begin(), raw.end(), '\0', ' ');
+    return ComputerCpp::Trim(raw);
+#else
+    (void)pid;
+    return {};
+#endif
+}
+
+std::vector<std::pair<long, std::string>> AppServeProcesses() {
+    std::vector<std::pair<long, std::string>> processes;
+#if defined(__APPLE__) || defined(__linux__)
+    FILE* pipe = popen("/bin/ps ax -o pid=,command= 2>/dev/null", "r");
+    if (!pipe) {
+        return processes;
+    }
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        std::string line = ComputerCpp::Trim(buffer);
+        if (line.empty()) {
+            continue;
+        }
+        size_t split = line.find_first_of(" \t");
+        if (split == std::string::npos) {
+            continue;
+        }
+        std::string pidText = line.substr(0, split);
+        std::string command = ComputerCpp::Trim(line.substr(split + 1));
+        char* end = nullptr;
+        long pid = std::strtol(pidText.c_str(), &end, 10);
+        if (end == pidText.c_str() || *end != '\0' || pid <= 0) {
+            continue;
+        }
+        if (command.find("computer.cpp") != std::string::npos &&
+            command.find("app serve") != std::string::npos) {
+            processes.emplace_back(pid, command);
+        }
+    }
+    pclose(pipe);
+#endif
+    return processes;
+}
+
+bool LooksLikeTrayAppServerProcess(const TrayAppServerState& state) {
+    std::string command = ProcessCommandLine(state.pid);
+    if (command.empty()) {
+        return false;
+    }
+    const bool currentTrayServer = command.find("--tray-state-file") != std::string::npos;
+    const bool legacyAdoptedServer = state.appId.empty() &&
+        command.find("--auth-token-env COMPUTER_CPP_TRAY_SERVER_TOKEN") != std::string::npos;
+    return command.find("computer.cpp") != std::string::npos &&
+        command.find("app serve") != std::string::npos &&
+        command.find(state.appPath) != std::string::npos &&
+        (currentTrayServer || legacyAdoptedServer);
+}
+
+bool WaitForProcessExit(long pid, bool reapChild) {
+    for (int i = 0; i < 20; ++i) {
+#if defined(__unix__) || defined(__APPLE__)
+        if (reapChild) {
+            int status = 0;
+            pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+            if (result == static_cast<pid_t>(pid)) {
+                return true;
+            }
+            if (result < 0 && errno == ECHILD) {
+                return !IsProcessAlive(pid);
+            }
+        } else if (!IsProcessAlive(pid)) {
+            return true;
+        }
+#else
+        if (!IsProcessAlive(pid)) {
+            return true;
+        }
+#endif
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return !IsProcessAlive(pid);
 }
 
 std::optional<int> ChooseServerPort(const ServerConfig& server, const ServerAppConfig& app) {
@@ -2189,6 +2359,7 @@ TrayIcon::TrayIcon() {
         wxExit();
     });
     StartOwnedDaemon();
+    TryAdoptExistingServer(true);
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
@@ -2308,6 +2479,10 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
         wxMessageBox("Server is already running at " + serverUrl_, "ComputerCpp Server", wxOK | wxICON_INFORMATION);
         return;
     }
+    if (TryAdoptExistingServer(true)) {
+        wxMessageBox("Server is already running at " + serverUrl_, "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
 
     std::string error;
     AppConfig config = LoadAppConfig(&error);
@@ -2358,6 +2533,13 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
         wxMessageBox(validationError, "ComputerCpp Server", wxOK | wxICON_ERROR);
         return;
     }
+    int legacyPort = app.port.value_or(
+        config.server.basePort > 0 && config.server.basePort <= 65535 ? config.server.basePort : 8787);
+    if (TryAdoptLegacyServer(config.server, app, legacyPort)) {
+        wxMessageBox("Server is already running at " + serverUrl_, "ComputerCpp Server", wxOK | wxICON_INFORMATION);
+        return;
+    }
+
     std::filesystem::path cliPath = ComputerCppCliHelperPath();
     std::error_code ec;
     if (!std::filesystem::exists(cliPath, ec) || ec) {
@@ -2379,10 +2561,13 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
 
     std::string host = NormalizeBindHost(config.server.host);
     std::string listen = host + ":" + std::to_string(*port);
+    std::string displayName = app.displayName.empty() ? app.name : app.displayName;
     std::string command = ShellQuote(cliPath.string()) +
         " app serve " + ShellQuote(app.path) +
         " --listen " + ShellQuote(listen) +
-        " --auth-token-env COMPUTER_CPP_TRAY_SERVER_TOKEN";
+        " --auth-token-env COMPUTER_CPP_TRAY_SERVER_TOKEN" +
+        " --tray-state-file " + ShellQuote(TrayAppServerStatePath().string()) +
+        " --tray-display-name " + ShellQuote(displayName);
     for (const auto& origin : config.server.allowedOrigins) {
         command += " --allowed-origin " + ShellQuote(origin);
     }
@@ -2409,7 +2594,7 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
 
     serverPid_ = pid;
     serverUrl_ = ServerDisplayUrl(host, *port);
-    serverAppDisplayName_ = app.displayName.empty() ? app.name : app.displayName;
+    serverAppDisplayName_ = displayName;
     wxMessageBox(
         "Started " + serverAppDisplayName_ + " at " + serverUrl_,
         "ComputerCpp Server",
@@ -2428,12 +2613,110 @@ void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
     if (serverPid_ == 0 || event.GetPid() != serverPid_) {
         return;
     }
+    std::string stateError;
+    RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), serverPid_, &stateError);
     ClearServerProcessState(true);
 }
 
-void TrayIcon::StopServerProcess() {
+bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
     if (serverPid_ > 0) {
-        wxKill(serverPid_, wxSIGTERM, nullptr, wxKILL_CHILDREN);
+        return true;
+    }
+
+    const std::filesystem::path statePath = TrayAppServerStatePath();
+    std::string stateError;
+    auto state = LoadTrayAppServerState(statePath, &stateError);
+    if (!state) {
+        if (removeInvalidState) {
+            RemoveTrayAppServerState(statePath, nullptr);
+        }
+        return false;
+    }
+
+    bool valid = IsProcessAlive(state->pid) &&
+        LooksLikeTrayAppServerProcess(*state);
+    if (valid) {
+        std::string configError;
+        AppConfig config = LoadAppConfig(&configError);
+        valid = configError.empty() && HttpHealthOk(*state, config.server.authToken);
+    }
+
+    if (!valid) {
+        if (removeInvalidState) {
+            RemoveTrayAppServerStateForPid(statePath, state->pid, nullptr);
+        }
+        return false;
+    }
+
+    serverPid_ = state->pid;
+    serverUrl_ = state->url;
+    serverAppDisplayName_ = state->displayName;
+    serverProcess_ = nullptr;
+    return true;
+}
+
+bool TrayIcon::TryAdoptLegacyServer(const ServerConfig& server, const ServerAppConfig& app, int port) {
+    if (serverPid_ > 0) {
+        return true;
+    }
+
+    std::string host = NormalizeBindHost(server.host);
+    std::string listen = host + ":" + std::to_string(port);
+    std::string appPath = app.path;
+    std::string absoluteAppPath;
+    try {
+        absoluteAppPath = std::filesystem::absolute(app.path).string();
+    } catch (...) {
+    }
+
+    for (const auto& [pid, command] : AppServeProcesses()) {
+        if (command.find("--tray-state-file") != std::string::npos) {
+            continue;
+        }
+        if (command.find("--listen " + listen) == std::string::npos &&
+            command.find("--listen '" + listen + "'") == std::string::npos &&
+            command.find("--listen \"" + listen + "\"") == std::string::npos) {
+            continue;
+        }
+        const bool appMatches = command.find(appPath) != std::string::npos ||
+            (!absoluteAppPath.empty() && command.find(absoluteAppPath) != std::string::npos);
+        if (!appMatches) {
+            continue;
+        }
+
+        TrayAppServerState state;
+        state.pid = pid;
+        state.host = host;
+        state.port = port;
+        state.url = ServerDisplayUrl(host, port);
+        state.appPath = absoluteAppPath.empty() ? appPath : absoluteAppPath;
+        state.displayName = app.displayName.empty() ? app.name : app.displayName;
+        if (!HttpHealthOk(state, server.authToken)) {
+            continue;
+        }
+
+        std::string stateError;
+        SaveTrayAppServerState(state, TrayAppServerStatePath(), &stateError);
+        serverPid_ = state.pid;
+        serverUrl_ = state.url;
+        serverAppDisplayName_ = state.displayName;
+        serverProcess_ = nullptr;
+        return true;
+    }
+    return false;
+}
+
+void TrayIcon::StopServerProcess() {
+    long pid = serverPid_;
+    bool currentSessionChild = serverProcess_ != nullptr;
+    if (pid > 0) {
+        wxKill(pid, wxSIGTERM, nullptr, wxKILL_CHILDREN);
+        if (!WaitForProcessExit(pid, currentSessionChild)) {
+            wxKill(pid, wxSIGKILL, nullptr, wxKILL_CHILDREN);
+            WaitForProcessExit(pid, currentSessionChild);
+        }
+        std::string stateError;
+        RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), pid, &stateError);
     }
     ClearServerProcessState(true);
 }

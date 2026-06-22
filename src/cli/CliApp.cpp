@@ -3,6 +3,7 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/StringUtils.h"
+#include "computer_cpp/TrayServerState.h"
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +32,7 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <arpa/inet.h>
+#include <csignal>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -45,6 +47,41 @@ namespace {
 
 constexpr std::string_view kMcpEndpointPath = "/mcp";
 constexpr std::string_view kMcpLatestProtocolVersion = "2025-11-25";
+
+#if defined(__unix__) || defined(__APPLE__)
+volatile sig_atomic_t gAppServeStopRequested = 0;
+volatile sig_atomic_t gAppServeServerFd = -1;
+
+void AppServeSignalHandler(int) {
+    gAppServeStopRequested = 1;
+    int fd = gAppServeServerFd;
+    if (fd >= 0) {
+        ::close(fd);
+        gAppServeServerFd = -1;
+    }
+}
+
+class ScopedAppServeSignals {
+public:
+    explicit ScopedAppServeSignals(int serverFd) {
+        gAppServeStopRequested = 0;
+        gAppServeServerFd = serverFd;
+        previousTerm_ = std::signal(SIGTERM, AppServeSignalHandler);
+        previousInt_ = std::signal(SIGINT, AppServeSignalHandler);
+    }
+
+    ~ScopedAppServeSignals() {
+        gAppServeServerFd = -1;
+        std::signal(SIGTERM, previousTerm_);
+        std::signal(SIGINT, previousInt_);
+    }
+
+private:
+    using Handler = void (*)(int);
+    Handler previousTerm_ = nullptr;
+    Handler previousInt_ = nullptr;
+};
+#endif
 
 struct AppRunArgs {
     bool async = false;
@@ -1040,6 +1077,8 @@ struct AppServeOptions {
     int port = 8787;
     std::string authToken;
     std::set<std::string> allowedOrigins;
+    std::optional<fs::path> trayStateFile;
+    std::string trayDisplayName;
 };
 
 struct HttpRequest {
@@ -1891,6 +1930,18 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
                 return std::nullopt;
             }
             serve.allowedOrigins.insert(*origin);
+        } else if (args[i] == "--tray-state-file") {
+            if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
+                error = "app serve --tray-state-file requires a path";
+                return std::nullopt;
+            }
+            serve.trayStateFile = args[++i];
+        } else if (args[i] == "--tray-display-name") {
+            if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
+                error = "app serve --tray-display-name requires a value";
+                return std::nullopt;
+            }
+            serve.trayDisplayName = args[++i];
         } else if (args[i] == "--trace-dir" || args[i] == "--operation-store" ||
                    args[i] == "--default-timeout" || args[i] == "--max-operation-time") {
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
@@ -1944,12 +1995,30 @@ int RunHttpServer(
         ::close(serverFd);
         return ErrorExit(options, message, 1, "internal_error");
     }
+    ScopedAppServeSignals signals(serverFd);
     std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port
               << " (MCP endpoint: /mcp)\n";
 
-    while (true) {
+    if (serveOptions.trayStateFile.has_value()) {
+        TrayAppServerState state;
+        state.pid = static_cast<long>(getpid());
+        state.host = bindHost;
+        state.port = serveOptions.port;
+        state.url = "http://" + bindHost + ":" + std::to_string(serveOptions.port);
+        state.appPath = fs::absolute(serveOptions.appPath).string();
+        state.appId = appId;
+        state.displayName = serveOptions.trayDisplayName;
+        state.startedAt = NowIsoUtc();
+        std::string stateError;
+        if (!SaveTrayAppServerState(state, *serveOptions.trayStateFile, &stateError)) {
+            std::cerr << "warning: " << stateError << "\n";
+        }
+    }
+
+    while (!gAppServeStopRequested) {
         int clientFd = ::accept(serverFd, nullptr, nullptr);
         if (clientFd < 0) {
+            if (gAppServeStopRequested) break;
             if (errno == EINTR) continue;
             break;
         }
@@ -1962,7 +2031,14 @@ int RunHttpServer(
         }
         ::close(clientFd);
     }
-    ::close(serverFd);
+    if (gAppServeServerFd >= 0) {
+        ::close(serverFd);
+        gAppServeServerFd = -1;
+    }
+    if (serveOptions.trayStateFile.has_value()) {
+        std::string stateError;
+        RemoveTrayAppServerStateForPid(*serveOptions.trayStateFile, static_cast<long>(getpid()), &stateError);
+    }
     return 0;
 #else
     (void)executablePath;
