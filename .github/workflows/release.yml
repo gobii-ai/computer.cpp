@@ -43,7 +43,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake wxwidgets dylibbundler
+          brew install cmake ninja wxwidgets dylibbundler
 
       - name: Bump version
         env:
@@ -163,16 +163,9 @@ jobs:
             echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
           } >> "$GITHUB_ENV"
 
-      - name: Configure release build
-        run: |
-          cmake -S . -B "$BUILD_DIR" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DCOMPUTER_CPP_CODE_SIGN_APP=OFF
-
       - name: Build release targets
         run: |
-          cmake --build "$BUILD_DIR" --target computer.cpp ComputerCpp --config Release
+          scripts/build-mac.sh --release --build-dir "$BUILD_DIR"
 
       - name: Prepare notary credentials
         env:
