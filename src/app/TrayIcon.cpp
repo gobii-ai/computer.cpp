@@ -409,6 +409,14 @@ bool CommandContainsListen(const std::string& command, const std::string& listen
         command.find("--listen \"" + listen + "\"") != std::string::npos;
 }
 
+std::vector<std::string> CompatibleListenHosts(const std::string& host) {
+    std::vector<std::string> hosts{host};
+    if (host == "127.0.0.1") {
+        hosts.push_back("0.0.0.0");
+    }
+    return hosts;
+}
+
 std::string AbsolutePathString(const std::string& path) {
     try {
         return std::filesystem::absolute(path).string();
@@ -451,8 +459,12 @@ std::optional<TrayAppServerState> AdoptableServerState(
         if (port <= 0 || port > 65535) {
             continue;
         }
-        std::string listen = host + ":" + std::to_string(port);
-        if (!CommandContainsListen(command, listen)) {
+        bool listenMatches = false;
+        for (const auto& listenHost : CompatibleListenHosts(host)) {
+            listenMatches = listenMatches ||
+                CommandContainsListen(command, listenHost + ":" + std::to_string(port));
+        }
+        if (!listenMatches) {
             continue;
         }
 
@@ -465,6 +477,33 @@ std::optional<TrayAppServerState> AdoptableServerState(
         state.appId = app.name;
         state.displayName = app.displayName.empty() ? app.name : app.displayName;
         if (HttpHealthOk(state, server.authToken)) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TrayAppServerState> FindAdoptableConfiguredServerState(
+    const ServerConfig& server,
+    const ServerAppConfig& app,
+    const std::vector<std::pair<long, std::string>>& processes
+) {
+    for (const auto& [pid, command] : processes) {
+        auto state = AdoptableServerState(server, app, pid, command);
+        if (state) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TrayAppServerState> FindAdoptableConfiguredServerState(
+    const ServerConfig& server,
+    const std::vector<std::pair<long, std::string>>& processes
+) {
+    for (const auto& [_, app] : server.apps) {
+        auto state = FindAdoptableConfiguredServerState(server, app, processes);
+        if (state) {
             return state;
         }
     }
@@ -506,11 +545,13 @@ bool WaitForProcessExit(long pid, bool reapChild) {
     return !IsProcessAlive(pid);
 }
 
-void SignalServerProcess(long pid, wxSignal signal, int posixSignal, bool includeChildren) {
+void SignalServerProcess(long pid, wxSignal signal, bool includeChildren) {
 #if defined(__unix__) || defined(__APPLE__)
-    ::kill(static_cast<pid_t>(pid), posixSignal);
     if (includeChildren) {
         wxKill(pid, signal, nullptr, wxKILL_CHILDREN);
+    } else {
+        int posixSignal = signal == wxSIGKILL ? SIGKILL : SIGTERM;
+        ::kill(static_cast<pid_t>(pid), posixSignal);
     }
 #else
     wxKill(pid, signal, nullptr, includeChildren ? wxKILL_CHILDREN : wxKILL_NOCHILDREN);
@@ -2777,10 +2818,15 @@ bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
             RemoveTrayAppServerState(statePath, nullptr);
         }
         if (configError.empty()) {
-            for (const auto& [_, app] : config.server.apps) {
-                if (TryAdoptConfiguredServer(config.server, app)) {
-                    return true;
-                }
+            auto recovered = FindAdoptableConfiguredServerState(config.server, AppServeProcesses());
+            if (recovered) {
+                std::string saveError;
+                SaveTrayAppServerState(*recovered, statePath, &saveError);
+                serverPid_ = recovered->pid;
+                serverUrl_ = recovered->url;
+                serverAppDisplayName_ = recovered->displayName;
+                serverProcess_ = nullptr;
+                return true;
             }
         }
         return false;
@@ -2797,10 +2843,15 @@ bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
             RemoveTrayAppServerStateForPid(statePath, state->pid, nullptr);
         }
         if (configError.empty()) {
-            for (const auto& [_, app] : config.server.apps) {
-                if (TryAdoptConfiguredServer(config.server, app)) {
-                    return true;
-                }
+            auto recovered = FindAdoptableConfiguredServerState(config.server, AppServeProcesses());
+            if (recovered) {
+                std::string saveError;
+                SaveTrayAppServerState(*recovered, statePath, &saveError);
+                serverPid_ = recovered->pid;
+                serverUrl_ = recovered->url;
+                serverAppDisplayName_ = recovered->displayName;
+                serverProcess_ = nullptr;
+                return true;
             }
         }
         return false;
@@ -2818,12 +2869,8 @@ bool TrayIcon::TryAdoptConfiguredServer(const ServerConfig& server, const Server
         return true;
     }
 
-    for (const auto& [pid, command] : AppServeProcesses()) {
-        auto state = AdoptableServerState(server, app, pid, command);
-        if (!state) {
-            continue;
-        }
-
+    auto state = FindAdoptableConfiguredServerState(server, app, AppServeProcesses());
+    if (state) {
         std::string stateError;
         SaveTrayAppServerState(*state, TrayAppServerStatePath(), &stateError);
         serverPid_ = state->pid;
@@ -2839,6 +2886,11 @@ bool TrayIcon::VerifyAdoptedServerBeforeStop(long pid, bool notifyOnFailure) {
     std::string configError;
     AppConfig config = LoadAppConfig(&configError);
     std::string command = ProcessCommandLine(pid);
+#if defined(_WIN32)
+    if (command.empty() && IsProcessAlive(pid)) {
+        return true;
+    }
+#endif
     auto state = configError.empty() && !command.empty()
         ? AdoptableConfiguredServerState(config.server, pid, command)
         : std::nullopt;
@@ -2866,10 +2918,10 @@ bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
         if (!currentSessionChild && !VerifyAdoptedServerBeforeStop(pid, notifyOnFailure)) {
             return false;
         }
-        SignalServerProcess(pid, wxSIGTERM, SIGTERM, currentSessionChild);
+        SignalServerProcess(pid, wxSIGTERM, currentSessionChild);
         bool stopped = WaitForProcessExit(pid, currentSessionChild);
         if (!stopped) {
-            SignalServerProcess(pid, wxSIGKILL, SIGKILL, currentSessionChild);
+            SignalServerProcess(pid, wxSIGKILL, currentSessionChild);
             stopped = WaitForProcessExit(pid, currentSessionChild);
         }
         if (!stopped) {
