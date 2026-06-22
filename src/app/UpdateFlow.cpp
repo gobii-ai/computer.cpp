@@ -1,6 +1,8 @@
 #include "UpdateFlow.h"
 
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <utility>
 
 #include <wx/msgdlg.h>
@@ -183,12 +185,23 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
             return;
         }
 
-        wxTheApp->CallAfter([this, alive, staged] {
+        auto progressClosed = std::make_shared<std::promise<void>>();
+        auto progressClosedFuture = progressClosed->get_future();
+        wxTheApp->CallAfter([this, alive, progressClosed] {
             if (!alive->load()) {
+                progressClosed->set_value();
                 return;
             }
             CloseUpdateProgress();
-            auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
+            progressClosed->set_value();
+        });
+        progressClosedFuture.wait_for(std::chrono::seconds(5));
+
+        auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
+        wxTheApp->CallAfter([this, alive, install] {
+            if (!alive->load()) {
+                return;
+            }
             if (install.manualInstallRequired) {
                 updateInProgress_ = false;
                 if (!install.zipPath.empty()) {

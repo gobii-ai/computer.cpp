@@ -696,6 +696,7 @@ std::string BuildInstallHelperScript(
     script << "backup_root=" << ShellQuote(backupRoot.string()) << "\n";
     script << "backup_app=" << ShellQuote(backupApp.string()) << "\n";
     script << "backup_cli=" << ShellQuote(backupCli.string()) << "\n";
+    script << "if [ \"$pid\" -le 0 ]; then echo \"invalid pid\"; exit 1; fi\n";
     script << "echo \"waiting for ComputerCpp pid $pid to exit\"\n";
     script << "wait_count=0\n";
     script << "while kill -0 \"$pid\" 2>/dev/null && [ \"$wait_count\" -lt 50 ]; do wait_count=$((wait_count + 1)); sleep 0.2; done\n";
