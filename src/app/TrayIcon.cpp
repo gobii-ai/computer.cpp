@@ -53,6 +53,7 @@ namespace ComputerCpp::App {
 enum {
     ID_PERMISSIONS = 1001,
     ID_SETTINGS,
+    ID_SHOW_LOGS,
     ID_CHECK_UPDATES,
     ID_START_SERVER,
     ID_STOP_SERVER,
@@ -2168,6 +2169,7 @@ private:
 wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_PERMISSIONS, TrayIcon::OnPermissions)
     EVT_MENU(ID_SETTINGS, TrayIcon::OnSettings)
+    EVT_MENU(ID_SHOW_LOGS, TrayIcon::OnShowLogs)
     EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
     EVT_MENU(ID_START_SERVER, TrayIcon::OnStartServer)
     EVT_MENU(ID_STOP_SERVER, TrayIcon::OnStopServer)
@@ -2234,6 +2236,9 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenu* menu = new wxMenu;
     menu->Append(ID_PERMISSIONS, "Permissions");
     menu->Append(ID_SETTINGS, "Settings...");
+#ifdef __APPLE__
+    menu->Append(ID_SHOW_LOGS, "Show Logs");
+#endif
     menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
     menu->AppendSeparator();
     wxString serverStatus = serverPid_ > 0 && !serverUrl_.empty()
@@ -2268,6 +2273,28 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
         settingsDialog_ = nullptr;
     });
     PresentSettingsDialog(settingsDialog_);
+}
+
+void TrayIcon::OnShowLogs(wxCommandEvent&) {
+    const std::filesystem::path logPath = PermissionTraceLogPath();
+    {
+        std::ofstream log(logPath, std::ios::app);
+    }
+    AppendPermissionTrace("show_logs_requested path=" + logPath.string());
+
+    bool opened = false;
+#ifdef __APPLE__
+    std::string command = "/usr/bin/open -a Console " + ShellQuote(logPath.string()) + " >/dev/null 2>&1";
+    opened = wxExecute(command, wxEXEC_SYNC) == 0;
+#endif
+    if (!opened) {
+        opened = wxLaunchDefaultApplication(logPath.string());
+    }
+    if (!opened) {
+        wxString message;
+        message << "Could not open log file:\n" << logPath.string();
+        wxMessageBox(message, "ComputerCpp Logs", wxOK | wxICON_ERROR);
+    }
 }
 
 void TrayIcon::OnCheckForUpdates(wxCommandEvent&) {
