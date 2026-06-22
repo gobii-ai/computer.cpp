@@ -558,6 +558,19 @@ void SignalServerProcess(long pid, wxSignal signal, bool includeChildren) {
 #endif
 }
 
+bool WaitForServerHealth(const TrayAppServerState& state, const std::string& bearerToken) {
+    for (int i = 0; i < 50; ++i) {
+        if (HttpHealthOk(state, bearerToken)) {
+            return true;
+        }
+        if (!IsProcessAlive(state.pid)) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
 std::optional<int> ChooseServerPort(const ServerConfig& server, const ServerAppConfig& app) {
     std::string host = NormalizeBindHost(server.host);
     if (app.port.has_value()) {
@@ -2780,6 +2793,25 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
     serverPid_ = pid;
     serverUrl_ = ServerDisplayUrl(host, *port);
     serverAppDisplayName_ = displayName;
+    TrayAppServerState startedState;
+    startedState.pid = pid;
+    startedState.host = host;
+    startedState.port = *port;
+    startedState.url = serverUrl_;
+    startedState.appPath = AbsolutePathString(app.path);
+    if (startedState.appPath.empty()) {
+        startedState.appPath = app.path;
+    }
+    startedState.appId = app.name;
+    startedState.displayName = displayName;
+    if (!WaitForServerHealth(startedState, config.server.authToken)) {
+        StopServerProcess(false);
+        wxMessageBox(
+            "The server process started but did not become healthy. Check that the Lua runtime is bundled and the Lua app can load.",
+            "ComputerCpp Server",
+            wxOK | wxICON_ERROR);
+        return;
+    }
     wxMessageBox(
         "Started " + serverAppDisplayName_ + " at " + serverUrl_,
         "ComputerCpp Server",

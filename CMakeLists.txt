@@ -305,6 +305,17 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
             VERBATIM
         )
 
+        find_program(COMPUTER_CPP_LUA_EXECUTABLE NAMES lua lua5.4 lua5.3 luajit)
+        if(COMPUTER_CPP_LUA_EXECUTABLE)
+            add_custom_command(TARGET ComputerCpp POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/Resources/lua/bin"
+                COMMAND "${CMAKE_COMMAND}" -E copy "${COMPUTER_CPP_LUA_EXECUTABLE}" "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/Resources/lua/bin/lua"
+                VERBATIM
+            )
+        else()
+            message(WARNING "Lua executable not found; ComputerCpp.app will rely on COMPUTER_CPP_LUA or PATH at runtime.")
+        endif()
+
         if(COMPUTER_CPP_CODE_SIGN_APP)
             set(COMPUTER_CPP_RESOLVED_CODE_SIGN_IDENTITY "${COMPUTER_CPP_CODE_SIGN_IDENTITY}")
             if(COMPUTER_CPP_CODE_SIGN_IDENTITY STREQUAL "auto")

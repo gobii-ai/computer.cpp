@@ -51,11 +51,43 @@ fs::path FindOnPath(const std::string& name) {
     return {};
 }
 
-fs::path FindLuaInterpreter() {
+std::vector<fs::path> BundledLuaCandidates(const fs::path& executablePath) {
+    if (executablePath.empty()) {
+        return {};
+    }
+    fs::path executable = executablePath;
+    if (executable.filename() == executable) {
+        fs::path resolved = FindOnPath(executable.string());
+        if (!resolved.empty()) {
+            executable = resolved;
+        }
+    }
+    if (executable.is_relative()) {
+        std::error_code ec;
+        executable = fs::absolute(executable, ec);
+        if (ec) {
+            executable = executablePath;
+        }
+    }
+    fs::path macosDir = executable.parent_path();
+    return {
+        macosDir.parent_path() / "Resources" / "lua" / "bin" / "lua",
+        executable.parent_path() / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua",
+    };
+}
+
+}
+
+fs::path FindLuaInterpreter(const fs::path& executablePath) {
     if (const char* configured = std::getenv("COMPUTER_CPP_LUA")) {
         fs::path path = FindOnPath(configured);
         if (!path.empty()) {
             return path;
+        }
+    }
+    for (const fs::path& candidate : BundledLuaCandidates(executablePath)) {
+        if (IsExecutable(candidate)) {
+            return candidate;
         }
     }
     for (const std::string& name : {"lua", "lua5.4", "lua5.3", "luajit"}) {
@@ -66,6 +98,8 @@ fs::path FindLuaInterpreter() {
     }
     return {};
 }
+
+namespace {
 
 fs::path TempPreludePath() {
     auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -216,10 +250,10 @@ LuaRunResult RunLuaScriptInternal(const LuaRunOptions& options, bool capture, bo
         return result;
     }
 
-    fs::path lua = FindLuaInterpreter();
+    fs::path lua = FindLuaInterpreter(options.executablePath);
     if (lua.empty()) {
         result.exitCode = 1;
-        result.stderrText = "Error: Lua interpreter not found. Install lua or set COMPUTER_CPP_LUA.\n";
+        result.stderrText = "Error: Lua runtime not found. This build may be missing its bundled Lua runtime. Set COMPUTER_CPP_LUA to override.\n";
         return result;
     }
 

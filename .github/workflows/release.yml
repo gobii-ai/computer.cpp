@@ -43,7 +43,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja wxwidgets dylibbundler
+          brew install cmake ninja wxwidgets dylibbundler lua
 
       - name: Bump version
         env:
@@ -197,6 +197,11 @@ jobs:
           mkdir -p "$DIST_DIR"
           cp "$BUILD_DIR/computer.cpp" "$DIST_DIR/computer.cpp"
           ditto "$BUILD_DIR/ComputerCpp.app" "$DIST_DIR/ComputerCpp.app"
+          BUNDLED_LUA="$DIST_DIR/ComputerCpp.app/Contents/Resources/lua/bin/lua"
+          if [[ ! -x "$BUNDLED_LUA" ]]; then
+            echo "Bundled Lua executable is missing from ComputerCpp.app: $BUNDLED_LUA" >&2
+            exit 1
+          fi
 
           mkdir -p "$DIST_DIR/ComputerCpp.app/Contents/Frameworks"
           dylibbundler \
@@ -205,9 +210,18 @@ jobs:
             -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
             -p "@executable_path/../Frameworks"
+          dylibbundler \
+            -od \
+            -b \
+            -x "$BUNDLED_LUA" \
+            -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
+            -p "@executable_path/../../../Frameworks"
 
           {
             echo "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp"
+            echo "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp"
+            echo "$DIST_DIR/computer.cpp"
+            echo "$BUNDLED_LUA"
             find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib'
           } | while IFS= read -r binary; do
             if otool -L "$binary" | grep -q '/opt/homebrew'; then
@@ -221,6 +235,8 @@ jobs:
             while IFS= read -r -d '' dylib; do
               codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$dylib"
             done
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$BUNDLED_LUA"
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp"
           codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/computer.cpp"
           codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$DIST_DIR/ComputerCpp.app"
 

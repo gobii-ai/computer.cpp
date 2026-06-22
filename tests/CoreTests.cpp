@@ -2,6 +2,7 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/HumanInput.h"
 #include "computer_cpp/Image.h"
+#include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/NativeDeps.h"
 #include "computer_cpp/RefStore.h"
 #include "computer_cpp/StringUtils.h"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <vector>
@@ -236,6 +238,81 @@ void WriteTextFile(const fs::path& path, const std::string& text) {
     fs::create_directories(path.parent_path());
     std::ofstream out(path);
     out << text;
+}
+
+void WriteExecutableFile(const fs::path& path) {
+    WriteTextFile(path, "#!/bin/sh\nexit 0\n");
+    std::error_code ec;
+    fs::permissions(
+        path,
+        fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+        fs::perm_options::add,
+        ec);
+}
+
+void SetEnvValue(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void RestoreEnvValue(const char* name, const std::optional<std::string>& value) {
+    if (value.has_value()) {
+        SetEnvValue(name, *value);
+    } else {
+#if defined(_WIN32)
+        _putenv_s(name, "");
+#else
+        unsetenv(name);
+#endif
+    }
+}
+
+std::optional<std::string> CurrentEnvValue(const char* name) {
+    if (const char* value = std::getenv(name)) {
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+void TestLuaInterpreterResolution() {
+    auto originalLua = CurrentEnvValue("COMPUTER_CPP_LUA");
+    auto originalPath = CurrentEnvValue("PATH");
+
+    fs::path root = MakeTempHome() / "lua-resolution";
+    fs::path envLua = root / "env" / "custom-lua";
+    fs::path pathBin = root / "path-bin";
+    fs::path pathLua = pathBin / "lua";
+    fs::path appExe = root / "ComputerCpp.app" / "Contents" / "MacOS" / "computer.cpp";
+    fs::path bundledLua = root / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
+    fs::path siblingCli = root / "computer.cpp";
+    fs::path cliBin = root / "cli-bin";
+    fs::path pathCli = cliBin / "computer.cpp";
+    fs::path pathBundledLua = cliBin / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
+
+    WriteExecutableFile(envLua);
+    SetEnvValue("COMPUTER_CPP_LUA", envLua.string());
+    SetEnvValue("PATH", (root / "empty-path").string());
+    assert(ComputerCpp::FindLuaInterpreter(appExe) == envLua);
+
+    RestoreEnvValue("COMPUTER_CPP_LUA", std::nullopt);
+    WriteExecutableFile(bundledLua);
+    assert(ComputerCpp::FindLuaInterpreter(appExe) == bundledLua);
+    assert(ComputerCpp::FindLuaInterpreter(siblingCli) == bundledLua);
+    WriteExecutableFile(pathCli);
+    WriteExecutableFile(pathBundledLua);
+    SetEnvValue("PATH", cliBin.string());
+    assert(ComputerCpp::FindLuaInterpreter("computer.cpp") == pathBundledLua);
+
+    fs::remove(bundledLua);
+    WriteExecutableFile(pathLua);
+    SetEnvValue("PATH", pathBin.string());
+    assert(ComputerCpp::FindLuaInterpreter(appExe) == pathLua);
+
+    RestoreEnvValue("COMPUTER_CPP_LUA", originalLua);
+    RestoreEnvValue("PATH", originalPath);
 }
 
 std::string TestInfoPlist(const std::string& bundleId, const std::string& version) {
@@ -475,6 +552,7 @@ int main() {
     TestNativeDependencies();
     TestUpdaterVersionParsing();
     TestUpdaterReleaseParsing();
+    TestLuaInterpreterResolution();
     TestUpdaterInstallHelperScript();
     TestUpdaterStagingValidation();
     TestLinuxPngUtilities();
