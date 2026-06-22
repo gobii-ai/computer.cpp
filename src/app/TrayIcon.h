@@ -45,6 +45,9 @@ private:
     void ClearServerProcessState(bool deleteProcess);
 
     bool daemonStarted_ = false;
+#ifdef __APPLE__
+    void* nativeTrayIcon_ = nullptr;
+#endif
     wxDialog* permissionDialog_ = nullptr;
     wxDialog* settingsDialog_ = nullptr;
     std::unique_ptr<TrayUpdateFlow> updateFlow_;

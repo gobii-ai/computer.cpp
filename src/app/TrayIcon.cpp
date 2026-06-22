@@ -82,14 +82,14 @@ wxSize TrayIconBitmapSize() {
 }
 
 bool TrayIconPrefersDarkForeground();
-void ConfigureTrayIconForPlatform(wxIcon& icon);
 
 #ifndef __APPLE__
 bool TrayIconPrefersDarkForeground() {
     return !wxSystemSettings::GetAppearance().IsDark();
 }
-
-void ConfigureTrayIconForPlatform(wxIcon&) {}
+#else
+void* CreateNativeTrayIcon(TrayIcon* owner);
+void DestroyNativeTrayIcon(void* handle);
 #endif
 
 wxIcon CreateComputerTrayIcon() {
@@ -136,7 +136,12 @@ wxIcon CreateComputerTrayIcon() {
 
         gc->SetAntialiasMode(wxANTIALIAS_DEFAULT);
 
-        const bool darkForeground = TrayIconPrefersDarkForeground();
+        const bool darkForeground =
+#ifdef __APPLE__
+            true;
+#else
+            TrayIconPrefersDarkForeground();
+#endif
         const wxColour foreground = darkForeground
             ? wxColour(24, 31, 42, 245)
             : wxColour(248, 250, 252, 248);
@@ -178,7 +183,6 @@ wxIcon CreateComputerTrayIcon() {
 
     wxIcon icon;
     icon.CopyFromBitmap(bitmap);
-    ConfigureTrayIconForPlatform(icon);
     return icon;
 }
 
@@ -2345,11 +2349,22 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
 wxEND_EVENT_TABLE()
 
 TrayIcon::TrayIcon() {
+#ifdef __APPLE__
+    nativeTrayIcon_ = CreateNativeTrayIcon(this);
+    AppendPermissionTrace("tray_set_native_icon result=" + BoolString(nativeTrayIcon_ != nullptr) +
+                          " bundle_path=" + ComputerCppBundlePath());
+#else
     const bool iconSet = SetIcon(CreateComputerTrayIcon(), "ComputerCpp");
     AppendPermissionTrace("tray_set_icon result=" + BoolString(iconSet) +
                           " bundle_path=" + ComputerCppBundlePath());
+#endif
     updateFlow_ = std::make_unique<TrayUpdateFlow>([this] {
+#ifdef __APPLE__
+        DestroyNativeTrayIcon(nativeTrayIcon_);
+        nativeTrayIcon_ = nullptr;
+#else
         RemoveIcon();
+#endif
         wxExit();
     });
     StartOwnedDaemon();
@@ -2365,6 +2380,10 @@ TrayIcon::TrayIcon() {
 }
 
 TrayIcon::~TrayIcon() {
+#ifdef __APPLE__
+    DestroyNativeTrayIcon(nativeTrayIcon_);
+    nativeTrayIcon_ = nullptr;
+#endif
     if (permissionDialog_) {
         permissionDialog_->Destroy();
         permissionDialog_ = nullptr;
