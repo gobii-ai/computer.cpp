@@ -37,5 +37,6 @@ struct LuaRunResult {
 int RunLuaScript(const LuaRunOptions& options);
 LuaRunResult RunLuaScriptCapture(const LuaRunOptions& options);
 LuaRunResult RunLuaScriptCapture(const LuaRunOptions& options, bool streamStderr);
+std::filesystem::path FindLuaInterpreter(const std::filesystem::path& executablePath = {});
 
 }
