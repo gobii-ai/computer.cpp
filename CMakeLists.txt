@@ -107,6 +107,7 @@ add_library(computer_cpp_core
     src/core/Sqlite.cpp
     src/core/StringUtils.cpp
     src/core/Timeline.cpp
+    src/core/Updater.cpp
     src/daemon/Daemon.cpp
     src/daemon/DaemonArtifacts.cpp
     src/daemon/DaemonBatch.cpp
@@ -146,6 +147,8 @@ target_compile_definitions(computer_cpp_core
     PUBLIC
         COMPUTER_CPP_BUILD_GIT_SHA="${COMPUTER_CPP_BUILD_GIT_SHA}"
         COMPUTER_CPP_BUILD_TIMESTAMP="${COMPUTER_CPP_BUILD_TIMESTAMP}"
+        COMPUTER_CPP_PROJECT_VERSION="${PROJECT_VERSION}"
+        COMPUTER_CPP_GITHUB_REPOSITORY="gobii-ai/computer.cpp"
 )
 
 target_link_libraries(computer_cpp_core
@@ -266,6 +269,7 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     add_executable(ComputerCpp MACOSX_BUNDLE
         src/app/Main.cpp
         src/app/TrayIcon.cpp
+        src/app/UpdateFlow.cpp
     )
 
     target_include_directories(ComputerCpp

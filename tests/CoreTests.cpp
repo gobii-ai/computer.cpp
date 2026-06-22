@@ -5,14 +5,17 @@
 #include "computer_cpp/RefStore.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/Timeline.h"
+#include "computer_cpp/Updater.h"
 
 #include "LinuxPng.h"
 #include "TestSupport.h"
+#include "UpdaterInternal.h"
 
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sqlite3.h>
 #include <stdexcept>
@@ -72,6 +75,159 @@ void TestRefStore() {
 void TestNativeDependencies() {
     auto versions = ComputerCpp::NativeDeps::GetVersions();
     assert(!versions.curl.empty());
+}
+
+void TestUpdaterVersionParsing() {
+    auto current = ComputerCpp::Updater::ParseSemVersion(ComputerCpp::Updater::CurrentVersion());
+    assert(current.has_value());
+
+    auto version = ComputerCpp::Updater::ParseSemVersion("v1.2.3");
+    assert(version.has_value());
+    assert(version->major == 1);
+    assert(version->minor == 2);
+    assert(version->patch == 3);
+    assert(version->normalized == "1.2.3");
+
+    assert(!ComputerCpp::Updater::ParseSemVersion("1.2").has_value());
+    assert(!ComputerCpp::Updater::ParseSemVersion("1.2.x").has_value());
+    assert(!ComputerCpp::Updater::CompareVersionStrings("bad", "1.2.3").has_value());
+    assert(ComputerCpp::Updater::CompareVersionStrings("1.2.3", "1.2.3").value() == 0);
+    assert(ComputerCpp::Updater::CompareVersionStrings("1.2.4", "1.2.3").value() > 0);
+    assert(ComputerCpp::Updater::CompareVersionStrings("1.3.0", "1.2.99").value() > 0);
+    assert(ComputerCpp::Updater::CompareVersionStrings("2.0.0", "1.99.99").value() > 0);
+    assert(ComputerCpp::Updater::CompareVersionStrings("1.2.2", "1.2.3").value() < 0);
+}
+
+void TestUpdaterReleaseParsing() {
+    nlohmann::json release = {
+        {"tag_name", "v0.3.0"},
+        {"html_url", "https://github.com/gobii-ai/computer.cpp/releases/tag/0.3.0"},
+        {"body", "notes"},
+        {"assets", nlohmann::json::array({
+            {
+                {"name", "computer.cpp-0.3.0-macos-arm64.zip"},
+                {"browser_download_url", "https://example.test/computer.cpp-0.3.0-macos-arm64.zip"},
+                {"size", 1234}
+            }
+        })}
+    };
+
+    auto available = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.2.1");
+    assert(available.status == ComputerCpp::Updater::CheckStatus::UpdateAvailable);
+    assert(available.latestVersion == "0.3.0");
+    assert(available.release.hasCompatibleAsset);
+    assert(available.release.asset.name == "computer.cpp-0.3.0-macos-arm64.zip");
+    assert(available.release.asset.browserDownloadUrl == "https://example.test/computer.cpp-0.3.0-macos-arm64.zip");
+
+    auto current = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.3.0");
+    assert(current.status == ComputerCpp::Updater::CheckStatus::UpToDate);
+
+    release["assets"] = nlohmann::json::array({
+        {{"name", "computer.cpp-0.3.0-linux-x86_64.zip"}, {"browser_download_url", "https://example.test/linux.zip"}}
+    });
+    auto missingAsset = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.2.1");
+    assert(missingAsset.status == ComputerCpp::Updater::CheckStatus::NoCompatibleAsset);
+
+    release["tag_name"] = "release-candidate";
+    auto invalid = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.2.1");
+    assert(invalid.status == ComputerCpp::Updater::CheckStatus::InvalidResponse);
+}
+
+void WriteTextFile(const fs::path& path, const std::string& text) {
+    fs::create_directories(path.parent_path());
+    std::ofstream out(path);
+    out << text;
+}
+
+std::string TestInfoPlist(const std::string& bundleId, const std::string& version) {
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+           "<!DOCTYPE plist PUBLIC \"-//Apple Computer//DTD PLIST 1.0//EN\" "
+           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+           "<plist version=\"1.0\">\n"
+           "<dict>\n"
+           "  <key>CFBundleIdentifier</key>\n"
+           "  <string>" + bundleId + "</string>\n"
+           "  <key>CFBundleShortVersionString</key>\n"
+           "  <string>" + version + "</string>\n"
+           "</dict>\n"
+           "</plist>\n";
+}
+
+ComputerCpp::Updater::ReleaseInfo TestReleaseInfo(const std::string& version) {
+    ComputerCpp::Updater::ReleaseInfo release;
+    release.tagName = version;
+    release.version = version;
+    release.hasCompatibleAsset = true;
+    release.asset.name = ComputerCpp::Updater::CompatibleMacAssetName(version);
+    release.asset.browserDownloadUrl = "https://example.test/" + release.asset.name;
+    return release;
+}
+
+fs::path CreateUpdaterZip(const fs::path& tempRoot, const std::string& version) {
+    fs::path zipPath = tempRoot / ("fixture-" + version + ".zip");
+    fs::path sourceParent = tempRoot / "source";
+    std::string rootName = "computer.cpp-" + version + "-macos-arm64";
+    fs::path root = sourceParent / rootName;
+    fs::create_directories(root);
+    std::string command = "cd " + ComputerCpp::Updater::ShellQuote(sourceParent.string()) +
+        " && /usr/bin/ditto -c -k --sequesterRsrc --keepParent " +
+        ComputerCpp::Updater::ShellQuote(rootName) + " " + ComputerCpp::Updater::ShellQuote(zipPath.string());
+    int status = std::system(command.c_str());
+    assert(status == 0);
+    return zipPath;
+}
+
+void TestUpdaterInstallHelperScript() {
+    std::string script = ComputerCpp::Updater::BuildInstallHelperScript(
+        123,
+        "/tmp/staged dir/ComputerCpp.app",
+        "/tmp/staged dir/computer.cpp",
+        "/Applications/Computer Cpp.app",
+        "/Applications/computer cpp");
+    assert(script.find("pid=123") != std::string::npos);
+    assert(script.find("staged_app='/tmp/staged dir/ComputerCpp.app'") != std::string::npos);
+    assert(script.find("target_app='/Applications/Computer Cpp.app'") != std::string::npos);
+    assert(script.find("target_cli='/Applications/computer cpp'") != std::string::npos);
+}
+
+void TestUpdaterStagingValidation() {
+    if (!ComputerCpp::Updater::IsMacArm64Supported()) {
+        return;
+    }
+
+    fs::path temp = MakeTempHome() / "updater";
+    std::string version = "9.8.7";
+    fs::path root = temp / "source" / ("computer.cpp-" + version + "-macos-arm64");
+    WriteTextFile(root / "ComputerCpp.app" / "Contents" / "Info.plist", TestInfoPlist("org.computercpp.app", version));
+    WriteTextFile(root / "computer.cpp", "#!/bin/sh\n");
+    auto okZip = CreateUpdaterZip(temp, version);
+    auto staged = ComputerCpp::Updater::StageDownloadedUpdate(TestReleaseInfo(version), okZip, false);
+    assert(staged.ok);
+    assert(staged.appBundlePath.filename() == "ComputerCpp.app");
+    assert(staged.cliPath.filename() == "computer.cpp");
+
+    fs::path wrongBundleTemp = MakeTempHome() / "updater-wrong-bundle";
+    fs::path wrongBundleRoot = wrongBundleTemp / "source" / ("computer.cpp-" + version + "-macos-arm64");
+    WriteTextFile(wrongBundleRoot / "ComputerCpp.app" / "Contents" / "Info.plist", TestInfoPlist("example.bad", version));
+    WriteTextFile(wrongBundleRoot / "computer.cpp", "#!/bin/sh\n");
+    auto wrongBundle = ComputerCpp::Updater::StageDownloadedUpdate(TestReleaseInfo(version), CreateUpdaterZip(wrongBundleTemp, version), false);
+    assert(!wrongBundle.ok);
+    assert(wrongBundle.error.find("bundle id") != std::string::npos);
+
+    fs::path wrongVersionTemp = MakeTempHome() / "updater-wrong-version";
+    fs::path wrongVersionRoot = wrongVersionTemp / "source" / ("computer.cpp-" + version + "-macos-arm64");
+    WriteTextFile(wrongVersionRoot / "ComputerCpp.app" / "Contents" / "Info.plist", TestInfoPlist("org.computercpp.app", "9.8.6"));
+    WriteTextFile(wrongVersionRoot / "computer.cpp", "#!/bin/sh\n");
+    auto wrongVersion = ComputerCpp::Updater::StageDownloadedUpdate(TestReleaseInfo(version), CreateUpdaterZip(wrongVersionTemp, version), false);
+    assert(!wrongVersion.ok);
+    assert(wrongVersion.error.find("does not match release") != std::string::npos);
+
+    fs::path missingCliTemp = MakeTempHome() / "updater-missing-cli";
+    fs::path missingCliRoot = missingCliTemp / "source" / ("computer.cpp-" + version + "-macos-arm64");
+    WriteTextFile(missingCliRoot / "ComputerCpp.app" / "Contents" / "Info.plist", TestInfoPlist("org.computercpp.app", version));
+    auto missingCli = ComputerCpp::Updater::StageDownloadedUpdate(TestReleaseInfo(version), CreateUpdaterZip(missingCliTemp, version), false);
+    assert(!missingCli.ok);
+    assert(missingCli.error.find("computer.cpp") != std::string::npos);
 }
 
 void TestLinuxPngUtilities() {
@@ -212,6 +368,10 @@ int main() {
     TestStringUtils();
     TestRefStore();
     TestNativeDependencies();
+    TestUpdaterVersionParsing();
+    TestUpdaterReleaseParsing();
+    TestUpdaterInstallHelperScript();
+    TestUpdaterStagingValidation();
     TestLinuxPngUtilities();
     TestImageUtilities();
     TestHumanInputPlans();

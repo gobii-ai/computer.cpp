@@ -1,5 +1,8 @@
 #pragma once
 
+#include "UpdateFlow.h"
+
+#include <memory>
 #include <thread>
 #include <wx/taskbar.h>
 
@@ -18,6 +21,7 @@ public:
 private:
     void OnPermissions(wxCommandEvent& event);
     void OnSettings(wxCommandEvent& event);
+    void OnCheckForUpdates(wxCommandEvent& event);
     void OnState(wxCommandEvent& event);
     void OnTestScreenshot(wxCommandEvent& event);
     void OnTestMouse(wxCommandEvent& event);
@@ -27,6 +31,7 @@ private:
     bool daemonStarted_ = false;
     wxDialog* permissionDialog_ = nullptr;
     wxDialog* settingsDialog_ = nullptr;
+    std::unique_ptr<TrayUpdateFlow> updateFlow_;
     std::thread daemonThread_;
 
     wxDECLARE_EVENT_TABLE();

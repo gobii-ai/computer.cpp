@@ -42,6 +42,7 @@ namespace ComputerCpp::App {
 enum {
     ID_PERMISSIONS = 1001,
     ID_SETTINGS,
+    ID_CHECK_UPDATES,
     ID_STATE,
     ID_TEST_SCREENSHOT,
     ID_TEST_MOUSE,
@@ -1650,6 +1651,7 @@ private:
 wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_PERMISSIONS, TrayIcon::OnPermissions)
     EVT_MENU(ID_SETTINGS, TrayIcon::OnSettings)
+    EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
     EVT_MENU(ID_STATE, TrayIcon::OnState)
     EVT_MENU(ID_TEST_SCREENSHOT, TrayIcon::OnTestScreenshot)
     EVT_MENU(ID_TEST_MOUSE, TrayIcon::OnTestMouse)
@@ -1657,7 +1659,13 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
 wxEND_EVENT_TABLE()
 
 TrayIcon::TrayIcon() {
-    SetIcon(CreateComputerTrayIcon(), "ComputerCpp");
+    const bool iconSet = SetIcon(CreateComputerTrayIcon(), "ComputerCpp");
+    AppendPermissionTrace("tray_set_icon result=" + BoolString(iconSet) +
+                          " bundle_path=" + ComputerCppBundlePath());
+    updateFlow_ = std::make_unique<TrayUpdateFlow>([this] {
+        RemoveIcon();
+        wxExit();
+    });
     StartOwnedDaemon();
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
@@ -1678,6 +1686,7 @@ TrayIcon::~TrayIcon() {
         settingsDialog_->Destroy();
         settingsDialog_ = nullptr;
     }
+    updateFlow_.reset();
     StopDaemon("default");
     if (daemonThread_.joinable()) {
         daemonThread_.join();
@@ -1704,6 +1713,7 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenu* menu = new wxMenu;
     menu->Append(ID_PERMISSIONS, "Permissions");
     menu->Append(ID_SETTINGS, "Settings...");
+    menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
     menu->AppendSeparator();
     menu->Append(ID_STATE, "Show State");
     menu->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
@@ -1727,6 +1737,12 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
         settingsDialog_ = nullptr;
     });
     PresentSettingsDialog(settingsDialog_);
+}
+
+void TrayIcon::OnCheckForUpdates(wxCommandEvent&) {
+    if (updateFlow_) {
+        updateFlow_->CheckForUpdates();
+    }
 }
 
 void TrayIcon::SetUpPermissionsIfNeeded(bool notifyWhenGranted) {
