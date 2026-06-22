@@ -96,6 +96,13 @@ if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
     CMAKE_ARGS+=(-DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}")
   fi
 
+  if command -v ccache >/dev/null 2>&1; then
+    CMAKE_ARGS+=(
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+    )
+  fi
+
   cmake "${CMAKE_ARGS[@]}"
 else
   print_existing_build_dir_message "${BUILD_DIR}"

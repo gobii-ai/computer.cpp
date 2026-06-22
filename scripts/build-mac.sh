@@ -136,8 +136,14 @@ fi
 
 if [[ "${LAUNCH}" == "1" ]]; then
   pkill -x ComputerCpp 2>/dev/null || true
+  WAIT_COUNT=0
   while pgrep -x ComputerCpp >/dev/null; do
+    if [[ "${WAIT_COUNT}" -ge 25 ]]; then
+      echo "Timeout waiting for ComputerCpp to exit." >&2
+      break
+    fi
     sleep 0.2
+    WAIT_COUNT=$((WAIT_COUNT + 1))
   done
   open -n "${BUILD_DIR}/ComputerCpp.app"
 fi

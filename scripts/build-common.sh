@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 project_dir() {
-  cd "$(dirname "${BASH_SOURCE[1]}")/.." && pwd
+  cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
 }
 
 require_command() {
@@ -28,6 +28,7 @@ require_option_value() {
     echo "${option_name} requires a value" >&2
     return 1
   fi
+  return 0
 }
 
 prepare_build_dir() {
