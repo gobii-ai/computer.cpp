@@ -470,29 +470,63 @@ These are not generic computer-use actions. They are app APIs.
 Install the local build and Lua runtime dependencies. On macOS with Homebrew:
 
 ```bash
-brew install cmake wxwidgets lua
+brew install cmake ninja wxwidgets lua
 ```
 
-On macOS, create a reusable local signing identity before the first build if
-you do not already have an Apple Development or Developer ID Application
-certificate:
+Build and run the test suite:
+
+```bash
+./scripts/build-mac.sh --verify
+```
+
+For a faster tray-app development loop, build only `ComputerCpp.app` and
+relaunch it:
+
+```bash
+./scripts/build-mac.sh --launch
+```
+
+The macOS build script uses Ninja and writes build outputs to:
+
+```bash
+build/debug-ninja/computer.cpp
+build/debug-ninja/ComputerCpp.app
+```
+
+For a cross-platform CMake wrapper, use `scripts/build.sh`. It accepts a
+generator explicitly, so Ninja users can run:
+
+```bash
+./scripts/build.sh --verify --generator Ninja --build-dir build/debug-ninja
+```
+
+If CMake was already configured with another generator, add `--reconfigure` to
+recreate the build directory.
+
+Manual CMake fallback:
+
+```bash
+cmake -S . -B build/debug-ninja -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTING=ON \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+cmake --build build/debug-ninja --target all --config Debug
+ctest --test-dir build/debug-ninja --output-on-failure
+```
+
+For release-style local builds on macOS:
+
+```bash
+./scripts/build-mac.sh --release --reconfigure
+```
+
+The macOS build script also creates a reusable local signing identity before
+the first signed build if you do not already have an Apple Development or
+Developer ID Application certificate. You can create or refresh that identity
+manually with:
 
 ```bash
 ./scripts/create-local-codesign-identity.sh
-```
-
-Build:
-
-```bash
-cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build/debug
-ctest --test-dir build/debug --output-on-failure
-```
-
-The debug binary is written to:
-
-```bash
-build/debug/computer.cpp
 ```
 
 On macOS, the tray app also needs a stable code-signing identity before asking
@@ -513,7 +547,7 @@ signing. Ad-hoc signing is not recommended for macOS permission onboarding.
 Launch the tray app from the build directory:
 
 ```bash
-open -n build/debug/ComputerCpp.app
+open -n build/debug-ninja/ComputerCpp.app
 ```
 
 Use the tray menu's `Permissions` item to grant and verify macOS permissions.
@@ -534,14 +568,14 @@ the app does not visibly return, check the tray icon or run:
 
 ```bash
 pgrep -af ComputerCpp
-./build/debug/computer.cpp permissions
+./build/debug-ninja/computer.cpp permissions
 ```
 
 If Screen Recording does not add `ComputerCpp` to the list, use the `+` button
 in System Settings and select the running build artifact:
 
 ```text
-build/debug/ComputerCpp.app
+build/debug-ninja/ComputerCpp.app
 ```
 
 If permissions get stuck after changing bundle paths, bundle ids, or signing
@@ -552,7 +586,7 @@ services before trying again:
 pkill -x ComputerCpp 2>/dev/null || true
 tccutil reset Accessibility
 tccutil reset ScreenCapture
-open -n build/debug/ComputerCpp.app
+open -n build/debug-ninja/ComputerCpp.app
 ```
 
 For a public downloadable macOS binary, use Developer ID signing and
@@ -562,20 +596,20 @@ replacement for Developer ID distribution.
 Check permissions and capabilities:
 
 ```bash
-./build/debug/computer.cpp permissions
-./build/debug/computer.cpp capabilities
+./build/debug-ninja/computer.cpp permissions
+./build/debug-ninja/computer.cpp capabilities
 ```
 
 Run the macOS Reminders example schema:
 
 ```bash
-./build/debug/computer.cpp --json app run examples/mac/reminders.lua
+./build/debug-ninja/computer.cpp --json app run examples/mac/reminders.lua
 ```
 
 Run a command:
 
 ```bash
-./build/debug/computer.cpp --json app run examples/mac/reminders.lua \
+./build/debug-ninja/computer.cpp --json app run examples/mac/reminders.lua \
   add-reminder \
   --list Today \
   --title "Review release notes"
@@ -584,7 +618,7 @@ Run a command:
 Serve it over HTTP:
 
 ```bash
-./build/debug/computer.cpp app serve examples/mac/reminders.lua \
+./build/debug-ninja/computer.cpp app serve examples/mac/reminders.lua \
   --listen 127.0.0.1:8787
 ```
 

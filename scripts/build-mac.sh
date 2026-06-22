@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build-common.sh"
+
+PROJECT_DIR="$(project_dir)"
 BUILD_DIR="${PROJECT_DIR}/build/debug-ninja"
 CONFIG=Debug
 BUILD_TESTING=ON
@@ -45,8 +47,7 @@ while [[ $# -gt 0 ]]; do
       CODE_SIGN_APP=OFF
       ;;
     --build-dir)
-      if [[ $# -lt 2 ]]; then
-        echo "--build-dir requires a path" >&2
+      if ! require_option_value "--build-dir" "$#"; then
         usage
         exit 1
       fi
@@ -54,8 +55,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --config)
-      if [[ $# -lt 2 ]]; then
-        echo "--config requires a value" >&2
+      if ! require_option_value "--config" "$#"; then
         usage
         exit 1
       fi
@@ -80,24 +80,12 @@ done
 
 cd "${PROJECT_DIR}"
 
-if ! command -v cmake >/dev/null 2>&1; then
-  echo "cmake not found. Install with: brew install cmake" >&2
-  exit 1
-fi
+require_command cmake "brew install cmake"
+require_command brew "https://brew.sh, then run: brew install cmake ninja wxwidgets lua"
+require_command ninja "brew install ninja"
 
-if ! command -v brew >/dev/null 2>&1; then
-  echo "Homebrew not found. Install Homebrew first, then run: brew install cmake ninja wxwidgets lua" >&2
-  exit 1
-fi
-
-if ! command -v ninja >/dev/null 2>&1; then
-  echo "ninja not found. Install with: brew install ninja" >&2
-  exit 1
-fi
-
-if [[ "${BUILD_TESTING}" == "ON" ]] && ! command -v lua >/dev/null 2>&1; then
-  echo "lua not found. Install with: brew install lua" >&2
-  exit 1
+if [[ "${BUILD_TESTING}" == "ON" ]]; then
+  require_command lua "brew install lua"
 fi
 
 if ! brew list wxwidgets >/dev/null 2>&1; then
@@ -109,19 +97,9 @@ if [[ "${CODE_SIGN_APP}" == "ON" ]]; then
   "${PROJECT_DIR}/scripts/create-local-codesign-identity.sh"
 fi
 
-if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]] && ! grep -q '^CMAKE_GENERATOR:INTERNAL=Ninja$' "${BUILD_DIR}/CMakeCache.txt"; then
-  if [[ "${RECONFIGURE}" == "1" ]]; then
-    rm -rf "${BUILD_DIR}"
-  else
-    echo "${BUILD_DIR} was configured with a non-Ninja generator." >&2
-    echo "Run with --reconfigure to recreate it as a Ninja build directory." >&2
-    exit 1
-  fi
-elif [[ "${RECONFIGURE}" == "1" ]]; then
-  rm -rf "${BUILD_DIR}"
-fi
+prepare_build_dir "${BUILD_DIR}" "${RECONFIGURE}" "Ninja"
 
-if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" || "${RECONFIGURE}" == "1" ]]; then
+if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   BREW_PREFIX="$(brew --prefix)"
 
   CMAKE_ARGS=(
@@ -144,8 +122,7 @@ if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" || "${RECONFIGURE}" == "1" ]]; then
 
   cmake "${CMAKE_ARGS[@]}"
 else
-  echo "Using existing CMake build directory: ${BUILD_DIR}"
-  echo "Pass --reconfigure if you need to regenerate CMake files."
+  print_existing_build_dir_message "${BUILD_DIR}"
 fi
 
 if [[ "${VERIFY}" == "1" ]]; then

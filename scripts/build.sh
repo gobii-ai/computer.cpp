@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/build-common.sh"
+
+PROJECT_DIR="$(project_dir)"
 BUILD_DIR="${PROJECT_DIR}/build/debug"
 CONFIG=Debug
 GENERATOR=""
@@ -33,8 +35,7 @@ while [[ $# -gt 0 ]]; do
       RECONFIGURE=1
       ;;
     --build-dir)
-      if [[ $# -lt 2 ]]; then
-        echo "--build-dir requires a path" >&2
+      if ! require_option_value "--build-dir" "$#"; then
         usage
         exit 1
       fi
@@ -42,8 +43,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --config)
-      if [[ $# -lt 2 ]]; then
-        echo "--config requires a value" >&2
+      if ! require_option_value "--config" "$#"; then
         usage
         exit 1
       fi
@@ -51,8 +51,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --generator)
-      if [[ $# -lt 2 ]]; then
-        echo "--generator requires a value" >&2
+      if ! require_option_value "--generator" "$#"; then
         usage
         exit 1
       fi
@@ -77,14 +76,9 @@ done
 
 cd "${PROJECT_DIR}"
 
-if ! command -v cmake >/dev/null 2>&1; then
-  echo "cmake not found" >&2
-  exit 1
-fi
+require_command cmake
 
-if [[ "${RECONFIGURE}" == "1" ]]; then
-  rm -rf "${BUILD_DIR}"
-fi
+prepare_build_dir "${BUILD_DIR}" "${RECONFIGURE}" "${GENERATOR}"
 
 if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   CMAKE_ARGS=(
@@ -104,8 +98,7 @@ if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
 
   cmake "${CMAKE_ARGS[@]}"
 else
-  echo "Using existing CMake build directory: ${BUILD_DIR}"
-  echo "Pass --reconfigure if you need to regenerate CMake files."
+  print_existing_build_dir_message "${BUILD_DIR}"
 fi
 
 cmake --build "${BUILD_DIR}" --target all --config "${CONFIG}"
