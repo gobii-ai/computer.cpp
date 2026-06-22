@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <thread>
 
 class wxProgressDialog;
@@ -26,6 +27,7 @@ private:
     std::atomic_bool updateInProgress_ = false;
     wxProgressDialog* updateProgressDialog_ = nullptr;
     std::thread updateThread_;
+    std::shared_ptr<std::atomic_bool> alive_ = std::make_shared<std::atomic_bool>(true);
 };
 
 } // namespace ComputerCpp::App

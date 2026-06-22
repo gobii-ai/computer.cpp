@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <sstream>
 #include <system_error>
@@ -157,7 +159,11 @@ bool IsWritableDirectory(const fs::path& dir) {
     if (!fs::exists(dir, ec) || ec) {
         return false;
     }
+#if defined(__APPLE__)
+    fs::path probe = dir / (".computer.cpp-update-write-test-" + std::to_string(getpid()));
+#else
     fs::path probe = dir / ".computer.cpp-update-write-test";
+#endif
     {
         std::ofstream out(probe);
         if (!out) {
@@ -400,7 +406,15 @@ CheckResult ParseGitHubLatestReleaseBody(std::string_view body, std::string_view
         result.message = "GitHub returned invalid JSON.";
         return result;
     }
-    return ParseGitHubLatestRelease(parsed, currentVersion);
+    try {
+        return ParseGitHubLatestRelease(parsed, currentVersion);
+    } catch (const std::exception& e) {
+        CheckResult result;
+        result.status = CheckStatus::InvalidResponse;
+        result.currentVersion = std::string(currentVersion);
+        result.message = std::string("Error parsing GitHub release: ") + e.what();
+        return result;
+    }
 }
 
 CheckResult CheckForUpdate() {
@@ -527,7 +541,10 @@ StageResult StageDownloadedUpdate(const ReleaseInfo& release, const fs::path& zi
     fs::path updateDir = UpdateRootDir(release.version);
     fs::path extractDir = updateDir / "staging";
     fs::remove_all(extractDir, ec);
-    ec.clear();
+    if (ec) {
+        result.error = "could not clear update staging directory: " + ec.message();
+        return result;
+    }
     fs::create_directories(extractDir, ec);
     if (ec) {
         result.error = "could not create update staging directory: " + ec.message();
@@ -544,10 +561,15 @@ StageResult StageDownloadedUpdate(const ReleaseInfo& release, const fs::path& zi
     fs::path expectedRoot = extractDir / ("computer.cpp-" + release.version + "-macos-arm64");
     if (!fs::is_directory(expectedRoot, ec) || ec) {
         expectedRoot.clear();
+        ec.clear();
         for (const auto& entry : fs::directory_iterator(extractDir, ec)) {
-            if (!ec && entry.is_directory() &&
-                fs::is_directory(entry.path() / "ComputerCpp.app") &&
-                fs::is_regular_file(entry.path() / "computer.cpp")) {
+            if (ec) {
+                break;
+            }
+            std::error_code entryEc;
+            if (entry.is_directory(entryEc) && !entryEc &&
+                fs::is_directory(entry.path() / "ComputerCpp.app", entryEc) && !entryEc &&
+                fs::is_regular_file(entry.path() / "computer.cpp", entryEc) && !entryEc) {
                 expectedRoot = entry.path();
                 break;
             }

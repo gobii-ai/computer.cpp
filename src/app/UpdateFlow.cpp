@@ -18,6 +18,9 @@ TrayUpdateFlow::TrayUpdateFlow(std::function<void()> quitForInstall)
     : quitForInstall_(std::move(quitForInstall)) {}
 
 TrayUpdateFlow::~TrayUpdateFlow() {
+    if (alive_) {
+        alive_->store(false);
+    }
     Shutdown();
 }
 
@@ -48,9 +51,13 @@ void TrayUpdateFlow::CheckForUpdates() {
         updateThread_.join();
     }
 
-    updateThread_ = std::thread([this] {
+    auto alive = alive_;
+    updateThread_ = std::thread([this, alive] {
         ComputerCpp::Updater::CheckResult result = ComputerCpp::Updater::CheckForUpdate();
-        wxTheApp->CallAfter([this, result] {
+        wxTheApp->CallAfter([this, alive, result] {
+            if (!alive->load()) {
+                return;
+            }
             if (result.status != ComputerCpp::Updater::CheckStatus::UpdateAvailable) {
                 updateInProgress_ = false;
             }
@@ -114,9 +121,13 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
         wxPD_APP_MODAL | wxPD_ELAPSED_TIME | wxPD_REMAINING_TIME);
     updateProgressDialog_->Pulse("Downloading update...");
 
-    updateThread_ = std::thread([this, release] {
-        auto postProgress = [this](const wxString& message, int percent = -1) {
-            wxTheApp->CallAfter([this, message, percent] {
+    auto alive = alive_;
+    updateThread_ = std::thread([this, alive, release] {
+        auto postProgress = [this, alive](const wxString& message, int percent = -1) {
+            wxTheApp->CallAfter([this, alive, message, percent] {
+                if (!alive->load()) {
+                    return;
+                }
                 if (!updateProgressDialog_) {
                     return;
                 }
@@ -130,7 +141,10 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
 
         auto download = ComputerCpp::Updater::DownloadReleaseAsset(
             release,
-            [postProgress](int64_t downloaded, int64_t total) {
+            [alive, postProgress](int64_t downloaded, int64_t total) {
+                if (!alive->load()) {
+                    return false;
+                }
                 if (total > 0) {
                     int percent = static_cast<int>((downloaded * 100) / total);
                     postProgress("Downloading update...", percent);
@@ -141,7 +155,10 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
             });
 
         if (!download.ok) {
-            wxTheApp->CallAfter([this, error = download.error] {
+            wxTheApp->CallAfter([this, alive, error = download.error] {
+                if (!alive->load()) {
+                    return;
+                }
                 CloseUpdateProgress();
                 updateInProgress_ = false;
                 wxMessageBox("Download failed:\n\n" + error,
@@ -154,7 +171,10 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
         postProgress("Validating update...");
         auto staged = ComputerCpp::Updater::StageDownloadedUpdate(release, download.zipPath);
         if (!staged.ok) {
-            wxTheApp->CallAfter([this, error = staged.error] {
+            wxTheApp->CallAfter([this, alive, error = staged.error] {
+                if (!alive->load()) {
+                    return;
+                }
                 CloseUpdateProgress();
                 updateInProgress_ = false;
                 wxMessageBox("Update validation failed:\n\n" + error,
@@ -166,7 +186,10 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
 
         postProgress("Preparing installer...");
         auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
-        wxTheApp->CallAfter([this, install] {
+        wxTheApp->CallAfter([this, alive, install] {
+            if (!alive->load()) {
+                return;
+            }
             CloseUpdateProgress();
             if (install.manualInstallRequired) {
                 updateInProgress_ = false;
