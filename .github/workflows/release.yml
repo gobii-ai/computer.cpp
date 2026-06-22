@@ -201,18 +201,48 @@ jobs:
           fi
 
           mkdir -p "$DIST_DIR/ComputerCpp.app/Contents/Frameworks"
+          HOMEBREW_PREFIX="$(brew --prefix)"
+          WX_PREFIX="$(brew --prefix wxwidgets)"
+          LUA_PREFIX="$(brew --prefix lua)"
           dylibbundler \
             -od \
             -b \
             -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
-            -p "@executable_path/../Frameworks"
+            -p "@executable_path/../Frameworks" \
+            -s "$WX_PREFIX/lib" \
+            -s "$HOMEBREW_PREFIX/lib"
           dylibbundler \
             -od \
             -b \
             -x "$BUNDLED_LUA" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
-            -p "@executable_path/../../../Frameworks"
+            -p "@executable_path/../../../Frameworks" \
+            -s "$LUA_PREFIX/lib" \
+            -s "$HOMEBREW_PREFIX/lib"
+
+          if ! find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name 'libwx_*.dylib' | grep -q .; then
+            echo "Bundled wxWidgets dylibs are missing from ComputerCpp.app/Contents/Frameworks" >&2
+            otool -L "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp" >&2
+            exit 1
+          fi
+
+          while IFS= read -r dependency; do
+            dylib="${dependency#@executable_path/../Frameworks/}"
+            dylib="${dylib#@executable_path/../../../Frameworks/}"
+            if [[ ! -f "$DIST_DIR/ComputerCpp.app/Contents/Frameworks/$dylib" ]]; then
+              echo "Bundled dependency is missing: $dylib" >&2
+              exit 1
+            fi
+          done < <(
+            {
+              otool -L "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp"
+              otool -L "$BUNDLED_LUA"
+              while IFS= read -r -d '' dylib; do
+                otool -L "$dylib"
+              done < <(find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib' -print0)
+            } | awk '/@executable_path\/.*\/Frameworks\// { print $1 }' | sort -u
+          )
 
           {
             echo "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp"
@@ -221,7 +251,7 @@ jobs:
             echo "$BUNDLED_LUA"
             find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib'
           } | while IFS= read -r binary; do
-            if otool -L "$binary" | grep -q '/opt/homebrew'; then
+            if otool -L "$binary" | grep -Eq '/opt/homebrew|/usr/local'; then
               echo "$binary still references Homebrew dylibs after bundling" >&2
               otool -L "$binary" >&2
               exit 1
