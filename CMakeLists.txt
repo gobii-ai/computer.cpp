@@ -36,7 +36,7 @@ function(computer_cpp_target_defaults target_name)
     endif()
 endfunction()
 
-find_package(wxWidgets QUIET COMPONENTS core base adv)
+find_package(wxWidgets QUIET COMPONENTS core base adv net)
 if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     include(${wxWidgets_USE_FILE})
 endif()

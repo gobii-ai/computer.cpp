@@ -10,6 +10,8 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <signal.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -149,6 +151,15 @@ bool IsProcessAlive(long pid) {
         return true;
     }
     return errno == EPERM;
+#elif defined(_WIN32)
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (hProcess == NULL) {
+        return false;
+    }
+    DWORD exitCode = 0;
+    BOOL ok = GetExitCodeProcess(hProcess, &exitCode);
+    CloseHandle(hProcess);
+    return ok && exitCode == STILL_ACTIVE;
 #else
     return false;
 #endif

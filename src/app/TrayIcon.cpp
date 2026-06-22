@@ -36,6 +36,7 @@
 #include <wx/notebook.h>
 #include <wx/process.h>
 #include <wx/scrolwin.h>
+#include <wx/socket.h>
 #include <wx/stdpaths.h>
 #include <wx/settings.h>
 #include <wx/timer.h>
@@ -214,33 +215,14 @@ std::string NormalizeBindHost(std::string host) {
 }
 
 bool IsTcpPortAvailable(const std::string& host, int port) {
-#if defined(__unix__) || defined(__APPLE__)
     if (port <= 0 || port > 65535) {
         return false;
     }
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return false;
-    }
-    int reuse = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    sockaddr_in addr {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    std::string bindHost = NormalizeBindHost(host);
-    if (::inet_pton(AF_INET, bindHost.c_str(), &addr.sin_addr) != 1) {
-        ::close(fd);
-        return false;
-    }
-    bool available = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
-    ::close(fd);
-    return available;
-#else
-    (void)host;
-    (void)port;
-    return true;
-#endif
+    wxIPV4address addr;
+    addr.Hostname(NormalizeBindHost(host));
+    addr.Service(port);
+    wxSocketServer server(addr);
+    return server.IsOk();
 }
 
 std::string HealthConnectHost(const std::string& host) {
@@ -310,7 +292,7 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
 
 std::string ProcessCommandLine(long pid) {
 #if defined(__APPLE__)
-    std::string command = "/bin/ps -p " + std::to_string(pid) + " -o command= 2>/dev/null";
+    std::string command = "ps -p " + std::to_string(pid) + " -o command= 2>/dev/null";
     FILE* pipe = popen(command.c_str(), "r");
     if (!pipe) {
         return {};
@@ -339,7 +321,7 @@ std::string ProcessCommandLine(long pid) {
 std::vector<std::pair<long, std::string>> AppServeProcesses() {
     std::vector<std::pair<long, std::string>> processes;
 #if defined(__APPLE__) || defined(__linux__)
-    FILE* pipe = popen("/bin/ps ax -o pid=,command= 2>/dev/null", "r");
+    FILE* pipe = popen("ps ax -o pid=,command= 2>/dev/null", "r");
     if (!pipe) {
         return processes;
     }
@@ -2562,27 +2544,46 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
     std::string host = NormalizeBindHost(config.server.host);
     std::string listen = host + ":" + std::to_string(*port);
     std::string displayName = app.displayName.empty() ? app.name : app.displayName;
-    std::string command = ShellQuote(cliPath.string()) +
-        " app serve " + ShellQuote(app.path) +
-        " --listen " + ShellQuote(listen) +
-        " --auth-token-env COMPUTER_CPP_TRAY_SERVER_TOKEN" +
-        " --tray-state-file " + ShellQuote(TrayAppServerStatePath().string()) +
-        " --tray-display-name " + ShellQuote(displayName);
+    std::vector<std::wstring> argStorage;
+    auto addArg = [&argStorage](const std::string& value) {
+        argStorage.push_back(wxString::FromUTF8(value).ToStdWstring());
+    };
+    auto addLiteralArg = [&argStorage](const wchar_t* value) {
+        argStorage.emplace_back(value);
+    };
+    addArg(cliPath.string());
+    addLiteralArg(L"app");
+    addLiteralArg(L"serve");
+    addArg(app.path);
+    addLiteralArg(L"--listen");
+    addArg(listen);
+    addLiteralArg(L"--auth-token-env");
+    addLiteralArg(L"COMPUTER_CPP_TRAY_SERVER_TOKEN");
+    addLiteralArg(L"--tray-state-file");
+    addArg(TrayAppServerStatePath().string());
+    addLiteralArg(L"--tray-display-name");
+    addArg(displayName);
     for (const auto& origin : config.server.allowedOrigins) {
-        command += " --allowed-origin " + ShellQuote(origin);
+        addLiteralArg(L"--allowed-origin");
+        addArg(origin);
     }
+    std::vector<const wchar_t*> argv;
+    argv.reserve(argStorage.size() + 1);
+    for (const auto& arg : argStorage) {
+        argv.push_back(arg.c_str());
+    }
+    argv.push_back(nullptr);
 
-    const char* previousTokenRaw = std::getenv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
-    const bool hadPreviousToken = previousTokenRaw != nullptr;
-    std::string previousToken = hadPreviousToken ? previousTokenRaw : "";
-    setenv("COMPUTER_CPP_TRAY_SERVER_TOKEN", config.server.authToken.c_str(), 1);
+    wxString previousToken;
+    const bool hadPreviousToken = wxGetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", &previousToken);
+    wxSetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", wxString::FromUTF8(config.server.authToken));
 
     serverProcess_ = new wxProcess(this, ID_SERVER_PROCESS);
-    long pid = wxExecute(command, wxEXEC_ASYNC, serverProcess_);
+    long pid = wxExecute(argv.data(), wxEXEC_ASYNC, serverProcess_);
     if (hadPreviousToken) {
-        setenv("COMPUTER_CPP_TRAY_SERVER_TOKEN", previousToken.c_str(), 1);
+        wxSetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", previousToken);
     } else {
-        unsetenv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
+        wxUnsetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
     }
 
     if (pid == 0) {

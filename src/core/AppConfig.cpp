@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -293,9 +294,16 @@ std::string GenerateServerAuthToken() {
         }
     }
     if (!filled) {
-        std::random_device random;
-        for (unsigned char& byte : bytes) {
-            byte = static_cast<unsigned char>(random() & 0xFF);
+        try {
+            std::random_device random;
+            for (unsigned char& byte : bytes) {
+                byte = static_cast<unsigned char>(random() & 0xFF);
+            }
+        } catch (...) {
+            std::mt19937 gen(static_cast<unsigned int>(std::time(nullptr)));
+            for (unsigned char& byte : bytes) {
+                byte = static_cast<unsigned char>(gen() & 0xFF);
+            }
         }
     }
 
