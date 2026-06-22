@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace ComputerCpp {
 
@@ -28,11 +29,27 @@ struct LlmProfileConfig {
     nlohmann::json openRouterProvider = nlohmann::json::object();
 };
 
+struct ServerAppConfig {
+    std::string name;
+    std::string displayName;
+    std::string path;
+    std::optional<int> port;
+};
+
+struct ServerConfig {
+    std::string host = "127.0.0.1";
+    int basePort = 8787;
+    std::string authToken;
+    std::vector<std::string> allowedOrigins;
+    std::map<std::string, ServerAppConfig> apps;
+};
+
 struct AppConfig {
     int version = 1;
     std::string defaultProfile = "main";
     std::map<std::string, LlmProviderConfig> providers;
     std::map<std::string, LlmProfileConfig> profiles;
+    ServerConfig server;
 };
 
 AppConfig DefaultAppConfig();
@@ -54,5 +71,7 @@ bool SetProfileDefaultParam(LlmProfileConfig& profile, const std::string& key, c
 bool ImportLegacyInferenceEnv(AppConfig& config, std::string* warning = nullptr, std::string* error = nullptr);
 
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error = nullptr);
+std::string GenerateServerAuthToken();
+bool EnsureServerAuthToken(AppConfig& config);
 
 } // namespace ComputerCpp

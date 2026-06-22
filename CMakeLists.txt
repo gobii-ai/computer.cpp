@@ -36,7 +36,7 @@ function(computer_cpp_target_defaults target_name)
     endif()
 endfunction()
 
-find_package(wxWidgets QUIET COMPONENTS core base adv)
+find_package(wxWidgets QUIET COMPONENTS core base adv net)
 if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     include(${wxWidgets_USE_FILE})
 endif()
@@ -107,6 +107,7 @@ add_library(computer_cpp_core
     src/core/Sqlite.cpp
     src/core/StringUtils.cpp
     src/core/Timeline.cpp
+    src/core/TrayServerState.cpp
     src/core/Updater.cpp
     src/daemon/Daemon.cpp
     src/daemon/DaemonArtifacts.cpp
@@ -271,6 +272,7 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
         src/app/TrayIcon.cpp
         src/app/UpdateFlow.cpp
     )
+    add_dependencies(ComputerCpp computer.cpp)
 
     target_include_directories(ComputerCpp
         PRIVATE
@@ -291,6 +293,11 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
             MACOSX_BUNDLE_BUNDLE_NAME "ComputerCpp"
             MACOSX_BUNDLE_GUI_IDENTIFIER "org.computercpp.app"
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos/Info.plist.in"
+        )
+
+        add_custom_command(TARGET ComputerCpp POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:computer.cpp>" "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/MacOS/computer.cpp"
+            VERBATIM
         )
 
         if(COMPUTER_CPP_CODE_SIGN_APP)
