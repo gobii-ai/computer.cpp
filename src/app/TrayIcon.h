@@ -40,8 +40,8 @@ private:
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
     bool TryAdoptExistingServer(bool removeInvalidState);
-    bool TryAdoptLegacyServer(const ComputerCpp::ServerConfig& server, const ComputerCpp::ServerAppConfig& app, int port);
-    void StopServerProcess();
+    bool TryAdoptConfiguredServer(const ComputerCpp::ServerConfig& server, const ComputerCpp::ServerAppConfig& app);
+    bool StopServerProcess(bool notifyOnFailure = false);
     void ClearServerProcessState(bool deleteProcess);
 
     bool daemonStarted_ = false;
