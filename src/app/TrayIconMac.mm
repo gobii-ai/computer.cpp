@@ -103,6 +103,7 @@ struct NativeTrayIcon {
     if (!menu) {
         return;
     }
+    menu->SetEventHandler(_owner);
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
