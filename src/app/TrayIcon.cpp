@@ -234,11 +234,32 @@ bool IsTcpPortAvailable(const std::string& host, int port) {
     if (port <= 0 || port > 65535) {
         return false;
     }
+#if defined(__unix__) || defined(__APPLE__)
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    int reuse = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    std::string bindHost = NormalizeBindHost(host);
+    if (::inet_pton(AF_INET, bindHost.c_str(), &addr.sin_addr) != 1) {
+        ::close(fd);
+        return false;
+    }
+    bool available = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    ::close(fd);
+    return available;
+#else
     wxIPV4address addr;
     addr.Hostname(NormalizeBindHost(host));
     addr.Service(port);
     wxSocketServer server(addr);
     return server.IsOk();
+#endif
 }
 
 std::string HealthConnectHost(const std::string& host) {
@@ -450,6 +471,16 @@ std::optional<TrayAppServerState> AdoptableServerState(
     return std::nullopt;
 }
 
+std::optional<TrayAppServerState> AdoptableConfiguredServerState(const ServerConfig& server, long pid, const std::string& command) {
+    for (const auto& [_, app] : server.apps) {
+        auto state = AdoptableServerState(server, app, pid, command);
+        if (state) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
 bool WaitForProcessExit(long pid, bool reapChild) {
     for (int i = 0; i < 20; ++i) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -473,6 +504,17 @@ bool WaitForProcessExit(long pid, bool reapChild) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return !IsProcessAlive(pid);
+}
+
+void SignalServerProcess(long pid, wxSignal signal, int posixSignal, bool includeChildren) {
+#if defined(__unix__) || defined(__APPLE__)
+    ::kill(static_cast<pid_t>(pid), posixSignal);
+    if (includeChildren) {
+        wxKill(pid, signal, nullptr, wxKILL_CHILDREN);
+    }
+#else
+    wxKill(pid, signal, nullptr, includeChildren ? wxKILL_CHILDREN : wxKILL_NOCHILDREN);
+#endif
 }
 
 std::optional<int> ChooseServerPort(const ServerConfig& server, const ServerAppConfig& app) {
@@ -2793,14 +2835,41 @@ bool TrayIcon::TryAdoptConfiguredServer(const ServerConfig& server, const Server
     return false;
 }
 
+bool TrayIcon::VerifyAdoptedServerBeforeStop(long pid, bool notifyOnFailure) {
+    std::string configError;
+    AppConfig config = LoadAppConfig(&configError);
+    std::string command = ProcessCommandLine(pid);
+    auto state = configError.empty() && !command.empty()
+        ? AdoptableConfiguredServerState(config.server, pid, command)
+        : std::nullopt;
+    if (state) {
+        std::string stateError;
+        SaveTrayAppServerState(*state, TrayAppServerStatePath(), &stateError);
+        return true;
+    }
+
+    RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), pid, nullptr);
+    ClearServerProcessState(true);
+    if (notifyOnFailure) {
+        wxMessageBox(
+            "Server process is no longer running.",
+            "ComputerCpp Server",
+            wxOK | wxICON_INFORMATION);
+    }
+    return false;
+}
+
 bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
     long pid = serverPid_;
     bool currentSessionChild = serverProcess_ != nullptr;
     if (pid > 0) {
-        wxKill(pid, wxSIGTERM, nullptr, wxKILL_CHILDREN);
+        if (!currentSessionChild && !VerifyAdoptedServerBeforeStop(pid, notifyOnFailure)) {
+            return false;
+        }
+        SignalServerProcess(pid, wxSIGTERM, SIGTERM, currentSessionChild);
         bool stopped = WaitForProcessExit(pid, currentSessionChild);
         if (!stopped) {
-            wxKill(pid, wxSIGKILL, nullptr, wxKILL_CHILDREN);
+            SignalServerProcess(pid, wxSIGKILL, SIGKILL, currentSessionChild);
             stopped = WaitForProcessExit(pid, currentSessionChild);
         }
         if (!stopped) {

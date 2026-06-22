@@ -41,6 +41,7 @@ private:
     void StartOwnedDaemon();
     bool TryAdoptExistingServer(bool removeInvalidState);
     bool TryAdoptConfiguredServer(const ComputerCpp::ServerConfig& server, const ComputerCpp::ServerAppConfig& app);
+    bool VerifyAdoptedServerBeforeStop(long pid, bool notifyOnFailure);
     bool StopServerProcess(bool notifyOnFailure = false);
     void ClearServerProcessState(bool deleteProcess);
 
