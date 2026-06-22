@@ -289,6 +289,11 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     )
 
     if(APPLE)
+        target_sources(ComputerCpp
+            PRIVATE
+                src/app/TrayIconMac.mm
+        )
+
         set_target_properties(ComputerCpp PROPERTIES
             MACOSX_BUNDLE_BUNDLE_NAME "ComputerCpp"
             MACOSX_BUNDLE_GUI_IDENTIFIER "org.computercpp.app"

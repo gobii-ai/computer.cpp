@@ -81,6 +81,17 @@ wxSize TrayIconBitmapSize() {
     return wxSize(size, size);
 }
 
+bool TrayIconPrefersDarkForeground();
+void ConfigureTrayIconForPlatform(wxIcon& icon);
+
+#ifndef __APPLE__
+bool TrayIconPrefersDarkForeground() {
+    return !wxSystemSettings::GetAppearance().IsDark();
+}
+
+void ConfigureTrayIconForPlatform(wxIcon&) {}
+#endif
+
 wxIcon CreateComputerTrayIcon() {
     wxSize size = TrayIconBitmapSize();
 
@@ -125,22 +136,22 @@ wxIcon CreateComputerTrayIcon() {
 
         gc->SetAntialiasMode(wxANTIALIAS_DEFAULT);
 
-        const bool darkAppearance = wxSystemSettings::GetAppearance().IsDark();
-        const wxColour foreground = darkAppearance
-            ? wxColour(248, 250, 252, 248)
-            : wxColour(24, 31, 42, 245);
-        const wxColour midtone = darkAppearance
-            ? wxColour(203, 213, 225, 215)
-            : wxColour(75, 85, 99, 210);
-        const wxColour softFill = darkAppearance
-            ? wxColour(248, 250, 252, 34)
-            : wxColour(24, 31, 42, 28);
-        const wxColour screenFill = darkAppearance
-            ? wxColour(248, 250, 252, 48)
-            : wxColour(24, 31, 42, 40);
-        const wxColour shadow = darkAppearance
-            ? wxColour(0, 0, 0, 78)
-            : wxColour(0, 0, 0, 34);
+        const bool darkForeground = TrayIconPrefersDarkForeground();
+        const wxColour foreground = darkForeground
+            ? wxColour(24, 31, 42, 245)
+            : wxColour(248, 250, 252, 248);
+        const wxColour midtone = darkForeground
+            ? wxColour(75, 85, 99, 210)
+            : wxColour(203, 213, 225, 215);
+        const wxColour softFill = darkForeground
+            ? wxColour(24, 31, 42, 28)
+            : wxColour(248, 250, 252, 34);
+        const wxColour screenFill = darkForeground
+            ? wxColour(24, 31, 42, 40)
+            : wxColour(248, 250, 252, 48);
+        const wxColour shadow = darkForeground
+            ? wxColour(255, 255, 255, 34)
+            : wxColour(0, 0, 0, 78);
 
         drawRounded(4.2, 4.4, 13.6, 10.9, 2.2, shadow);
         drawRounded(4.0, 3.3, 14.0, 11.3, 2.0, softFill, foreground, 1.35);
@@ -167,6 +178,7 @@ wxIcon CreateComputerTrayIcon() {
 
     wxIcon icon;
     icon.CopyFromBitmap(bitmap);
+    ConfigureTrayIconForPlatform(icon);
     return icon;
 }
 
