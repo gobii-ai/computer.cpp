@@ -251,14 +251,22 @@ void WriteExecutableFile(const fs::path& path) {
 }
 
 void SetEnvValue(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    _putenv_s(name, value.c_str());
+#else
     setenv(name, value.c_str(), 1);
+#endif
 }
 
 void RestoreEnvValue(const char* name, const std::optional<std::string>& value) {
     if (value.has_value()) {
-        setenv(name, value->c_str(), 1);
+        SetEnvValue(name, *value);
     } else {
+#if defined(_WIN32)
+        _putenv_s(name, "");
+#else
         unsetenv(name);
+#endif
     }
 }
 
@@ -280,16 +288,23 @@ void TestLuaInterpreterResolution() {
     fs::path appExe = root / "ComputerCpp.app" / "Contents" / "MacOS" / "computer.cpp";
     fs::path bundledLua = root / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
     fs::path siblingCli = root / "computer.cpp";
+    fs::path cliBin = root / "cli-bin";
+    fs::path pathCli = cliBin / "computer.cpp";
+    fs::path pathBundledLua = cliBin / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
 
     WriteExecutableFile(envLua);
     SetEnvValue("COMPUTER_CPP_LUA", envLua.string());
     SetEnvValue("PATH", (root / "empty-path").string());
     assert(ComputerCpp::FindLuaInterpreter(appExe) == envLua);
 
-    unsetenv("COMPUTER_CPP_LUA");
+    RestoreEnvValue("COMPUTER_CPP_LUA", std::nullopt);
     WriteExecutableFile(bundledLua);
     assert(ComputerCpp::FindLuaInterpreter(appExe) == bundledLua);
     assert(ComputerCpp::FindLuaInterpreter(siblingCli) == bundledLua);
+    WriteExecutableFile(pathCli);
+    WriteExecutableFile(pathBundledLua);
+    SetEnvValue("PATH", cliBin.string());
+    assert(ComputerCpp::FindLuaInterpreter("computer.cpp") == pathBundledLua);
 
     fs::remove(bundledLua);
     WriteExecutableFile(pathLua);

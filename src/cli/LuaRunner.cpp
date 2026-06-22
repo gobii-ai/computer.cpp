@@ -56,6 +56,12 @@ std::vector<fs::path> BundledLuaCandidates(const fs::path& executablePath) {
         return {};
     }
     fs::path executable = executablePath;
+    if (executable.filename() == executable) {
+        fs::path resolved = FindOnPath(executable.string());
+        if (!resolved.empty()) {
+            executable = resolved;
+        }
+    }
     if (executable.is_relative()) {
         std::error_code ec;
         executable = fs::absolute(executable, ec);
