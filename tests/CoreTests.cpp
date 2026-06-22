@@ -200,6 +200,8 @@ void TestUpdaterVersionParsing() {
 }
 
 void TestUpdaterReleaseParsing() {
+    assert(ComputerCpp::Updater::CompatibleWindowsAssetName("0.3.0") == "computer.cpp-0.3.0-windows-x64.msi");
+
     nlohmann::json release = {
         {"tag_name", "v0.3.0"},
         {"html_url", "https://github.com/gobii-ai/computer.cpp/releases/tag/0.3.0"},
@@ -543,7 +545,7 @@ void TestTimelineStorage() {
 
 int main() {
     fs::path tempHome = MakeTempHome();
-    setenv("COMPUTER_CPP_HOME", tempHome.c_str(), 1);
+    SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
     TestStringUtils();
     TestAppConfigServerRoundTrip();

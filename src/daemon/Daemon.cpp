@@ -3,6 +3,7 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/InferenceClient.h"
 #include "computer_cpp/StringUtils.h"
+#include "computer_cpp/WindowsUtil.h"
 
 #include "DaemonArtifacts.h"
 #include "DaemonBatch.h"
@@ -40,6 +41,8 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 using json = nlohmann::json;
@@ -101,6 +104,37 @@ std::optional<json> RunNoParamsRoute(std::string_view method) {
     }
     return std::nullopt;
 }
+
+#if defined(_WIN32)
+std::string ReadLineFromPipe(HANDLE pipe) {
+    std::string line;
+    char ch = 0;
+    DWORD read = 0;
+    while (ReadFile(pipe, &ch, 1, &read, nullptr) && read == 1) {
+        if (ch == '\n') {
+            break;
+        }
+        line.push_back(ch);
+    }
+    return line;
+}
+
+void WriteJsonLineToPipe(HANDLE pipe, const json& response) {
+    std::string line = response.dump();
+    line.push_back('\n');
+    const char* ptr = line.data();
+    size_t remaining = line.size();
+    while (remaining > 0) {
+        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64 * 1024));
+        DWORD written = 0;
+        if (!WriteFile(pipe, ptr, chunk, &written, nullptr) || written == 0) {
+            break;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+}
+#endif
 
 } // namespace
 
@@ -307,6 +341,56 @@ int RunDaemon(const DaemonOptions& options) {
     }
     ::close(serverFd);
     std::filesystem::remove(socketPath);
+    std::filesystem::remove(pidPath);
+    return 0;
+#elif defined(_WIN32)
+    auto pidPath = PidPathForSession(options.session);
+    std::ofstream(pidPath) << GetCurrentProcessId();
+    std::wstring pipeName = ComputerCpp::Windows::Utf8ToWide(PipeNameForSession(options.session));
+
+    ResetDaemonStopState();
+    std::thread idleThread = StartIdleBehaviorThreadIfEnabled();
+    while (!DaemonShouldStop()) {
+        HANDLE pipe = CreateNamedPipeW(
+            pipeName.c_str(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            64 * 1024,
+            64 * 1024,
+            0,
+            nullptr);
+        if (pipe == INVALID_HANDLE_VALUE) {
+            std::cerr << "CreateNamedPipe failed: " << GetLastError() << std::endl;
+            break;
+        }
+
+        BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+        if (!connected) {
+            CloseHandle(pipe);
+            continue;
+        }
+
+        std::string line = ReadLineFromPipe(pipe);
+        if (!line.empty()) {
+            json request = json::parse(line, nullptr, false);
+            json response;
+            if (request.is_discarded()) {
+                response = Error("invalid request: malformed JSON", "bad_request");
+            } else {
+                response = HandleDaemonRequest(options.session, request);
+            }
+            WriteJsonLineToPipe(pipe, response);
+        }
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+    }
+
+    RequestDaemonStop();
+    if (idleThread.joinable()) {
+        idleThread.join();
+    }
     std::filesystem::remove(pidPath);
     return 0;
 #else

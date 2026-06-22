@@ -1,0 +1,19 @@
+{
+  "name": "computer-cpp",
+  "version": "0.6.0",
+  "dependencies": [
+    {
+      "name": "curl",
+      "default-features": true,
+      "features": [
+        "ssl"
+      ]
+    },
+    "lua",
+    "nlohmann-json",
+    "sqlite3",
+    "tomlplusplus",
+    "wxwidgets",
+    "zlib"
+  ]
+}

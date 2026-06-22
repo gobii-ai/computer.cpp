@@ -32,6 +32,8 @@ jobs:
   release:
     name: Release computer.cpp
     runs-on: macos-26
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
     env:
       BUILD_DIR: build/release
     steps:
@@ -46,6 +48,7 @@ jobs:
           brew install cmake ninja wxwidgets dylibbundler lua
 
       - name: Bump version
+        id: bump_version
         env:
           BUMP: ${{ inputs.bump }}
         run: |
@@ -98,6 +101,8 @@ jobs:
           cmake_path.write_text(updated, encoding="utf-8")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8", newline="\n") as env:
               env.write(f"NEW_VERSION={new_version}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8", newline="\n") as out:
+              out.write(f"new_version={new_version}\n")
           print(f"Bumped version to {new_version}")
           PY
 
@@ -331,3 +336,81 @@ jobs:
             "$RELEASE_ASSET#${RELEASE_ASSET_NAME}" \
             --title "$RELEASE_TITLE" \
             --notes-file release-notes.md
+
+  windows:
+    name: Windows Release Artifacts
+    runs-on: windows-latest
+    needs: release
+    env:
+      BUILD_DIR: build/windows-release
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      NEW_VERSION: ${{ needs.release.outputs.new_version }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.new_version }}
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          choco install ninja wixtoolset -y
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B "$env:BUILD_DIR" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" --target all --config Release
+          cpack --config "$env:BUILD_DIR/CPackConfig.cmake" -B dist
+
+      - name: Sign Windows artifacts when configured
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_SIGNING_CERTIFICATE_BASE64) {
+            "Windows signing certificate not configured; leaving artifacts unsigned."
+            exit 0
+          }
+          $certPath = Join-Path $env:RUNNER_TEMP "computer-cpp-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64))
+          $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          if (-not $signtool) {
+            throw "signtool.exe not found"
+          }
+          Get-ChildItem dist -Recurse -Include *.exe,*.dll,*.msi | ForEach-Object {
+            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $certPath /p "$env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD" $_.FullName
+          }
+
+      - name: Smoke packaged portable zip
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.zip" | Select-Object -First 1
+          if (-not $zip) { throw "portable zip not found" }
+          $extract = Join-Path $env:RUNNER_TEMP "computer-cpp-portable"
+          Expand-Archive $zip.FullName -DestinationPath $extract
+          $cli = Get-ChildItem $extract -Recurse -Filter computer.cpp.exe | Select-Object -First 1
+          if (-not $cli) { throw "computer.cpp.exe not found in portable zip" }
+          & $cli.FullName run --dry-run tests/lua/dry-run.lua
+          & $cli.FullName open
+          & $cli.FullName ping
+          & $cli.FullName close
+
+      - name: Upload Windows release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $zip = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.zip" | Select-Object -First 1
+          $msi = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.msi" | Select-Object -First 1
+          if (-not $zip) { throw "Windows zip artifact not found" }
+          if (-not $msi) { throw "Windows MSI artifact not found" }
+          gh release upload "$env:NEW_VERSION" "$($zip.FullName)#computer.cpp-$env:NEW_VERSION-windows-x64.zip" "$($msi.FullName)#computer.cpp-$env:NEW_VERSION-windows-x64.msi" --clobber

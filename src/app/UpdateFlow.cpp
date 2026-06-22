@@ -12,9 +12,24 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 namespace ComputerCpp::App {
+namespace {
+
+int CurrentProcessIdForUpdate() {
+#if defined(_WIN32)
+    return static_cast<int>(GetCurrentProcessId());
+#elif defined(__unix__) || defined(__APPLE__)
+    return static_cast<int>(getpid());
+#else
+    return 0;
+#endif
+}
+
+}
 
 TrayUpdateFlow::TrayUpdateFlow(std::function<void()> quitForInstall)
     : quitForInstall_(std::move(quitForInstall)) {}
@@ -197,7 +212,7 @@ void TrayUpdateFlow::StartUpdateInstall(const ComputerCpp::Updater::ReleaseInfo&
         });
         progressClosedFuture.wait_for(std::chrono::seconds(5));
 
-        auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, static_cast<int>(getpid()));
+        auto install = ComputerCpp::Updater::LaunchInstallAndRelaunch(staged, CurrentProcessIdForUpdate());
         wxTheApp->CallAfter([this, alive, install] {
             if (!alive->load()) {
                 return;

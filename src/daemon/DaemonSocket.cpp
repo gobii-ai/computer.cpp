@@ -106,4 +106,8 @@ std::filesystem::path PidPathForSession(const std::string& session) {
     return dir / (session + ".pid");
 }
 
+std::string PipeNameForSession(const std::string& session) {
+    return "\\\\.\\pipe\\computer.cpp-" + session;
+}
+
 } // namespace ComputerCpp

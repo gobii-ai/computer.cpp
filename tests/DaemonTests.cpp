@@ -5,6 +5,7 @@
 #include "DaemonDesktop.h"
 #include "DaemonInput.h"
 #include "DaemonObservation.h"
+#include "DaemonSocket.h"
 #include "DaemonTargetCommand.h"
 #include "DaemonTargetGeometry.h"
 #include "DaemonTargetRefs.h"
@@ -22,21 +23,38 @@ namespace fs = std::filesystem;
 
 namespace {
 
+void SetEnvValue(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    _putenv_s(name, value.c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void ClearEnvValue(const char* name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 void TestDaemonSocketPathStaysShort() {
     const char* previous = std::getenv("COMPUTER_CPP_HOME");
     std::string previousValue = previous ? previous : "";
     fs::path longHome = fs::temp_directory_path() /
         "computer.cpp-tests-very-long-home-path-for-control-session-daemon-socket-fallback" /
         "nested-directory-with-enough-characters-to-exceed-unix-domain-socket-limits";
-    setenv("COMPUTER_CPP_HOME", longHome.c_str(), 1);
+    SetEnvValue("COMPUTER_CPP_HOME", longHome.string());
     auto socketPath = ComputerCpp::SocketPathForSession("default");
 #if defined(__unix__) || defined(__APPLE__)
     assert(socketPath.string().size() < 100);
 #endif
+    assert(ComputerCpp::PipeNameForSession("default") == "\\\\.\\pipe\\computer.cpp-default");
     if (previous) {
-        setenv("COMPUTER_CPP_HOME", previousValue.c_str(), 1);
+        SetEnvValue("COMPUTER_CPP_HOME", previousValue);
     } else {
-        unsetenv("COMPUTER_CPP_HOME");
+        ClearEnvValue("COMPUTER_CPP_HOME");
     }
 }
 

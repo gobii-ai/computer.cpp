@@ -1,8 +1,10 @@
 #include "computer_cpp/Transport.h"
 
 #include "computer_cpp/Daemon.h"
+#include "computer_cpp/WindowsUtil.h"
 
 #include "DaemonParsing.h"
+#include "DaemonSocket.h"
 
 #include <algorithm>
 #include <chrono>
@@ -20,6 +22,8 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 using json = nlohmann::json;
@@ -28,8 +32,9 @@ namespace ComputerCpp {
 
 namespace {
 
-std::string ReadLineFromFd(int fd) {
+std::string ReadLineFromSocketFd(int fd) {
     std::string line;
+#if defined(__unix__) || defined(__APPLE__)
     char ch = 0;
     while (true) {
         ssize_t n = ::read(fd, &ch, 1);
@@ -37,10 +42,14 @@ std::string ReadLineFromFd(int fd) {
         if (ch == '\n') break;
         line.push_back(ch);
     }
+#else
+    (void)fd;
+#endif
     return line;
 }
 
 bool WriteAll(int fd, const std::string& payload) {
+#if defined(__unix__) || defined(__APPLE__)
     const char* ptr = payload.data();
     size_t remaining = payload.size();
     while (remaining > 0) {
@@ -50,6 +59,11 @@ bool WriteAll(int fd, const std::string& payload) {
         remaining -= static_cast<size_t>(written);
     }
     return true;
+#else
+    (void)fd;
+    (void)payload;
+    return false;
+#endif
 }
 
 int TransportTimeoutMs() {
@@ -172,18 +186,103 @@ int ConnectUnixSocket(const std::string& session) {
 #endif
 }
 
+#if defined(_WIN32)
+HANDLE ConnectNamedPipeClient(const std::string& session) {
+    std::wstring pipeName = Windows::Utf8ToWide(PipeNameForSession(session));
+    const DWORD timeoutMs = static_cast<DWORD>(TransportTimeoutMs());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        HANDLE pipe = CreateFileW(
+            pipeName.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) {
+            DWORD mode = PIPE_READMODE_BYTE;
+            SetNamedPipeHandleState(pipe, &mode, nullptr, nullptr);
+            return pipe;
+        }
+        DWORD error = GetLastError();
+        if (error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND) {
+            return INVALID_HANDLE_VALUE;
+        }
+        WaitNamedPipeW(pipeName.c_str(), std::min<DWORD>(250, timeoutMs));
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+std::string ReadLineFromPipe(HANDLE pipe) {
+    std::string line;
+    char ch = 0;
+    DWORD read = 0;
+    while (ReadFile(pipe, &ch, 1, &read, nullptr) && read == 1) {
+        if (ch == '\n') {
+            break;
+        }
+        line.push_back(ch);
+    }
+    return line;
+}
+
+bool WriteAllToPipe(HANDLE pipe, const std::string& payload) {
+    const char* ptr = payload.data();
+    size_t remaining = payload.size();
+    while (remaining > 0) {
+        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 64 * 1024));
+        DWORD written = 0;
+        if (!WriteFile(pipe, ptr, chunk, &written, nullptr) || written == 0) {
+            return false;
+        }
+        ptr += written;
+        remaining -= written;
+    }
+    return true;
+}
+#endif
+
 }
 
 bool IsDaemonReady(const std::string& session) {
+#if defined(_WIN32)
+    HANDLE pipe = ConnectNamedPipeClient(session);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CloseHandle(pipe);
+    return true;
+#else
     int fd = ConnectUnixSocket(session);
     if (fd < 0) {
         return false;
     }
     ::close(fd);
     return true;
+#endif
 }
 
 json SendDaemonRequest(const std::string& session, const json& request) {
+#if defined(_WIN32)
+    HANDLE pipe = ConnectNamedPipeClient(session);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        return {{"ok", false}, {"error", "daemon is not running"}, {"code", "daemon_unavailable"}};
+    }
+    std::string line = request.dump();
+    line.push_back('\n');
+    if (!WriteAllToPipe(pipe, line)) {
+        CloseHandle(pipe);
+        return {{"ok", false}, {"error", "failed to write request"}, {"code", "transport_write_failed"}};
+    }
+    std::string responseLine = ReadLineFromPipe(pipe);
+    CloseHandle(pipe);
+    auto response = json::parse(responseLine, nullptr, false);
+    if (response.is_discarded()) {
+        return {{"ok", false}, {"error", "invalid daemon response: malformed JSON"}, {"code", "bad_response"}};
+    }
+    return response;
+#else
     int fd = ConnectUnixSocket(session);
     if (fd < 0) {
         return {{"ok", false}, {"error", "daemon is not running"}, {"code", "daemon_unavailable"}};
@@ -194,13 +293,14 @@ json SendDaemonRequest(const std::string& session, const json& request) {
         ::close(fd);
         return {{"ok", false}, {"error", "failed to write request"}, {"code", "transport_write_failed"}};
     }
-    std::string responseLine = ReadLineFromFd(fd);
+    std::string responseLine = ReadLineFromSocketFd(fd);
     ::close(fd);
     auto response = json::parse(responseLine, nullptr, false);
     if (response.is_discarded()) {
         return {{"ok", false}, {"error", "invalid daemon response: malformed JSON"}, {"code", "bad_response"}};
     }
     return response;
+#endif
 }
 
 DaemonStartResult EnsureDaemon(const std::string& session, const std::string& executablePath) {
@@ -238,6 +338,39 @@ DaemonStartResult EnsureDaemon(const std::string& session, const std::string& ex
         ::execl(executablePath.c_str(), executablePath.c_str(), "daemon", "--session", session.c_str(), nullptr);
         _exit(127);
     }
+
+    result.started = true;
+    for (int i = 0; i < 50; ++i) {
+        if (IsDaemonReady(session)) {
+            return result;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    result.error = "daemon did not become ready";
+    return result;
+#elif defined(_WIN32)
+    std::vector<std::string> command = {executablePath, "daemon", "--session", session};
+    std::wstring application = Windows::Utf8ToWide(executablePath);
+    std::wstring commandLine = Windows::CommandLineForArgs(command);
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo{};
+    if (!CreateProcessW(
+            application.c_str(),
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            nullptr,
+            nullptr,
+            &startupInfo,
+            &processInfo)) {
+        result.error = "failed to start daemon";
+        return result;
+    }
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
 
     result.started = true;
     for (int i = 0; i < 50; ++i) {

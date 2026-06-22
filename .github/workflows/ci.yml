@@ -29,3 +29,40 @@ jobs:
       - name: Build and test
         run: |
           scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign
+
+  windows:
+    name: Windows Tests
+    runs-on: windows-latest
+    env:
+      BUILD_DIR: build/windows
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          choco install ninja -y
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B "$env:BUILD_DIR" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=ON `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" --target all --config Release
+          ctest --test-dir "$env:BUILD_DIR" --build-config Release --output-on-failure
+
+      - name: Runtime smoke
+        shell: pwsh
+        run: |
+          & "$env:BUILD_DIR\computer.cpp.exe" run --dry-run tests/lua/dry-run.lua
+          & "$env:BUILD_DIR\computer.cpp.exe" open
+          & "$env:BUILD_DIR\computer.cpp.exe" ping
+          & "$env:BUILD_DIR\computer.cpp.exe" close

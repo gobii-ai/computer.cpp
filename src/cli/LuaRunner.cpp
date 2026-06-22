@@ -1,4 +1,5 @@
 #include "computer_cpp/LuaRunner.h"
+#include "computer_cpp/WindowsUtil.h"
 
 #include "LuaPrelude.h"
 #include "PosixArgv.h"
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -16,6 +18,8 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -27,14 +31,52 @@ bool IsExecutable(const fs::path& path) {
 #if defined(__unix__) || defined(__APPLE__)
     return ::access(path.c_str(), X_OK) == 0;
 #else
-    return fs::exists(path);
+    std::error_code ec;
+    return fs::is_regular_file(path, ec) && !ec;
+#endif
+}
+
+std::vector<std::string> PathExtensions() {
+#if defined(_WIN32)
+    std::vector<std::string> extensions{""};
+    if (const char* raw = std::getenv("PATHEXT")) {
+        std::stringstream stream(raw);
+        std::string ext;
+        while (std::getline(stream, ext, ';')) {
+            if (!ext.empty()) {
+                extensions.push_back(ext);
+            }
+        }
+    }
+    extensions.push_back(".exe");
+    return extensions;
+#else
+    return {""};
 #endif
 }
 
 fs::path FindOnPath(const std::string& name) {
-    if (name.find('/') != std::string::npos) {
+    if (name.find('/') != std::string::npos
+#if defined(_WIN32)
+        || name.find('\\') != std::string::npos || name.find(':') != std::string::npos
+#endif
+    ) {
         fs::path path(name);
-        return IsExecutable(path) ? path : fs::path();
+        if (IsExecutable(path)) {
+            return path;
+        }
+#if defined(_WIN32)
+        if (!path.has_extension()) {
+            for (const auto& ext : PathExtensions()) {
+                fs::path candidate = path;
+                candidate += ext;
+                if (IsExecutable(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+#endif
+        return {};
     }
     const char* pathEnv = std::getenv("PATH");
     if (!pathEnv) {
@@ -42,10 +84,28 @@ fs::path FindOnPath(const std::string& name) {
     }
     std::stringstream stream(pathEnv);
     std::string dir;
-    while (std::getline(stream, dir, ':')) {
-        fs::path candidate = fs::path(dir) / name;
-        if (IsExecutable(candidate)) {
-            return candidate;
+    const char delimiter =
+#if defined(_WIN32)
+        ';';
+#else
+        ':';
+#endif
+    while (std::getline(stream, dir, delimiter)) {
+        if (dir.empty()) {
+            dir = ".";
+        }
+        for (const auto& ext : PathExtensions()) {
+            fs::path candidate = fs::path(dir) / name;
+#if defined(_WIN32)
+            if (!candidate.has_extension()) {
+                candidate += ext;
+            }
+#else
+            (void)ext;
+#endif
+            if (IsExecutable(candidate)) {
+                return candidate;
+            }
         }
     }
     return {};
@@ -69,11 +129,20 @@ std::vector<fs::path> BundledLuaCandidates(const fs::path& executablePath) {
             executable = executablePath;
         }
     }
-    fs::path macosDir = executable.parent_path();
+    fs::path executableDir = executable.parent_path();
+#if defined(_WIN32)
+    return {
+        executableDir / "lua" / "bin" / "lua.exe",
+        executableDir.parent_path() / "lua" / "bin" / "lua.exe",
+        executableDir / "ComputerCpp" / "lua" / "bin" / "lua.exe",
+    };
+#else
+    fs::path macosDir = executableDir;
     return {
         macosDir.parent_path() / "Resources" / "lua" / "bin" / "lua",
         executable.parent_path() / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua",
     };
+#endif
 }
 
 }
@@ -106,10 +175,67 @@ fs::path TempPreludePath() {
 #if defined(__unix__) || defined(__APPLE__)
     auto pid = static_cast<long long>(::getpid());
 #else
-    auto pid = 0LL;
+    auto pid =
+#if defined(_WIN32)
+        static_cast<long long>(GetCurrentProcessId());
+#else
+        0LL;
+#endif
 #endif
     return fs::temp_directory_path() / ("computer.cpp-lua-" + std::to_string(pid) + "-" + std::to_string(stamp) + ".lua");
 }
+
+#if defined(_WIN32)
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const wchar_t* name, const wchar_t* value) : name_(name) {
+        DWORD needed = GetEnvironmentVariableW(name, nullptr, 0);
+        if (needed > 0) {
+            hadPrevious_ = true;
+            previous_.resize(needed);
+            DWORD written = GetEnvironmentVariableW(name, previous_.data(), needed);
+            previous_.resize(written);
+        }
+        SetEnvironmentVariableW(name, value);
+    }
+
+    ~ScopedEnvVar() {
+        SetEnvironmentVariableW(name_.c_str(), hadPrevious_ ? previous_.c_str() : nullptr);
+    }
+
+private:
+    std::wstring name_;
+    std::wstring previous_;
+    bool hadPrevious_ = false;
+};
+
+int ExitCodeFromProcess(HANDLE process) {
+    DWORD exitCode = 1;
+    if (!GetExitCodeProcess(process, &exitCode)) {
+        return 1;
+    }
+    return static_cast<int>(exitCode);
+}
+
+bool StartProcess(const std::vector<std::string>& args, STARTUPINFOW& startupInfo, PROCESS_INFORMATION& processInfo) {
+    if (args.empty()) {
+        return false;
+    }
+    std::wstring application = Windows::Utf8ToWide(args[0]);
+    std::wstring commandLine = Windows::CommandLineForArgs(args);
+    return CreateProcessW(
+        application.c_str(),
+        commandLine.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        0,
+        nullptr,
+        nullptr,
+        &startupInfo,
+        &processInfo) != FALSE;
+}
+#endif
 
 int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -142,6 +268,23 @@ int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
         return 128 + WTERMSIG(status);
     }
     return 1;
+#elif defined(_WIN32)
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo{};
+    std::unique_ptr<ScopedEnvVar> agentEnv;
+    if (agentStdio) {
+        agentEnv = std::make_unique<ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
+    }
+    if (!StartProcess(args, startupInfo, processInfo)) {
+        std::cerr << "Error: failed to start Lua interpreter: " << args[0] << "\n";
+        return 127;
+    }
+    WaitForSingleObject(processInfo.hProcess, INFINITE);
+    int exitCode = ExitCodeFromProcess(processInfo.hProcess);
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return exitCode;
 #else
     (void)args;
     (void)agentStdio;
@@ -220,6 +363,84 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     if (!streamStderr) {
         const std::string childStderr = ReadFileBestEffort(stderrPath);
         result.stderrText += childStderr;
+    }
+    std::error_code ec;
+    fs::remove(stdoutPath, ec);
+    if (!streamStderr) {
+        fs::remove(stderrPath, ec);
+    }
+    return result;
+#elif defined(_WIN32)
+    fs::path stdoutPath = TempPreludePath();
+    stdoutPath += ".stdout";
+    fs::path stderrPath;
+    if (!streamStderr) {
+        stderrPath = TempPreludePath();
+        stderrPath += ".stderr";
+    }
+
+    SECURITY_ATTRIBUTES attrs{};
+    attrs.nLength = sizeof(attrs);
+    attrs.bInheritHandle = TRUE;
+
+    HANDLE stdoutHandle = CreateFileW(
+        Windows::Utf8ToWide(stdoutPath.string()).c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        &attrs,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_TEMPORARY,
+        nullptr);
+    HANDLE stderrHandle = INVALID_HANDLE_VALUE;
+    if (!streamStderr) {
+        stderrHandle = CreateFileW(
+            Windows::Utf8ToWide(stderrPath.string()).c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &attrs,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_TEMPORARY,
+            nullptr);
+    }
+    if (stdoutHandle == INVALID_HANDLE_VALUE || (!streamStderr && stderrHandle == INVALID_HANDLE_VALUE)) {
+        result.exitCode = 1;
+        result.stderrText = "Error: failed to create Lua capture files\n";
+        if (stdoutHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(stdoutHandle);
+        }
+        if (stderrHandle != INVALID_HANDLE_VALUE) {
+            CloseHandle(stderrHandle);
+        }
+        return result;
+    }
+
+    STARTUPINFOW startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startupInfo.hStdOutput = stdoutHandle;
+    startupInfo.hStdError = streamStderr ? GetStdHandle(STD_ERROR_HANDLE) : stderrHandle;
+    PROCESS_INFORMATION processInfo{};
+    std::unique_ptr<ScopedEnvVar> agentEnv;
+    if (agentStdio) {
+        agentEnv = std::make_unique<ScopedEnvVar>(L"COMPUTER_CPP_AGENT_STDIO", L"1");
+    }
+    if (!StartProcess(args, startupInfo, processInfo)) {
+        result.exitCode = 127;
+        result.stderrText = "Error: failed to start Lua interpreter: " + args[0] + "\n";
+    } else {
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        result.exitCode = ExitCodeFromProcess(processInfo.hProcess);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+    }
+    CloseHandle(stdoutHandle);
+    if (stderrHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(stderrHandle);
+    }
+    result.stdoutText = ReadFileBestEffort(stdoutPath);
+    if (!streamStderr) {
+        result.stderrText += ReadFileBestEffort(stderrPath);
     }
     std::error_code ec;
     fs::remove(stdoutPath, ec);

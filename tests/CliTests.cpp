@@ -45,10 +45,26 @@ struct ScopedEnvVar {
 
     ~ScopedEnvVar() {
         if (hadPrevious) {
-            setenv(name.c_str(), previous.c_str(), 1);
+            Set(previous);
         } else {
-            unsetenv(name.c_str());
+            Clear();
         }
+    }
+
+    void Set(const std::string& value) const {
+#if defined(_WIN32)
+        _putenv_s(name.c_str(), value.c_str());
+#else
+        setenv(name.c_str(), value.c_str(), 1);
+#endif
+    }
+
+    void Clear() const {
+#if defined(_WIN32)
+        _putenv_s(name.c_str(), "");
+#else
+        unsetenv(name.c_str());
+#endif
     }
 };
 
@@ -151,15 +167,15 @@ void TestGlobalOptionParsing() {
     ScopedEnvVar controlSessionEnv("COMPUTER_CPP_CONTROL_SESSION");
     ScopedEnvVar controlScopeEnv("COMPUTER_CPP_CONTROL_SCOPE");
 
-    setenv("COMPUTER_CPP_CONTROL_SESSION", "   ", 1);
-    setenv("COMPUTER_CPP_CONTROL_SCOPE", "   ", 1);
+    controlSessionEnv.Set("   ");
+    controlScopeEnv.Set("   ");
     ComputerCpp::Cli::CliOptions blankEnvDefaults;
     ComputerCpp::Cli::ApplyEnvDefaults(blankEnvDefaults);
     assert(blankEnvDefaults.controlSessionToken.empty());
     assert(blankEnvDefaults.controlScope == "desktop:local");
 
-    setenv("COMPUTER_CPP_CONTROL_SESSION", "env-token", 1);
-    setenv("COMPUTER_CPP_CONTROL_SCOPE", "desktop:env", 1);
+    controlSessionEnv.Set("env-token");
+    controlScopeEnv.Set("desktop:env");
     ComputerCpp::Cli::CliOptions envDefaults;
     ComputerCpp::Cli::ApplyEnvDefaults(envDefaults);
     assert(envDefaults.controlSessionToken == "env-token");
