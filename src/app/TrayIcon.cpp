@@ -56,8 +56,6 @@ enum {
     ID_CHECK_UPDATES,
     ID_START_SERVER,
     ID_STOP_SERVER,
-    ID_COPY_SERVER_URL,
-    ID_COPY_SERVER_TOKEN,
     ID_SERVER_PROCESS,
     ID_STATE,
     ID_TEST_SCREENSHOT,
@@ -2173,8 +2171,6 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
     EVT_MENU(ID_START_SERVER, TrayIcon::OnStartServer)
     EVT_MENU(ID_STOP_SERVER, TrayIcon::OnStopServer)
-    EVT_MENU(ID_COPY_SERVER_URL, TrayIcon::OnCopyServerUrl)
-    EVT_MENU(ID_COPY_SERVER_TOKEN, TrayIcon::OnCopyServerToken)
     EVT_MENU(ID_STATE, TrayIcon::OnState)
     EVT_MENU(ID_TEST_SCREENSHOT, TrayIcon::OnTestScreenshot)
     EVT_MENU(ID_TEST_MOUSE, TrayIcon::OnTestMouse)
@@ -2249,10 +2245,6 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     startServer->Enable(serverPid_ == 0);
     wxMenuItem* stopServer = menu->Append(ID_STOP_SERVER, "Stop Server");
     stopServer->Enable(serverPid_ > 0);
-    wxMenuItem* copyServerUrl = menu->Append(ID_COPY_SERVER_URL, "Copy Server URL");
-    copyServerUrl->Enable(serverPid_ > 0 && !serverUrl_.empty());
-    wxMenuItem* copyServerToken = menu->Append(ID_COPY_SERVER_TOKEN, "Copy Bearer Token");
-    copyServerToken->Enable(serverPid_ > 0 && !serverToken_.empty());
     menu->AppendSeparator();
     menu->Append(ID_STATE, "Show State");
     menu->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
@@ -2390,7 +2382,6 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
 
     serverPid_ = pid;
     serverUrl_ = ServerDisplayUrl(host, *port);
-    serverToken_ = config.server.authToken;
     serverAppDisplayName_ = app.displayName.empty() ? app.name : app.displayName;
     wxMessageBox(
         "Started " + serverAppDisplayName_ + " at " + serverUrl_,
@@ -2404,26 +2395,6 @@ void TrayIcon::OnStopServer(wxCommandEvent&) {
         return;
     }
     StopServerProcess();
-}
-
-void TrayIcon::OnCopyServerUrl(wxCommandEvent&) {
-    if (serverUrl_.empty()) {
-        wxMessageBox("Server is not running.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
-        return;
-    }
-    if (!CopyTextToClipboard(serverUrl_)) {
-        wxMessageBox("Could not open clipboard.", "ComputerCpp Server", wxOK | wxICON_ERROR);
-    }
-}
-
-void TrayIcon::OnCopyServerToken(wxCommandEvent&) {
-    if (serverToken_.empty()) {
-        wxMessageBox("No server token is available.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
-        return;
-    }
-    if (!CopyTextToClipboard(serverToken_)) {
-        wxMessageBox("Could not open clipboard.", "ComputerCpp Server", wxOK | wxICON_ERROR);
-    }
 }
 
 void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
@@ -2450,7 +2421,6 @@ void TrayIcon::ClearServerProcessState(bool deleteProcess) {
     }
     serverPid_ = 0;
     serverUrl_.clear();
-    serverToken_.clear();
     serverAppDisplayName_.clear();
 }
 

@@ -27,8 +27,6 @@ private:
     void OnCheckForUpdates(wxCommandEvent& event);
     void OnStartServer(wxCommandEvent& event);
     void OnStopServer(wxCommandEvent& event);
-    void OnCopyServerUrl(wxCommandEvent& event);
-    void OnCopyServerToken(wxCommandEvent& event);
     void OnServerProcessEnded(wxProcessEvent& event);
     void OnState(wxCommandEvent& event);
     void OnTestScreenshot(wxCommandEvent& event);
@@ -45,7 +43,6 @@ private:
     wxProcess* serverProcess_ = nullptr;
     long serverPid_ = 0;
     std::string serverUrl_;
-    std::string serverToken_;
     std::string serverAppDisplayName_;
     std::thread daemonThread_;
 
