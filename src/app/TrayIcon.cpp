@@ -1659,7 +1659,9 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
 wxEND_EVENT_TABLE()
 
 TrayIcon::TrayIcon() {
-    SetIcon(CreateComputerTrayIcon(), "ComputerCpp");
+    const bool iconSet = SetIcon(CreateComputerTrayIcon(), "ComputerCpp");
+    AppendPermissionTrace("tray_set_icon result=" + BoolString(iconSet) +
+                          " bundle_path=" + ComputerCppBundlePath());
     updateFlow_ = std::make_unique<TrayUpdateFlow>([this] {
         RemoveIcon();
         wxExit();
