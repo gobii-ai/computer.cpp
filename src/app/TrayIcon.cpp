@@ -234,11 +234,32 @@ bool IsTcpPortAvailable(const std::string& host, int port) {
     if (port <= 0 || port > 65535) {
         return false;
     }
+#if defined(__unix__) || defined(__APPLE__)
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    int reuse = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    std::string bindHost = NormalizeBindHost(host);
+    if (::inet_pton(AF_INET, bindHost.c_str(), &addr.sin_addr) != 1) {
+        ::close(fd);
+        return false;
+    }
+    bool available = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+    ::close(fd);
+    return available;
+#else
     wxIPV4address addr;
     addr.Hostname(NormalizeBindHost(host));
     addr.Service(port);
     wxSocketServer server(addr);
     return server.IsOk();
+#endif
 }
 
 std::string HealthConnectHost(const std::string& host) {
@@ -382,6 +403,123 @@ bool LooksLikeTrayAppServerProcess(const TrayAppServerState& state) {
         (currentTrayServer || legacyAdoptedServer);
 }
 
+bool CommandContainsListen(const std::string& command, const std::string& listen) {
+    return command.find("--listen " + listen) != std::string::npos ||
+        command.find("--listen '" + listen + "'") != std::string::npos ||
+        command.find("--listen \"" + listen + "\"") != std::string::npos;
+}
+
+std::vector<std::string> CompatibleListenHosts(const std::string& host) {
+    std::vector<std::string> hosts{host};
+    if (host == "127.0.0.1") {
+        hosts.push_back("0.0.0.0");
+    }
+    return hosts;
+}
+
+std::string AbsolutePathString(const std::string& path) {
+    try {
+        return std::filesystem::absolute(path).string();
+    } catch (...) {
+        return {};
+    }
+}
+
+bool CommandContainsAppPath(const std::string& command, const ServerAppConfig& app, const std::string& absoluteAppPath) {
+    return (!app.path.empty() && command.find(app.path) != std::string::npos) ||
+        (!absoluteAppPath.empty() && command.find(absoluteAppPath) != std::string::npos);
+}
+
+std::vector<int> ConfiguredServerPorts(const ServerConfig& server, const ServerAppConfig& app) {
+    if (app.port.has_value()) {
+        return {*app.port};
+    }
+    int start = server.basePort > 0 && server.basePort <= 65535 ? server.basePort : 8787;
+    std::vector<int> ports;
+    ports.reserve(100);
+    for (int port = start; port <= 65535 && port < start + 100; ++port) {
+        ports.push_back(port);
+    }
+    return ports;
+}
+
+std::optional<TrayAppServerState> AdoptableServerState(
+    const ServerConfig& server,
+    const ServerAppConfig& app,
+    long pid,
+    const std::string& command
+) {
+    std::string host = NormalizeBindHost(server.host);
+    std::string absoluteAppPath = AbsolutePathString(app.path);
+    if (!CommandContainsAppPath(command, app, absoluteAppPath)) {
+        return std::nullopt;
+    }
+
+    for (int port : ConfiguredServerPorts(server, app)) {
+        if (port <= 0 || port > 65535) {
+            continue;
+        }
+        bool listenMatches = false;
+        for (const auto& listenHost : CompatibleListenHosts(host)) {
+            listenMatches = listenMatches ||
+                CommandContainsListen(command, listenHost + ":" + std::to_string(port));
+        }
+        if (!listenMatches) {
+            continue;
+        }
+
+        TrayAppServerState state;
+        state.pid = pid;
+        state.host = host;
+        state.port = port;
+        state.url = "http://" + host + ":" + std::to_string(port);
+        state.appPath = absoluteAppPath.empty() ? app.path : absoluteAppPath;
+        state.appId = app.name;
+        state.displayName = app.displayName.empty() ? app.name : app.displayName;
+        if (HttpHealthOk(state, server.authToken)) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TrayAppServerState> FindAdoptableConfiguredServerState(
+    const ServerConfig& server,
+    const ServerAppConfig& app,
+    const std::vector<std::pair<long, std::string>>& processes
+) {
+    for (const auto& [pid, command] : processes) {
+        auto state = AdoptableServerState(server, app, pid, command);
+        if (state) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TrayAppServerState> FindAdoptableConfiguredServerState(
+    const ServerConfig& server,
+    const std::vector<std::pair<long, std::string>>& processes
+) {
+    for (const auto& [_, app] : server.apps) {
+        auto state = FindAdoptableConfiguredServerState(server, app, processes);
+        if (state) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<TrayAppServerState> AdoptableConfiguredServerState(const ServerConfig& server, long pid, const std::string& command) {
+    for (const auto& [_, app] : server.apps) {
+        auto state = AdoptableServerState(server, app, pid, command);
+        if (state) {
+            return state;
+        }
+    }
+    return std::nullopt;
+}
+
 bool WaitForProcessExit(long pid, bool reapChild) {
     for (int i = 0; i < 20; ++i) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -405,6 +543,19 @@ bool WaitForProcessExit(long pid, bool reapChild) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return !IsProcessAlive(pid);
+}
+
+void SignalServerProcess(long pid, wxSignal signal, bool includeChildren) {
+#if defined(__unix__) || defined(__APPLE__)
+    if (includeChildren) {
+        wxKill(pid, signal, nullptr, wxKILL_CHILDREN);
+    } else {
+        int posixSignal = signal == wxSIGKILL ? SIGKILL : SIGTERM;
+        ::kill(static_cast<pid_t>(pid), posixSignal);
+    }
+#else
+    wxKill(pid, signal, nullptr, includeChildren ? wxKILL_CHILDREN : wxKILL_NOCHILDREN);
+#endif
 }
 
 std::optional<int> ChooseServerPort(const ServerConfig& server, const ServerAppConfig& app) {
@@ -2418,16 +2569,9 @@ void TrayIcon::StartOwnedDaemon() {
 
 wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenu* menu = new wxMenu;
-    menu->Append(ID_PERMISSIONS, "Permissions");
-    menu->Append(ID_SETTINGS, "Settings...");
-#ifdef __APPLE__
-    menu->Append(ID_SHOW_LOGS, "Show Logs");
-#endif
-    menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
-    menu->AppendSeparator();
     wxString serverStatus = serverPid_ > 0 && !serverUrl_.empty()
-        ? "Server running at " + serverUrl_
-        : "Server not running";
+        ? "🟢 Server running at " + serverUrl_
+        : "🔴 Server not running";
     wxMenuItem* serverStatusItem = menu->Append(wxID_ANY, serverStatus);
     serverStatusItem->Enable(false);
     wxMenuItem* startServer = menu->Append(ID_START_SERVER, "Start Server...");
@@ -2435,10 +2579,21 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     wxMenuItem* stopServer = menu->Append(ID_STOP_SERVER, "Stop Server");
     stopServer->Enable(serverPid_ > 0);
     menu->AppendSeparator();
-    menu->Append(ID_STATE, "Show State");
-    menu->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
-    menu->Append(ID_TEST_MOUSE, "Test Mouse Move");
+
+    menu->Append(ID_PERMISSIONS, "Permissions");
+    menu->Append(ID_SETTINGS, "Settings...");
+
+    wxMenu* advanced = new wxMenu;
+    advanced->Append(ID_STATE, "Show State");
+    advanced->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
+    advanced->Append(ID_TEST_MOUSE, "Test Mouse Move");
+#ifdef __APPLE__
+    advanced->Append(ID_SHOW_LOGS, "Show Logs");
+#endif
+    menu->AppendSubMenu(advanced, "Advanced");
+
     menu->AppendSeparator();
+    menu->Append(ID_CHECK_UPDATES, "Check for Updates...");
     menu->Append(ID_QUIT, "Quit");
     return menu;
 }
@@ -2546,9 +2701,7 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
         wxMessageBox(validationError, "ComputerCpp Server", wxOK | wxICON_ERROR);
         return;
     }
-    int legacyPort = app.port.value_or(
-        config.server.basePort > 0 && config.server.basePort <= 65535 ? config.server.basePort : 8787);
-    if (TryAdoptLegacyServer(config.server, app, legacyPort)) {
+    if (TryAdoptConfiguredServer(config.server, app)) {
         wxMessageBox("Server is already running at " + serverUrl_, "ComputerCpp Server", wxOK | wxICON_INFORMATION);
         return;
     }
@@ -2638,7 +2791,7 @@ void TrayIcon::OnStopServer(wxCommandEvent&) {
         wxMessageBox("Server is not running.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
         return;
     }
-    StopServerProcess();
+    StopServerProcess(true);
 }
 
 void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
@@ -2658,9 +2811,23 @@ bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
     const std::filesystem::path statePath = TrayAppServerStatePath();
     std::string stateError;
     auto state = LoadTrayAppServerState(statePath, &stateError);
+    std::string configError;
+    AppConfig config = LoadAppConfig(&configError);
     if (!state) {
         if (removeInvalidState) {
             RemoveTrayAppServerState(statePath, nullptr);
+        }
+        if (configError.empty()) {
+            auto recovered = FindAdoptableConfiguredServerState(config.server, AppServeProcesses());
+            if (recovered) {
+                std::string saveError;
+                SaveTrayAppServerState(*recovered, statePath, &saveError);
+                serverPid_ = recovered->pid;
+                serverUrl_ = recovered->url;
+                serverAppDisplayName_ = recovered->displayName;
+                serverProcess_ = nullptr;
+                return true;
+            }
         }
         return false;
     }
@@ -2668,14 +2835,24 @@ bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
     bool valid = IsProcessAlive(state->pid) &&
         LooksLikeTrayAppServerProcess(*state);
     if (valid) {
-        std::string configError;
-        AppConfig config = LoadAppConfig(&configError);
         valid = configError.empty() && HttpHealthOk(*state, config.server.authToken);
     }
 
     if (!valid) {
         if (removeInvalidState) {
             RemoveTrayAppServerStateForPid(statePath, state->pid, nullptr);
+        }
+        if (configError.empty()) {
+            auto recovered = FindAdoptableConfiguredServerState(config.server, AppServeProcesses());
+            if (recovered) {
+                std::string saveError;
+                SaveTrayAppServerState(*recovered, statePath, &saveError);
+                serverPid_ = recovered->pid;
+                serverUrl_ = recovered->url;
+                serverAppDisplayName_ = recovered->displayName;
+                serverProcess_ = nullptr;
+                return true;
+            }
         }
         return false;
     }
@@ -2687,70 +2864,80 @@ bool TrayIcon::TryAdoptExistingServer(bool removeInvalidState) {
     return true;
 }
 
-bool TrayIcon::TryAdoptLegacyServer(const ServerConfig& server, const ServerAppConfig& app, int port) {
+bool TrayIcon::TryAdoptConfiguredServer(const ServerConfig& server, const ServerAppConfig& app) {
     if (serverPid_ > 0) {
         return true;
     }
 
-    std::string host = NormalizeBindHost(server.host);
-    std::string listen = host + ":" + std::to_string(port);
-    std::string appPath = app.path;
-    std::string absoluteAppPath;
-    try {
-        absoluteAppPath = std::filesystem::absolute(app.path).string();
-    } catch (...) {
-    }
-
-    for (const auto& [pid, command] : AppServeProcesses()) {
-        if (command.find("--tray-state-file") != std::string::npos) {
-            continue;
-        }
-        if (command.find("--listen " + listen) == std::string::npos &&
-            command.find("--listen '" + listen + "'") == std::string::npos &&
-            command.find("--listen \"" + listen + "\"") == std::string::npos) {
-            continue;
-        }
-        const bool appMatches = command.find(appPath) != std::string::npos ||
-            (!absoluteAppPath.empty() && command.find(absoluteAppPath) != std::string::npos);
-        if (!appMatches) {
-            continue;
-        }
-
-        TrayAppServerState state;
-        state.pid = pid;
-        state.host = host;
-        state.port = port;
-        state.url = ServerDisplayUrl(host, port);
-        state.appPath = absoluteAppPath.empty() ? appPath : absoluteAppPath;
-        state.displayName = app.displayName.empty() ? app.name : app.displayName;
-        if (!HttpHealthOk(state, server.authToken)) {
-            continue;
-        }
-
+    auto state = FindAdoptableConfiguredServerState(server, app, AppServeProcesses());
+    if (state) {
         std::string stateError;
-        SaveTrayAppServerState(state, TrayAppServerStatePath(), &stateError);
-        serverPid_ = state.pid;
-        serverUrl_ = state.url;
-        serverAppDisplayName_ = state.displayName;
+        SaveTrayAppServerState(*state, TrayAppServerStatePath(), &stateError);
+        serverPid_ = state->pid;
+        serverUrl_ = state->url;
+        serverAppDisplayName_ = state->displayName;
         serverProcess_ = nullptr;
         return true;
     }
     return false;
 }
 
-void TrayIcon::StopServerProcess() {
+bool TrayIcon::VerifyAdoptedServerBeforeStop(long pid, bool notifyOnFailure) {
+    std::string configError;
+    AppConfig config = LoadAppConfig(&configError);
+    std::string command = ProcessCommandLine(pid);
+#if defined(_WIN32)
+    if (command.empty() && IsProcessAlive(pid)) {
+        return true;
+    }
+#endif
+    auto state = configError.empty() && !command.empty()
+        ? AdoptableConfiguredServerState(config.server, pid, command)
+        : std::nullopt;
+    if (state) {
+        std::string stateError;
+        SaveTrayAppServerState(*state, TrayAppServerStatePath(), &stateError);
+        return true;
+    }
+
+    RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), pid, nullptr);
+    ClearServerProcessState(true);
+    if (notifyOnFailure) {
+        wxMessageBox(
+            "Server process is no longer running.",
+            "ComputerCpp Server",
+            wxOK | wxICON_INFORMATION);
+    }
+    return false;
+}
+
+bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
     long pid = serverPid_;
     bool currentSessionChild = serverProcess_ != nullptr;
     if (pid > 0) {
-        wxKill(pid, wxSIGTERM, nullptr, wxKILL_CHILDREN);
-        if (!WaitForProcessExit(pid, currentSessionChild)) {
-            wxKill(pid, wxSIGKILL, nullptr, wxKILL_CHILDREN);
-            WaitForProcessExit(pid, currentSessionChild);
+        if (!currentSessionChild && !VerifyAdoptedServerBeforeStop(pid, notifyOnFailure)) {
+            return false;
+        }
+        SignalServerProcess(pid, wxSIGTERM, currentSessionChild);
+        bool stopped = WaitForProcessExit(pid, currentSessionChild);
+        if (!stopped) {
+            SignalServerProcess(pid, wxSIGKILL, currentSessionChild);
+            stopped = WaitForProcessExit(pid, currentSessionChild);
+        }
+        if (!stopped) {
+            if (notifyOnFailure) {
+                wxMessageBox(
+                    "Could not stop the server process. It is still running at " + serverUrl_,
+                    "ComputerCpp Server",
+                    wxOK | wxICON_ERROR);
+            }
+            return false;
         }
         std::string stateError;
         RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), pid, &stateError);
     }
     ClearServerProcessState(true);
+    return true;
 }
 
 void TrayIcon::ClearServerProcessState(bool deleteProcess) {
