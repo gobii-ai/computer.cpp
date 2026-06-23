@@ -69,8 +69,12 @@ jobs:
             -DCOMPUTER_CPP_BUNDLE_LUA=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
-      - name: Build and test
+      - name: Build tests
         shell: pwsh
         run: |
-          cmake --build "$env:BUILD_DIR" --target computer_cpp_tests --config Debug
-          ctest --test-dir "$env:BUILD_DIR" --build-config Debug --output-on-failure
+          cmake --build "$env:BUILD_DIR" --target computer_cpp_tests --config Debug --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          ctest --test-dir "$env:BUILD_DIR" --build-config Debug --output-on-failure --verbose --timeout 120
