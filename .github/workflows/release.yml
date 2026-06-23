@@ -27,6 +27,7 @@ concurrency:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   macos:
@@ -310,20 +311,13 @@ jobs:
     env:
       BUILD_DIR: build/windows-release
       VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      VCPKG_BINARY_SOURCES: clear;nuget,GitHub,readwrite
       NEW_VERSION: ${{ needs.macos.outputs.new_version }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.macos.outputs.new_version }}
-
-      - name: Enable vcpkg GitHub Actions cache
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Verify build dependencies
         shell: pwsh
@@ -342,6 +336,27 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      - name: Configure vcpkg binary cache
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          if (-not (Test-Path $vcpkg)) {
+            $vcpkg = "vcpkg"
+          }
+          $nuget = (& $vcpkg fetch nuget | Select-Object -Last 1).Trim()
+          $source = "https://nuget.pkg.github.com/$env:GITHUB_REPOSITORY_OWNER/index.json"
+          & $nuget sources Remove -Name GitHub -NonInteractive 2>$null
+          & $nuget sources Add `
+            -Name GitHub `
+            -Source $source `
+            -UserName $env:GITHUB_REPOSITORY_OWNER `
+            -Password $env:GITHUB_TOKEN `
+            -StorePasswordInClearText `
+            -NonInteractive
+          & $nuget setapikey $env:GITHUB_TOKEN -Source GitHub -NonInteractive
 
       - name: Install vcpkg dependencies
         shell: pwsh
