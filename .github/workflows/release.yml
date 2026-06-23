@@ -509,5 +509,6 @@ jobs:
             "artifacts/macos/computer.cpp-${NEW_VERSION}-macos-arm64.zip#computer.cpp-${NEW_VERSION}-macos-arm64.zip" \
             "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.zip#computer.cpp-${NEW_VERSION}-windows-x64.zip" \
             "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.msi#computer.cpp-${NEW_VERSION}-windows-x64.msi" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "$RELEASE_TITLE" \
             --notes-file release-notes.md
