@@ -25,6 +25,10 @@
 #include <stdexcept>
 #include <vector>
 
+#if defined(_WIN32)
+#include <crtdbg.h>
+#endif
+
 namespace fs = std::filesystem;
 using ComputerCpp::Tests::MakeTempHome;
 
@@ -281,6 +285,11 @@ std::optional<std::string> CurrentEnvValue(const char* name) {
     return std::nullopt;
 }
 
+bool SameExistingPath(const fs::path& lhs, const fs::path& rhs) {
+    std::error_code ec;
+    return fs::equivalent(lhs, rhs, ec) && !ec;
+}
+
 void TestLuaInterpreterResolution() {
     auto originalLua = CurrentEnvValue("COMPUTER_CPP_LUA");
     auto originalPath = CurrentEnvValue("PATH");
@@ -311,22 +320,22 @@ void TestLuaInterpreterResolution() {
     WriteExecutableFile(envLua);
     SetEnvValue("COMPUTER_CPP_LUA", envLua.string());
     SetEnvValue("PATH", (root / "empty-path").string());
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == envLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), envLua));
 
     RestoreEnvValue("COMPUTER_CPP_LUA", std::nullopt);
     WriteExecutableFile(bundledLua);
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == bundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), bundledLua));
 #if defined(_WIN32)
     fs::remove(bundledLua);
     WriteExecutableFile(parentBundledLua);
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == parentBundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), parentBundledLua));
 #else
-    assert(ComputerCpp::FindLuaInterpreter(siblingCli) == bundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(siblingCli), bundledLua));
 #endif
     WriteExecutableFile(pathCli);
     WriteExecutableFile(pathBundledLua);
     SetEnvValue("PATH", cliBin.string());
-    assert(ComputerCpp::FindLuaInterpreter("computer.cpp") == pathBundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter("computer.cpp"), pathBundledLua));
 
 #if defined(_WIN32)
     fs::remove(parentBundledLua);
@@ -335,7 +344,7 @@ void TestLuaInterpreterResolution() {
 #endif
     WriteExecutableFile(pathLua);
     SetEnvValue("PATH", pathBin.string());
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == pathLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), pathLua));
 
     RestoreEnvValue("COMPUTER_CPP_LUA", originalLua);
     RestoreEnvValue("PATH", originalPath);
@@ -574,6 +583,12 @@ void RunTest(const char* name, Function function) {
 }
 
 int main() {
+#if defined(_WIN32)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
+
     fs::path tempHome = MakeTempHome();
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
