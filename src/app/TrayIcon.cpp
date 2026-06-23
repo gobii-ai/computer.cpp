@@ -42,6 +42,10 @@
 #include <wx/timer.h>
 #include <wx/wx.h>
 
+#ifdef _WIN32
+#include <process.h>
+#endif
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -745,11 +749,28 @@ std::filesystem::path PermissionTraceLogPath() {
     return ComputerCpp::AppDataDir() / "permission-onboarding.log";
 }
 
+std::tm PermissionTraceLocalTime(std::time_t time) {
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &time);
+#else
+    localtime_r(&time, &local);
+#endif
+    return local;
+}
+
+long long PermissionTraceProcessId() {
+#ifdef _WIN32
+    return static_cast<long long>(_getpid());
+#else
+    return static_cast<long long>(getpid());
+#endif
+}
+
 std::string PermissionTraceTimestamp() {
     auto now = std::chrono::system_clock::now();
     std::time_t time = std::chrono::system_clock::to_time_t(now);
-    std::tm local{};
-    localtime_r(&time, &local);
+    std::tm local = PermissionTraceLocalTime(time);
 
     std::ostringstream out;
     out << std::put_time(&local, "%Y-%m-%d %H:%M:%S");
@@ -759,7 +780,7 @@ std::string PermissionTraceTimestamp() {
 void AppendPermissionTrace(const std::string& event) {
     try {
         std::ofstream log(PermissionTraceLogPath(), std::ios::app);
-        log << PermissionTraceTimestamp() << " app pid=" << getpid()
+        log << PermissionTraceTimestamp() << " app pid=" << PermissionTraceProcessId()
             << " event=" << event << "\n";
     } catch (...) {
     }
@@ -947,7 +968,7 @@ private:
     }
 
     static wxString OptionalLongText(const std::optional<long>& value) {
-        return value.has_value() ? wxString::Format("%ld", *value) : "";
+        return value.has_value() ? wxString::Format("%ld", *value) : wxString();
     }
 
     static wxString OptionalDoubleText(const std::optional<double>& value) {
@@ -1044,7 +1065,7 @@ private:
     }
 
     static wxString OptionalIntText(const std::optional<int>& value) {
-        return value.has_value() ? wxString::Format("%d", *value) : "";
+        return value.has_value() ? wxString::Format("%d", *value) : wxString();
     }
 
     static std::optional<int> ParsePortField(const wxTextCtrl* field, const std::string& label, std::string* error) {

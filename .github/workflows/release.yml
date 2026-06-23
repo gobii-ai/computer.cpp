@@ -305,12 +305,12 @@ jobs:
 
   windows:
     name: Windows Release Artifacts
-    runs-on: windows-latest
+    runs-on: windows-2025
     needs: macos
     env:
       BUILD_DIR: build/windows-release
       VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
       NEW_VERSION: ${{ needs.macos.outputs.new_version }}
     steps:
       - name: Checkout release tag
@@ -318,34 +318,57 @@ jobs:
         with:
           ref: ${{ needs.macos.outputs.new_version }}
 
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+      - name: Enable vcpkg GitHub Actions cache
+        uses: actions/github-script@v7
         with:
-          path: .vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-gui-bundled-lua-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-gui-bundled-lua-
-            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-gui-
-            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      - name: Install build dependencies
+      - name: Verify build dependencies
         shell: pwsh
         run: |
-          choco install ninja wixtoolset -y
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y
+          }
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue) -or -not (Get-Command light.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset -y
+          }
+          ninja --version
+          (Get-Command candle.exe).Source
+          (Get-Command light.exe).Source
 
       - name: Configure MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      - name: Install vcpkg dependencies
+        shell: pwsh
+        run: |
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          if (-not (Test-Path $vcpkg)) {
+            $vcpkg = "vcpkg"
+          }
+          $installedDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:BUILD_DIR) "vcpkg_installed"
+          & $vcpkg install `
+            --triplet "$env:VCPKG_DEFAULT_TRIPLET" `
+            --x-manifest-root="$env:GITHUB_WORKSPACE" `
+            --x-install-root="$installedDir" `
+            --x-feature=gui `
+            --x-feature=bundled-lua
+
       - name: Configure
         shell: pwsh
         run: |
+          $installedDir = Join-Path (Join-Path $env:GITHUB_WORKSPACE $env:BUILD_DIR) "vcpkg_installed"
           cmake -S . -B "$env:BUILD_DIR" -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF `
             -DCOMPUTER_CPP_BUILD_GUI=ON `
             "-DVCPKG_MANIFEST_FEATURES=gui;bundled-lua" `
+            -DVCPKG_MANIFEST_INSTALL=OFF `
+            -DVCPKG_INSTALLED_DIR="$installedDir" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build and package
