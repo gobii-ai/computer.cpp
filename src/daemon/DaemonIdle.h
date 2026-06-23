@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <thread>
 
@@ -22,6 +23,7 @@ void ResetDaemonStopState();
 void RequestDaemonStop();
 bool DaemonShouldStop();
 void MarkDaemonActivity();
+void SetDaemonStopNotifier(std::function<void()> notifier);
 std::thread StartIdleBehaviorThreadIfEnabled();
 
 } // namespace ComputerCpp

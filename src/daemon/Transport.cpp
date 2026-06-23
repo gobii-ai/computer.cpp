@@ -209,7 +209,11 @@ HANDLE ConnectNamedPipeClient(const std::string& session) {
         if (error != ERROR_PIPE_BUSY && error != ERROR_FILE_NOT_FOUND) {
             return INVALID_HANDLE_VALUE;
         }
-        WaitNamedPipeW(pipeName.c_str(), std::min<DWORD>(250, timeoutMs));
+        if (error == ERROR_PIPE_BUSY) {
+            WaitNamedPipeW(pipeName.c_str(), std::min<DWORD>(250, timeoutMs));
+        } else {
+            Sleep(std::min<DWORD>(50, timeoutMs));
+        }
     }
     return INVALID_HANDLE_VALUE;
 }

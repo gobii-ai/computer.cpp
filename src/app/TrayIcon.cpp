@@ -720,8 +720,8 @@ bool RelaunchComputerCpp() {
     std::string relaunch = "/bin/sh -c " + ShellQuote(script + " >/dev/null 2>&1 &");
     return wxExecute(relaunch, wxEXEC_ASYNC) != 0;
 #else
-    std::filesystem::path executablePath(wxStandardPaths::Get().GetExecutablePath().ToStdString());
-    return wxExecute("\"" + executablePath.string() + "\"", wxEXEC_ASYNC) != 0;
+    wxString executablePath = wxStandardPaths::Get().GetExecutablePath();
+    return wxExecute("\"" + executablePath + "\"", wxEXEC_ASYNC) != 0;
 #endif
 }
 

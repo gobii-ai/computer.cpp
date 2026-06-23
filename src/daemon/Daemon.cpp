@@ -318,6 +318,19 @@ int RunDaemon(const DaemonOptions& options) {
     std::wstring pipeName = ComputerCpp::Windows::Utf8ToWide(PipeNameForSession(options.session));
 
     ResetDaemonStopState();
+    SetDaemonStopNotifier([pipeName]() {
+        HANDLE pipe = CreateFileW(
+            pipeName.c_str(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+        if (pipe != INVALID_HANDLE_VALUE) {
+            CloseHandle(pipe);
+        }
+    });
     std::thread idleThread = StartIdleBehaviorThreadIfEnabled();
     while (!DaemonShouldStop()) {
         HANDLE pipe = CreateNamedPipeW(
@@ -356,6 +369,7 @@ int RunDaemon(const DaemonOptions& options) {
         CloseHandle(pipe);
     }
 
+    SetDaemonStopNotifier({});
     RequestDaemonStop();
     if (idleThread.joinable()) {
         idleThread.join();

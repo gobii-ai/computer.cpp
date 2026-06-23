@@ -81,7 +81,7 @@ std::string WindowTitle(HWND hwnd) {
 }
 
 std::string ProcessName(DWORD pid) {
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) {
         return {};
     }

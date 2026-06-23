@@ -45,6 +45,11 @@ jobs:
         run: |
           choco install ninja -y
 
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure
         shell: pwsh
         run: |

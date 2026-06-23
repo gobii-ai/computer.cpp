@@ -281,8 +281,8 @@ target_link_libraries(computer.cpp
 
 if(WIN32)
     install(TARGETS computer.cpp
-        RUNTIME DESTINATION bin
         RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps
+        RUNTIME DESTINATION bin
     )
 else()
     install(TARGETS computer.cpp RUNTIME DESTINATION bin)
@@ -317,8 +317,8 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     if(WIN32)
         set_target_properties(ComputerCpp PROPERTIES WIN32_EXECUTABLE TRUE)
         install(TARGETS ComputerCpp
-            RUNTIME DESTINATION bin
             RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps
+            RUNTIME DESTINATION bin
         )
     endif()
 

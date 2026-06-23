@@ -335,7 +335,7 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     attrs.bInheritHandle = TRUE;
 
     HANDLE stdoutHandle = CreateFileW(
-        Windows::Utf8ToWide(stdoutPath.string()).c_str(),
+        stdoutPath.wstring().c_str(),
         GENERIC_WRITE,
         FILE_SHARE_READ,
         &attrs,
@@ -345,7 +345,7 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     HANDLE stderrHandle = INVALID_HANDLE_VALUE;
     if (!streamStderr) {
         stderrHandle = CreateFileW(
-            Windows::Utf8ToWide(stderrPath.string()).c_str(),
+            stderrPath.wstring().c_str(),
             GENERIC_WRITE,
             FILE_SHARE_READ,
             &attrs,
