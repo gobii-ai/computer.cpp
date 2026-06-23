@@ -9,6 +9,7 @@ CONFIG=Debug
 GENERATOR=""
 BUILD_TESTING=ON
 CODE_SIGN_APP=""
+BUILD_GUI=""
 RECONFIGURE=0
 VERIFY=0
 
@@ -23,6 +24,7 @@ Options:
   --config CONFIG   CMake build type/configuration. Defaults to Debug.
   --generator GEN   CMake generator to use, for example Ninja.
   --no-code-sign    Configure ComputerCpp without the macOS post-build code-sign step.
+  --no-gui          Configure without the ComputerCpp desktop tray app.
 EOF
 }
 
@@ -61,6 +63,9 @@ while [[ $# -gt 0 ]]; do
     --no-code-sign)
       CODE_SIGN_APP=OFF
       ;;
+    --no-gui)
+      BUILD_GUI=OFF
+      ;;
     --help|-h)
       usage
       exit 0
@@ -94,6 +99,10 @@ if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
 
   if [[ -n "${CODE_SIGN_APP}" ]]; then
     CMAKE_ARGS+=(-DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}")
+  fi
+
+  if [[ -n "${BUILD_GUI}" ]]; then
+    CMAKE_ARGS+=(-DCOMPUTER_CPP_BUILD_GUI="${BUILD_GUI}")
   fi
 
   if command -v ccache >/dev/null 2>&1; then

@@ -311,12 +311,22 @@ jobs:
     env:
       BUILD_DIR: build/windows-release
       VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
       NEW_VERSION: ${{ needs.macos.outputs.new_version }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.macos.outputs.new_version }}
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-gui-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-gui-
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-
 
       - name: Install build dependencies
         shell: pwsh
@@ -334,6 +344,8 @@ jobs:
           cmake -S . -B "$env:BUILD_DIR" -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF `
+            -DCOMPUTER_CPP_BUILD_GUI=ON `
+            -DVCPKG_MANIFEST_FEATURES=gui `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build and package

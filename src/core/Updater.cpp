@@ -129,6 +129,7 @@ bool RunCommand(const std::string& command) {
 }
 
 std::string RunCommandCapture(const std::string& command) {
+#if defined(__APPLE__)
     std::array<char, 256> buffer{};
     std::string output;
     FILE* pipe = popen(command.c_str(), "r");
@@ -143,6 +144,10 @@ std::string RunCommandCapture(const std::string& command) {
         return {};
     }
     return Trim(output);
+#else
+    (void)command;
+    return {};
+#endif
 }
 
 std::string PlistValue(const fs::path& infoPlist, const std::string& key) {

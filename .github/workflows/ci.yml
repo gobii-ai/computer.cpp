@@ -24,11 +24,11 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja wxwidgets lua
+          brew install cmake ninja lua
 
       - name: Build and test
         run: |
-          scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign
+          scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign --no-gui
 
   windows:
     name: Windows Tests
@@ -36,9 +36,18 @@ jobs:
     env:
       BUILD_DIR: build/windows
       VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
     steps:
       - name: Checkout repo
         uses: actions/checkout@v6
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-
 
       - name: Install build dependencies
         shell: pwsh
@@ -56,6 +65,7 @@ jobs:
           cmake -S . -B "$env:BUILD_DIR" -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=ON `
+            -DCOMPUTER_CPP_BUILD_GUI=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build and test
