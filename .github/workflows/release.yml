@@ -213,7 +213,6 @@ jobs:
             -s "$WX_PREFIX/lib" \
             -s "$HOMEBREW_PREFIX/lib"
           dylibbundler \
-            -od \
             -b \
             -x "$BUNDLED_LUA" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
