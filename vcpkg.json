@@ -17,6 +17,7 @@
   ],
   "features": {
     "gui": {
+      "description": "Build and package the ComputerCpp desktop tray application.",
       "dependencies": [
         "wxwidgets"
       ]
