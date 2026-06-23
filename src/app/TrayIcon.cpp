@@ -1979,7 +1979,7 @@ private:
             this,
             "Choose Lua app",
             "",
-            serverAppPath_ ? serverAppPath_->GetValue() : "",
+            serverAppPath_ ? serverAppPath_->GetValue() : wxString(),
             "Lua files (*.lua)|*.lua|All files|*",
             wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) {
