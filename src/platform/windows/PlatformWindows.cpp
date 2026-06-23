@@ -652,7 +652,7 @@ bool TypeText(const std::string& text, int holdMs) {
 
 bool PasteText(const std::string& text) {
     if (!WriteClipboardText(text)) return false;
-    return SendHotkey({"control", "v"}, HumanInput::KeyHoldMs());
+    return SendHotkey({"control", "v"}, HumanInput::ClickHoldMs());
 }
 
 std::vector<std::string> GetSelectAllHotkey() { return {"control", "a"}; }
