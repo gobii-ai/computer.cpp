@@ -91,6 +91,22 @@ CapturedConfigCommand RunConfigCommand(std::initializer_list<std::string> args, 
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
 }
 
+bool SkipLuaTestIfUnavailable(const char* testName) {
+    if (!ComputerCpp::FindLuaInterpreter().empty()) {
+        return false;
+    }
+    std::cout << "[skip] " << testName << ": Lua interpreter not available" << std::endl;
+    return true;
+}
+
+void AssertLuaRunSucceeded(const ComputerCpp::LuaRunResult& result) {
+    if (result.exitCode != 0) {
+        std::cerr << result.stderrText;
+        std::cerr << result.stdoutText;
+    }
+    assert(result.exitCode == 0);
+}
+
 std::vector<std::string> ParseGlobalArgs(
     const std::vector<std::string>& input,
     ComputerCpp::Cli::CliOptions& options
@@ -2133,13 +2149,17 @@ void TestConfigCliCanonicalFile() {
 }
 
 void TestMicroAgentLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentLuaDryRun")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/micro-agent-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
     assert(result.stderrText.find("agent     done") != std::string::npos);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
@@ -2157,13 +2177,17 @@ void TestMicroAgentLuaDryRun() {
 }
 
 void TestMicroAgentStrictToolCallsLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentStrictToolCallsLuaDryRun")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/micro-agent-strict-tool-calls-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
     assert(payload["ok"] == true);
@@ -2200,13 +2224,17 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
 }
 
 void TestLuaDesktopToolPixelRects() {
+    if (SkipLuaTestIfUnavailable("TestLuaDesktopToolPixelRects")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/desktop-app-tools-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
     assert(payload["ok"] == true);
