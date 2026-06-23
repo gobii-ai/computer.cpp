@@ -24,8 +24,57 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja wxwidgets lua
+          brew install cmake ninja lua
 
       - name: Build and test
         run: |
-          scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign
+          scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign --no-gui
+
+  windows:
+    name: Windows Tests
+    runs-on: windows-latest
+    env:
+      BUILD_DIR: build/windows
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-cache,readwrite
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-
+
+      - name: Verify build dependencies
+        shell: pwsh
+        run: |
+          ninja --version
+
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B "$env:BUILD_DIR" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DBUILD_TESTING=ON `
+            -DCOMPUTER_CPP_BUILD_GUI=OFF `
+            -DCOMPUTER_CPP_BUNDLE_LUA=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build tests
+        shell: pwsh
+        run: |
+          cmake --build "$env:BUILD_DIR" --target computer_cpp_tests --config Debug --parallel
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          ctest --test-dir "$env:BUILD_DIR" --build-config Debug --output-on-failure --verbose --timeout 120

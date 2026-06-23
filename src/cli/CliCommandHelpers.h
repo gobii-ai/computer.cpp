@@ -52,7 +52,7 @@ inline bool TakeOptionValue(
     return true;
 }
 
-inline std::optional<int> ParseInt(std::string_view value) {
+inline std::optional<int> ParseCommandInt(std::string_view value) {
     int parsed = 0;
     auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (ec != std::errc() || ptr != value.data() + value.size()) {
@@ -71,7 +71,7 @@ inline std::optional<double> ParseDouble(std::string_view value) {
 }
 
 inline bool SetParsedInt(nlohmann::json& params, std::string_view key, std::string_view value) {
-    auto parsed = ParseInt(value);
+    auto parsed = ParseCommandInt(value);
     if (!parsed) {
         return false;
     }
@@ -113,7 +113,7 @@ inline bool SetIntOption(
     if (!IsOneOf(args[index], names) || index + 1 >= args.size()) {
         return false;
     }
-    auto parsed = ParseInt(args[index + 1]);
+    auto parsed = ParseCommandInt(args[index + 1]);
     if (!parsed) {
         return false;
     }

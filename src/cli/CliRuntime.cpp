@@ -68,7 +68,13 @@ std::string ExecutablePath(char* argv0) {
         if (const char* rawPath = std::getenv("PATH")) {
             std::stringstream stream(rawPath);
             std::string dir;
-            while (std::getline(stream, dir, ':')) {
+            const char delimiter =
+#if defined(_WIN32)
+                ';';
+#else
+                ':';
+#endif
+            while (std::getline(stream, dir, delimiter)) {
                 if (dir.empty()) {
                     dir = ".";
                 }
@@ -77,6 +83,15 @@ std::string ExecutablePath(char* argv0) {
                     return std::filesystem::absolute(candidate, ec).string();
                 }
                 ec.clear();
+#if defined(_WIN32)
+                if (!candidate.has_extension()) {
+                    candidate += ".exe";
+                    if (std::filesystem::exists(candidate, ec) && !ec) {
+                        return std::filesystem::absolute(candidate, ec).string();
+                    }
+                    ec.clear();
+                }
+#endif
             }
         }
     }

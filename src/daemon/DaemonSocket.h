@@ -3,6 +3,17 @@
 #include <filesystem>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <string_view>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace ComputerCpp {
 
@@ -13,5 +24,11 @@ void SetCloseOnExec(int fd);
 bool IsSessionNameValid(const std::string& session);
 std::filesystem::path SocketPathForSession(const std::string& session);
 std::filesystem::path PidPathForSession(const std::string& session);
+std::string PipeNameForSession(const std::string& session);
+#if defined(_WIN32)
+std::string ReadLineFromPipe(HANDLE pipe);
+bool WriteAllToPipe(HANDLE pipe, std::string_view payload);
+void WriteJsonLineToPipe(HANDLE pipe, const nlohmann::json& response);
+#endif
 
 } // namespace ComputerCpp

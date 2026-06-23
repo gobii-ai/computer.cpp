@@ -25,6 +25,10 @@
 #include <stdexcept>
 #include <vector>
 
+#if defined(_WIN32)
+#include <crtdbg.h>
+#endif
+
 namespace fs = std::filesystem;
 using ComputerCpp::Tests::MakeTempHome;
 
@@ -200,14 +204,18 @@ void TestUpdaterVersionParsing() {
 }
 
 void TestUpdaterReleaseParsing() {
+    assert(ComputerCpp::Updater::CompatibleMacAssetName("0.3.0") == "computer.cpp-0.3.0-macos-arm64.zip");
+    assert(ComputerCpp::Updater::CompatibleWindowsAssetName("0.3.0") == "computer.cpp-0.3.0-windows-x64.msi");
+    std::string compatibleAssetName = ComputerCpp::Updater::CompatibleAssetName("0.3.0");
+
     nlohmann::json release = {
         {"tag_name", "v0.3.0"},
         {"html_url", "https://github.com/gobii-ai/computer.cpp/releases/tag/0.3.0"},
         {"body", "notes"},
         {"assets", nlohmann::json::array({
             {
-                {"name", "computer.cpp-0.3.0-macos-arm64.zip"},
-                {"browser_download_url", "https://example.test/computer.cpp-0.3.0-macos-arm64.zip"},
+                {"name", compatibleAssetName},
+                {"browser_download_url", "https://example.test/" + compatibleAssetName},
                 {"size", 1234}
             }
         })}
@@ -217,8 +225,8 @@ void TestUpdaterReleaseParsing() {
     assert(available.status == ComputerCpp::Updater::CheckStatus::UpdateAvailable);
     assert(available.latestVersion == "0.3.0");
     assert(available.release.hasCompatibleAsset);
-    assert(available.release.asset.name == "computer.cpp-0.3.0-macos-arm64.zip");
-    assert(available.release.asset.browserDownloadUrl == "https://example.test/computer.cpp-0.3.0-macos-arm64.zip");
+    assert(available.release.asset.name == compatibleAssetName);
+    assert(available.release.asset.browserDownloadUrl == "https://example.test/" + compatibleAssetName);
 
     auto current = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.3.0");
     assert(current.status == ComputerCpp::Updater::CheckStatus::UpToDate);
@@ -277,11 +285,27 @@ std::optional<std::string> CurrentEnvValue(const char* name) {
     return std::nullopt;
 }
 
+bool SameExistingPath(const fs::path& lhs, const fs::path& rhs) {
+    std::error_code ec;
+    return fs::equivalent(lhs, rhs, ec) && !ec;
+}
+
 void TestLuaInterpreterResolution() {
     auto originalLua = CurrentEnvValue("COMPUTER_CPP_LUA");
     auto originalPath = CurrentEnvValue("PATH");
 
     fs::path root = MakeTempHome() / "lua-resolution";
+#if defined(_WIN32)
+    fs::path envLua = root / "env" / "custom-lua.exe";
+    fs::path pathBin = root / "path-bin";
+    fs::path pathLua = pathBin / "lua.exe";
+    fs::path appExe = root / "bin" / "computer.cpp.exe";
+    fs::path bundledLua = root / "bin" / "lua" / "bin" / "lua.exe";
+    fs::path parentBundledLua = root / "lua" / "bin" / "lua.exe";
+    fs::path cliBin = root / "cli-bin";
+    fs::path pathCli = cliBin / "computer.cpp.exe";
+    fs::path pathBundledLua = cliBin / "lua" / "bin" / "lua.exe";
+#else
     fs::path envLua = root / "env" / "custom-lua";
     fs::path pathBin = root / "path-bin";
     fs::path pathLua = pathBin / "lua";
@@ -291,25 +315,36 @@ void TestLuaInterpreterResolution() {
     fs::path cliBin = root / "cli-bin";
     fs::path pathCli = cliBin / "computer.cpp";
     fs::path pathBundledLua = cliBin / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
+#endif
 
     WriteExecutableFile(envLua);
     SetEnvValue("COMPUTER_CPP_LUA", envLua.string());
     SetEnvValue("PATH", (root / "empty-path").string());
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == envLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), envLua));
 
     RestoreEnvValue("COMPUTER_CPP_LUA", std::nullopt);
     WriteExecutableFile(bundledLua);
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == bundledLua);
-    assert(ComputerCpp::FindLuaInterpreter(siblingCli) == bundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), bundledLua));
+#if defined(_WIN32)
+    fs::remove(bundledLua);
+    WriteExecutableFile(parentBundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), parentBundledLua));
+#else
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(siblingCli), bundledLua));
+#endif
     WriteExecutableFile(pathCli);
     WriteExecutableFile(pathBundledLua);
     SetEnvValue("PATH", cliBin.string());
-    assert(ComputerCpp::FindLuaInterpreter("computer.cpp") == pathBundledLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter("computer.cpp"), pathBundledLua));
 
+#if defined(_WIN32)
+    fs::remove(parentBundledLua);
+#else
     fs::remove(bundledLua);
+#endif
     WriteExecutableFile(pathLua);
     SetEnvValue("PATH", pathBin.string());
-    assert(ComputerCpp::FindLuaInterpreter(appExe) == pathLua);
+    assert(SameExistingPath(ComputerCpp::FindLuaInterpreter(appExe), pathLua));
 
     RestoreEnvValue("COMPUTER_CPP_LUA", originalLua);
     RestoreEnvValue("PATH", originalPath);
@@ -539,31 +574,43 @@ void TestTimelineStorage() {
 
 }
 
+template <typename Function>
+void RunTest(const char* name, Function function) {
+    std::cout << "[test] " << name << std::endl;
+    function();
+}
+
 }
 
 int main() {
-    fs::path tempHome = MakeTempHome();
-    setenv("COMPUTER_CPP_HOME", tempHome.c_str(), 1);
+#if defined(_WIN32)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
 
-    TestStringUtils();
-    TestAppConfigServerRoundTrip();
-    TestTrayServerState();
-    TestRefStore();
-    TestNativeDependencies();
-    TestUpdaterVersionParsing();
-    TestUpdaterReleaseParsing();
-    TestLuaInterpreterResolution();
-    TestUpdaterInstallHelperScript();
-    TestUpdaterStagingValidation();
-    TestLinuxPngUtilities();
-    TestImageUtilities();
-    TestHumanInputPlans();
-    ComputerCpp::Tests::RunInferenceTests();
-    ComputerCpp::Tests::RunControlSessionTests();
-    ComputerCpp::Tests::RunDaemonTests();
-    ComputerCpp::Tests::RunDaemonDispatchTests();
-    ComputerCpp::Tests::RunCliTests();
-    TestTimelineStorage();
+    fs::path tempHome = MakeTempHome();
+    SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
+
+    RunTest("StringUtils", TestStringUtils);
+    RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
+    RunTest("TrayServerState", TestTrayServerState);
+    RunTest("RefStore", TestRefStore);
+    RunTest("NativeDependencies", TestNativeDependencies);
+    RunTest("UpdaterVersionParsing", TestUpdaterVersionParsing);
+    RunTest("UpdaterReleaseParsing", TestUpdaterReleaseParsing);
+    RunTest("LuaInterpreterResolution", TestLuaInterpreterResolution);
+    RunTest("UpdaterInstallHelperScript", TestUpdaterInstallHelperScript);
+    RunTest("UpdaterStagingValidation", TestUpdaterStagingValidation);
+    RunTest("LinuxPngUtilities", TestLinuxPngUtilities);
+    RunTest("ImageUtilities", TestImageUtilities);
+    RunTest("HumanInputPlans", TestHumanInputPlans);
+    RunTest("InferenceTests", ComputerCpp::Tests::RunInferenceTests);
+    RunTest("ControlSessionTests", ComputerCpp::Tests::RunControlSessionTests);
+    RunTest("DaemonTests", ComputerCpp::Tests::RunDaemonTests);
+    RunTest("DaemonDispatchTests", ComputerCpp::Tests::RunDaemonDispatchTests);
+    RunTest("CliTests", ComputerCpp::Tests::RunCliTests);
+    RunTest("TimelineStorage", TestTimelineStorage);
 
     std::cout << "computer.cpp core tests passed." << std::endl;
     return 0;

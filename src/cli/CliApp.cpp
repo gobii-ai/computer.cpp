@@ -4,6 +4,7 @@
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/TrayServerState.h"
+#include "computer_cpp/WindowsUtil.h"
 
 #include <nlohmann/json.hpp>
 
@@ -37,6 +38,13 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
 #endif
 
 using json = nlohmann::json;
@@ -47,6 +55,26 @@ namespace {
 
 constexpr std::string_view kMcpEndpointPath = "/mcp";
 constexpr std::string_view kMcpLatestProtocolVersion = "2025-11-25";
+
+#if defined(_WIN32)
+using AppSocket = SOCKET;
+constexpr AppSocket kInvalidSocket = INVALID_SOCKET;
+#else
+using AppSocket = int;
+constexpr AppSocket kInvalidSocket = -1;
+#endif
+
+void CloseAppSocket(AppSocket fd) {
+#if defined(_WIN32)
+    if (fd != INVALID_SOCKET) {
+        closesocket(fd);
+    }
+#else
+    if (fd >= 0) {
+        ::close(fd);
+    }
+#endif
+}
 
 #if defined(__unix__) || defined(__APPLE__)
 volatile sig_atomic_t gAppServeStopRequested = 0;
@@ -797,6 +825,31 @@ bool StartOperationProcess(
     }
     return true;
 #else
+#if defined(_WIN32)
+    std::vector<std::string> command = {executablePath};
+    command.push_back("--session");
+    command.push_back(options.session);
+    if (!options.controlScope.empty()) {
+        command.push_back("--control-scope");
+        command.push_back(options.controlScope);
+    }
+    if (!options.controlSessionToken.empty()) {
+        command.push_back("--control-session");
+        command.push_back(options.controlSessionToken);
+    }
+    command.push_back("app");
+    command.push_back("operation");
+    command.push_back("__run-stored");
+    command.push_back(appPath.string());
+    command.push_back(appId);
+    command.push_back(operationId);
+
+    if (!Windows::LaunchDetached(command)) {
+        error = "failed to start operation runner";
+        return false;
+    }
+    return true;
+#else
     (void)options;
     (void)executablePath;
     (void)appPath;
@@ -804,6 +857,7 @@ bool StartOperationProcess(
     (void)operationId;
     error = "async operations are not implemented on this platform";
     return false;
+#endif
 #endif
 }
 
@@ -1068,6 +1122,9 @@ int HandleAppOperation(
     if (args[2] == "cancel") {
         return HandleOperationCancel(options, args, executablePath);
     }
+    if (args[2] == "__run-stored" && args.size() == 6) {
+        return RunStoredOperation(options, executablePath, args[3], args[4], args[5]);
+    }
     return ErrorExit(options, "unknown app operation subcommand: " + args[2], 2, "invalid_input");
 }
 
@@ -1233,11 +1290,22 @@ void SplitTarget(HttpRequest& request) {
     request.query = ParseQueryString(request.target.substr(question + 1));
 }
 
-bool SendAll(int fd, const std::string& data) {
+bool SendAll(AppSocket fd, const std::string& data) {
 #if defined(__unix__) || defined(__APPLE__)
     size_t sent = 0;
     while (sent < data.size()) {
         ssize_t n = ::send(fd, data.data() + sent, data.size() - sent, 0);
+        if (n <= 0) {
+            return false;
+        }
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+#elif defined(_WIN32)
+    size_t sent = 0;
+    while (sent < data.size()) {
+        int chunk = static_cast<int>(std::min<size_t>(data.size() - sent, 64 * 1024));
+        int n = ::send(fd, data.data() + sent, chunk, 0);
         if (n <= 0) {
             return false;
         }
@@ -1268,7 +1336,7 @@ std::string ReasonPhrase(int status) {
 }
 
 bool SendJsonResponse(
-    int fd,
+    AppSocket fd,
     int status,
     const json& body,
     const std::map<std::string, std::string>& extraHeaders = {}
@@ -1288,7 +1356,7 @@ bool SendJsonResponse(
 }
 
 bool SendEmptyResponse(
-    int fd,
+    AppSocket fd,
     int status,
     const std::map<std::string, std::string>& extraHeaders = {}
 ) {
@@ -1323,13 +1391,17 @@ int HttpStatusForErrorCode(const std::string& code) {
     return 500;
 }
 
-bool ReadHttpRequest(int fd, HttpRequest& request, std::string& error) {
-#if defined(__unix__) || defined(__APPLE__)
+bool ReadHttpRequest(AppSocket fd, HttpRequest& request, std::string& error) {
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
     std::string raw;
     std::array<char, 4096> buffer {};
     size_t headerEnd = std::string::npos;
     while ((headerEnd = raw.find("\r\n\r\n")) == std::string::npos) {
+#if defined(_WIN32)
+        int n = ::recv(fd, buffer.data(), static_cast<int>(buffer.size()), 0);
+#else
         ssize_t n = ::recv(fd, buffer.data(), buffer.size(), 0);
+#endif
         if (n <= 0) {
             error = "failed to read HTTP request";
             return false;
@@ -1385,7 +1457,11 @@ bool ReadHttpRequest(int fd, HttpRequest& request, std::string& error) {
     const size_t bodyStart = headerEnd + 4;
     request.body = raw.substr(bodyStart);
     while (request.body.size() < contentLength) {
+#if defined(_WIN32)
+        int n = ::recv(fd, buffer.data(), static_cast<int>(buffer.size()), 0);
+#else
         ssize_t n = ::recv(fd, buffer.data(), buffer.size(), 0);
+#endif
         if (n <= 0) {
             error = "failed to read HTTP request body";
             return false;
@@ -1508,7 +1584,7 @@ json JsonRpcResult(json id, json result) {
 }
 
 bool SendJsonRpcError(
-    int fd,
+    AppSocket fd,
     int httpStatus,
     json id,
     int code,
@@ -1587,7 +1663,7 @@ json McpToolErrorResult(const std::string& code, const std::string& message) {
 }
 
 bool HandleMcpJsonRpcRequest(
-    int fd,
+    AppSocket fd,
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
@@ -1647,7 +1723,7 @@ bool HandleMcpJsonRpcRequest(
 }
 
 bool HandleMcpRequest(
-    int fd,
+    AppSocket fd,
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
@@ -1710,7 +1786,7 @@ bool HandleMcpRequest(
 }
 
 bool HandleHttpCommand(
-    int fd,
+    AppSocket fd,
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
@@ -1753,7 +1829,7 @@ bool HandleHttpCommand(
 }
 
 bool HandleHttpOperationResult(
-    int fd,
+    AppSocket fd,
     const std::string& operationId,
     const OperationPaths& paths,
     const HttpRequest& request
@@ -1794,7 +1870,7 @@ bool HandleHttpOperationResult(
 }
 
 bool HandleHttpOperation(
-    int fd,
+    AppSocket fd,
     const std::string& appId,
     const HttpRequest& request
 ) {
@@ -1837,7 +1913,7 @@ bool HandleHttpOperation(
 }
 
 bool HandleHttpRequest(
-    int fd,
+    AppSocket fd,
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
@@ -1969,39 +2045,73 @@ int RunHttpServer(
     const json& schema,
     const std::string& appId
 ) {
-#if defined(__unix__) || defined(__APPLE__)
-    int serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (serverFd < 0) {
+#if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
+#if defined(_WIN32)
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        return ErrorExit(options, "failed to initialize Winsock", 1, "internal_error");
+    }
+#endif
+    AppSocket serverFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (serverFd == kInvalidSocket) {
+#if defined(_WIN32)
+        WSACleanup();
+#endif
         return ErrorExit(options, "failed to create HTTP socket", 1, "internal_error");
     }
     int reuse = 1;
-    ::setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    ::setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
     sockaddr_in addr {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(serveOptions.port));
     const std::string bindHost = serveOptions.host == "localhost" ? "127.0.0.1" : serveOptions.host;
     if (::inet_pton(AF_INET, bindHost.c_str(), &addr.sin_addr) != 1) {
-        ::close(serverFd);
+        CloseAppSocket(serverFd);
+#if defined(_WIN32)
+        WSACleanup();
+#endif
         return ErrorExit(options, "app serve --listen host must be an IPv4 address or localhost", 2, "invalid_input");
     }
     if (::bind(serverFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        std::string message = "failed to bind " + bindHost + ":" + std::to_string(serveOptions.port) + ": " + std::strerror(errno);
-        ::close(serverFd);
+#if defined(_WIN32)
+        std::string detail = std::to_string(WSAGetLastError());
+#else
+        std::string detail = std::strerror(errno);
+#endif
+        std::string message = "failed to bind " + bindHost + ":" + std::to_string(serveOptions.port) + ": " + detail;
+        CloseAppSocket(serverFd);
+#if defined(_WIN32)
+        WSACleanup();
+#endif
         return ErrorExit(options, message, 1, "internal_error");
     }
     if (::listen(serverFd, 16) != 0) {
-        std::string message = "failed to listen: " + std::string(std::strerror(errno));
-        ::close(serverFd);
+#if defined(_WIN32)
+        std::string detail = std::to_string(WSAGetLastError());
+#else
+        std::string detail = std::strerror(errno);
+#endif
+        std::string message = "failed to listen: " + detail;
+        CloseAppSocket(serverFd);
+#if defined(_WIN32)
+        WSACleanup();
+#endif
         return ErrorExit(options, message, 1, "internal_error");
     }
+#if defined(__unix__) || defined(__APPLE__)
     ScopedAppServeSignals signals(serverFd);
+#endif
     std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port
               << " (MCP endpoint: /mcp)\n";
 
     if (serveOptions.trayStateFile.has_value()) {
         TrayAppServerState state;
+#if defined(_WIN32)
+        state.pid = static_cast<long>(GetCurrentProcessId());
+#else
         state.pid = static_cast<long>(getpid());
+#endif
         state.host = bindHost;
         state.port = serveOptions.port;
         state.url = "http://" + bindHost + ":" + std::to_string(serveOptions.port);
@@ -2015,11 +2125,19 @@ int RunHttpServer(
         }
     }
 
-    while (!gAppServeStopRequested) {
-        int clientFd = ::accept(serverFd, nullptr, nullptr);
-        if (clientFd < 0) {
+    while (
+#if defined(__unix__) || defined(__APPLE__)
+        !gAppServeStopRequested
+#else
+        true
+#endif
+    ) {
+        AppSocket clientFd = ::accept(serverFd, nullptr, nullptr);
+        if (clientFd == kInvalidSocket) {
+#if defined(__unix__) || defined(__APPLE__)
             if (gAppServeStopRequested) break;
             if (errno == EINTR) continue;
+#endif
             break;
         }
         HttpRequest request;
@@ -2029,16 +2147,27 @@ int RunHttpServer(
         } else {
             HandleHttpRequest(clientFd, options, executablePath, serveOptions, schema, appId, request);
         }
-        ::close(clientFd);
+        CloseAppSocket(clientFd);
     }
+#if defined(__unix__) || defined(__APPLE__)
     if (gAppServeServerFd >= 0) {
-        ::close(serverFd);
+        CloseAppSocket(serverFd);
         gAppServeServerFd = -1;
     }
+#else
+    CloseAppSocket(serverFd);
+#endif
     if (serveOptions.trayStateFile.has_value()) {
         std::string stateError;
+#if defined(_WIN32)
+        RemoveTrayAppServerStateForPid(*serveOptions.trayStateFile, static_cast<long>(GetCurrentProcessId()), &stateError);
+#else
         RemoveTrayAppServerStateForPid(*serveOptions.trayStateFile, static_cast<long>(getpid()), &stateError);
+#endif
     }
+#if defined(_WIN32)
+    WSACleanup();
+#endif
     return 0;
 #else
     (void)executablePath;

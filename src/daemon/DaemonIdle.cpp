@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <string>
@@ -22,6 +23,8 @@ std::atomic_bool gShouldStop = false;
 std::atomic<int> gActiveRequests = 0;
 std::atomic<long long> gLastActivityMs = 0;
 std::recursive_mutex gControlMutex;
+std::mutex gStopNotifierMutex;
+std::function<void()> gStopNotifier;
 
 long long NowSteadyMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -146,6 +149,14 @@ void ResetDaemonStopState() {
 
 void RequestDaemonStop() {
     gShouldStop = true;
+    std::function<void()> notifier;
+    {
+        std::lock_guard<std::mutex> lock(gStopNotifierMutex);
+        notifier = gStopNotifier;
+    }
+    if (notifier) {
+        notifier();
+    }
 }
 
 bool DaemonShouldStop() {
@@ -154,6 +165,11 @@ bool DaemonShouldStop() {
 
 void MarkDaemonActivity() {
     gLastActivityMs.store(NowSteadyMs());
+}
+
+void SetDaemonStopNotifier(std::function<void()> notifier) {
+    std::lock_guard<std::mutex> lock(gStopNotifierMutex);
+    gStopNotifier = std::move(notifier);
 }
 
 std::thread StartIdleBehaviorThreadIfEnabled() {

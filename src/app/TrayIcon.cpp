@@ -321,9 +321,36 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
     std::string response(buffer);
     return response.rfind("HTTP/1.1 200", 0) == 0 || response.rfind("HTTP/1.0 200", 0) == 0;
 #else
-    (void)state;
-    (void)bearerToken;
-    return false;
+    if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
+        return false;
+    }
+    wxSocketClient socket;
+    socket.SetTimeout(1);
+    wxIPV4address addr;
+    addr.Hostname(HealthConnectHost(state.host));
+    addr.Service(state.port);
+    if (!socket.Connect(addr, true)) {
+        return false;
+    }
+    std::string host = HealthConnectHost(state.host);
+    std::string request =
+        "GET /health HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
+        "\r\nAuthorization: Bearer " + bearerToken +
+        "\r\nConnection: close\r\n\r\n";
+    socket.Write(request.data(), request.size());
+    if (socket.Error()) {
+        socket.Close();
+        return false;
+    }
+    char buffer[512]{};
+    socket.Read(buffer, sizeof(buffer) - 1);
+    size_t read = socket.LastCount();
+    socket.Close();
+    if (read == 0) {
+        return false;
+    }
+    std::string response(buffer, read);
+    return response.rfind("HTTP/1.1 200", 0) == 0 || response.rfind("HTTP/1.0 200", 0) == 0;
 #endif
 }
 
@@ -682,6 +709,7 @@ bool ResetMacPermissionService(const std::string& service) {
 }
 
 bool RelaunchComputerCpp() {
+#ifdef __APPLE__
     std::string bundlePath = ComputerCppBundlePath();
     if (bundlePath.empty()) {
         return false;
@@ -691,6 +719,10 @@ bool RelaunchComputerCpp() {
         " 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n " + ShellQuote(bundlePath);
     std::string relaunch = "/bin/sh -c " + ShellQuote(script + " >/dev/null 2>&1 &");
     return wxExecute(relaunch, wxEXEC_ASYNC) != 0;
+#else
+    wxString executablePath = wxStandardPaths::Get().GetExecutablePath();
+    return wxExecute("\"" + executablePath + "\"", wxEXEC_ASYNC) != 0;
+#endif
 }
 
 wxString PermissionStatusMessage(const Platform::PermissionStatus& status) {

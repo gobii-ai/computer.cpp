@@ -1,0 +1,31 @@
+{
+  "name": "computer-cpp",
+  "version": "0.6.0",
+  "dependencies": [
+    {
+      "name": "curl",
+      "default-features": true,
+      "features": [
+        "ssl"
+      ]
+    },
+    "nlohmann-json",
+    "sqlite3",
+    "tomlplusplus",
+    "zlib"
+  ],
+  "features": {
+    "gui": {
+      "description": "Build and package the ComputerCpp desktop tray application.",
+      "dependencies": [
+        "wxwidgets"
+      ]
+    },
+    "bundled-lua": {
+      "description": "Install Lua for release artifacts that bundle lua/bin/lua.exe.",
+      "dependencies": [
+        "lua"
+      ]
+    }
+  }
+}

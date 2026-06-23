@@ -11,6 +11,11 @@ option(COMPUTER_CPP_CODE_SIGN_APP "Code sign the macOS ComputerCpp.app bundle af
 option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project targets" ON)
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
 option(COMPUTER_CPP_BUILD_GUI "Build the ComputerCpp desktop tray application when wxWidgets is available" ON)
+option(COMPUTER_CPP_BUNDLE_LUA "Copy a Lua executable beside Windows build and install artifacts" ON)
+
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
 
 function(computer_cpp_target_defaults target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
@@ -36,9 +41,11 @@ function(computer_cpp_target_defaults target_name)
     endif()
 endfunction()
 
-find_package(wxWidgets QUIET COMPONENTS core base adv net)
-if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
-    include(${wxWidgets_USE_FILE})
+if(COMPUTER_CPP_BUILD_GUI)
+    find_package(wxWidgets QUIET COMPONENTS core base adv net)
+    if(wxWidgets_FOUND)
+        include(${wxWidgets_USE_FILE})
+    endif()
 endif()
 find_package(SQLite3 REQUIRED)
 if(NOT TARGET SQLite3::SQLite3)
@@ -52,19 +59,25 @@ find_package(CURL REQUIRED COMPONENTS HTTPS SSL)
 find_package(ZLIB REQUIRED)
 
 include(FetchContent)
-FetchContent_Declare(
-    json
-    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(json)
+find_package(nlohmann_json CONFIG QUIET)
+if(NOT nlohmann_json_FOUND)
+    FetchContent_Declare(
+        json
+        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(json)
+endif()
 
-FetchContent_Declare(
-    tomlplusplus
-    URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(tomlplusplus)
+find_package(tomlplusplus CONFIG QUIET)
+if(NOT tomlplusplus_FOUND)
+    FetchContent_Declare(
+        tomlplusplus
+        URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(tomlplusplus)
+endif()
 
 include(CTest)
 
@@ -109,6 +122,7 @@ add_library(computer_cpp_core
     src/core/Timeline.cpp
     src/core/TrayServerState.cpp
     src/core/Updater.cpp
+    src/core/WindowsUtil.cpp
     src/daemon/Daemon.cpp
     src/daemon/DaemonArtifacts.cpp
     src/daemon/DaemonBatch.cpp
@@ -189,6 +203,18 @@ elseif(WIN32)
     target_sources(computer_cpp_core PRIVATE
         src/platform/windows/PlatformWindows.cpp
     )
+    target_link_libraries(computer_cpp_core
+        PUBLIC
+            comctl32
+            gdi32
+            ole32
+            oleaut32
+            psapi
+            shell32
+            user32
+            uuid
+            ws2_32
+    )
 elseif(UNIX)
     target_sources(computer_cpp_core PRIVATE
         src/platform/linux/LinuxPng.cpp
@@ -260,7 +286,14 @@ target_link_libraries(computer.cpp
         computer_cpp_core
 )
 
-install(TARGETS computer.cpp RUNTIME DESTINATION bin)
+if(WIN32)
+    install(TARGETS computer.cpp
+        RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps
+        RUNTIME DESTINATION bin
+    )
+else()
+    install(TARGETS computer.cpp RUNTIME DESTINATION bin)
+endif()
 
 if(TARGET computer.cpp-wayland-input)
     install(TARGETS computer.cpp-wayland-input RUNTIME DESTINATION bin)
@@ -287,6 +320,14 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
             computer_cpp_core
             ${wxWidgets_LIBRARIES}
     )
+
+    if(WIN32)
+        set_target_properties(ComputerCpp PROPERTIES WIN32_EXECUTABLE TRUE)
+        install(TARGETS ComputerCpp
+            RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps
+            RUNTIME DESTINATION bin
+        )
+    endif()
 
     if(APPLE)
         target_sources(ComputerCpp
@@ -364,6 +405,44 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
             )
         endif()
     endif()
+endif()
+
+if(WIN32 AND COMPUTER_CPP_BUNDLE_LUA)
+    find_program(COMPUTER_CPP_LUA_EXECUTABLE NAMES lua.exe lua lua5.4.exe lua5.4 lua5.3.exe lua5.3 luajit.exe luajit)
+    if(COMPUTER_CPP_LUA_EXECUTABLE)
+        add_custom_command(TARGET computer.cpp POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:computer.cpp>/lua/bin"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${COMPUTER_CPP_LUA_EXECUTABLE}" "$<TARGET_FILE_DIR:computer.cpp>/lua/bin/lua.exe"
+            VERBATIM
+        )
+        install(PROGRAMS "${COMPUTER_CPP_LUA_EXECUTABLE}" DESTINATION bin/lua/bin RENAME lua.exe)
+    else()
+        message(WARNING "Lua executable not found; Windows artifacts will rely on COMPUTER_CPP_LUA or PATH at runtime.")
+    endif()
+
+    install(RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps
+        DESTINATION bin
+        PRE_EXCLUDE_REGEXES
+            "api-ms-.*"
+            "ext-ms-.*"
+        POST_EXCLUDE_REGEXES
+            ".*system32/.*\\.dll"
+            ".*System32/.*\\.dll"
+    )
+    install(FILES README.md LICENSE DESTINATION .)
+
+    set(CPACK_PACKAGE_NAME "ComputerCpp")
+    set(CPACK_PACKAGE_VENDOR "computer.cpp")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "ComputerCpp")
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    set(CPACK_PACKAGE_EXECUTABLES "ComputerCpp" "ComputerCpp")
+    set(CPACK_GENERATOR "ZIP;WIX")
+    set(CPACK_ARCHIVE_FILE_NAME "computer.cpp-${PROJECT_VERSION}-windows-x64")
+    set(CPACK_PACKAGE_FILE_NAME "computer.cpp-${PROJECT_VERSION}-windows-x64")
+    set(CPACK_WIX_UPGRADE_GUID "D95E508C-68B2-4B63-9EA6-1B6E2B3E5C04")
+    set(CPACK_WIX_PROGRAM_MENU_FOLDER "ComputerCpp")
+    include(CPack)
 endif()
 
 if(BUILD_TESTING)

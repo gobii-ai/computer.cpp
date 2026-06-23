@@ -35,7 +35,9 @@ bool HasHomeOverride() {
 
 void EnsurePrivateDirectory(const fs::path& path) {
     std::error_code ec;
+#if defined(__unix__) || defined(__APPLE__)
     bool existed = fs::exists(path, ec);
+#endif
     EnsureDirectory(path);
 #if defined(__unix__) || defined(__APPLE__)
     if (!existed) {

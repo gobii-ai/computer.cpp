@@ -45,10 +45,26 @@ struct ScopedEnvVar {
 
     ~ScopedEnvVar() {
         if (hadPrevious) {
-            setenv(name.c_str(), previous.c_str(), 1);
+            Set(previous);
         } else {
-            unsetenv(name.c_str());
+            Clear();
         }
+    }
+
+    void Set(const std::string& value) const {
+#if defined(_WIN32)
+        _putenv_s(name.c_str(), value.c_str());
+#else
+        setenv(name.c_str(), value.c_str(), 1);
+#endif
+    }
+
+    void Clear() const {
+#if defined(_WIN32)
+        _putenv_s(name.c_str(), "");
+#else
+        unsetenv(name.c_str());
+#endif
     }
 };
 
@@ -73,6 +89,22 @@ CapturedConfigCommand RunConfigCommand(std::initializer_list<std::string> args, 
     std::cout.rdbuf(oldOut);
     std::cerr.rdbuf(oldErr);
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
+}
+
+bool SkipLuaTestIfUnavailable(const char* testName) {
+    if (!ComputerCpp::FindLuaInterpreter().empty()) {
+        return false;
+    }
+    std::cout << "[skip] " << testName << ": Lua interpreter not available" << std::endl;
+    return true;
+}
+
+void AssertLuaRunSucceeded(const ComputerCpp::LuaRunResult& result) {
+    if (result.exitCode != 0) {
+        std::cerr << result.stderrText;
+        std::cerr << result.stdoutText;
+    }
+    assert(result.exitCode == 0);
 }
 
 std::vector<std::string> ParseGlobalArgs(
@@ -151,15 +183,15 @@ void TestGlobalOptionParsing() {
     ScopedEnvVar controlSessionEnv("COMPUTER_CPP_CONTROL_SESSION");
     ScopedEnvVar controlScopeEnv("COMPUTER_CPP_CONTROL_SCOPE");
 
-    setenv("COMPUTER_CPP_CONTROL_SESSION", "   ", 1);
-    setenv("COMPUTER_CPP_CONTROL_SCOPE", "   ", 1);
+    controlSessionEnv.Set("   ");
+    controlScopeEnv.Set("   ");
     ComputerCpp::Cli::CliOptions blankEnvDefaults;
     ComputerCpp::Cli::ApplyEnvDefaults(blankEnvDefaults);
     assert(blankEnvDefaults.controlSessionToken.empty());
     assert(blankEnvDefaults.controlScope == "desktop:local");
 
-    setenv("COMPUTER_CPP_CONTROL_SESSION", "env-token", 1);
-    setenv("COMPUTER_CPP_CONTROL_SCOPE", "desktop:env", 1);
+    controlSessionEnv.Set("env-token");
+    controlScopeEnv.Set("desktop:env");
     ComputerCpp::Cli::CliOptions envDefaults;
     ComputerCpp::Cli::ApplyEnvDefaults(envDefaults);
     assert(envDefaults.controlSessionToken == "env-token");
@@ -2039,9 +2071,11 @@ void TestConfigCliCanonicalFile() {
     assert(error.empty());
     assert(config.providers["router"].apiKey == "or-test-secret");
 
-    std::ifstream configFile(ComputerCpp::ConfigPath());
-    std::string toml((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
-    assert(toml.find("api_key = \"or-test-secret\"") != std::string::npos);
+    {
+        std::ifstream configFile(ComputerCpp::ConfigPath());
+        std::string toml((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
+        assert(toml.find("api_key = \"or-test-secret\"") != std::string::npos);
+    }
 
     auto show = RunConfigCommand({"config", "show"});
     assert(show.exitCode == 0);
@@ -2115,13 +2149,17 @@ void TestConfigCliCanonicalFile() {
 }
 
 void TestMicroAgentLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentLuaDryRun")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/micro-agent-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
     assert(result.stderrText.find("agent     done") != std::string::npos);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
@@ -2139,13 +2177,17 @@ void TestMicroAgentLuaDryRun() {
 }
 
 void TestMicroAgentStrictToolCallsLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentStrictToolCallsLuaDryRun")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/micro-agent-strict-tool-calls-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
     assert(payload["ok"] == true);
@@ -2182,13 +2224,17 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
 }
 
 void TestLuaDesktopToolPixelRects() {
+    if (SkipLuaTestIfUnavailable("TestLuaDesktopToolPixelRects")) {
+        return;
+    }
+
     ComputerCpp::LuaRunOptions options;
     options.scriptPath = RepoRoot() / "tests/lua/desktop-app-tools-dry-run.lua";
     options.dryRun = true;
     options.jsonOutput = true;
 
     auto result = ComputerCpp::RunLuaScriptCapture(options);
-    assert(result.exitCode == 0);
+    AssertLuaRunSucceeded(result);
 
     auto payload = nlohmann::json::parse(result.stdoutText);
     assert(payload["ok"] == true);

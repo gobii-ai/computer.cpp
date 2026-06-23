@@ -20,6 +20,9 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <shellapi.h>
 #endif
 
 #ifndef COMPUTER_CPP_PROJECT_VERSION
@@ -126,6 +129,7 @@ bool RunCommand(const std::string& command) {
 }
 
 std::string RunCommandCapture(const std::string& command) {
+#if defined(__APPLE__)
     std::array<char, 256> buffer{};
     std::string output;
     FILE* pipe = popen(command.c_str(), "r");
@@ -140,6 +144,10 @@ std::string RunCommandCapture(const std::string& command) {
         return {};
     }
     return Trim(output);
+#else
+    (void)command;
+    return {};
+#endif
 }
 
 std::string PlistValue(const fs::path& infoPlist, const std::string& key) {
@@ -264,6 +272,18 @@ std::string CompatibleMacAssetName(std::string_view version) {
     return "computer.cpp-" + std::string(version) + "-macos-arm64.zip";
 }
 
+std::string CompatibleWindowsAssetName(std::string_view version) {
+    return "computer.cpp-" + std::string(version) + "-windows-x64.msi";
+}
+
+std::string CompatibleAssetName(std::string_view version) {
+#if defined(_WIN32) && defined(_WIN64)
+    return CompatibleWindowsAssetName(version);
+#else
+    return CompatibleMacAssetName(version);
+#endif
+}
+
 std::string ShellQuote(std::string_view value) {
     std::string quoted = "'";
     for (char c : value) {
@@ -366,7 +386,7 @@ CheckResult ParseGitHubLatestRelease(const json& release, std::string_view curre
         return result;
     }
 
-    std::string expectedAssetName = CompatibleMacAssetName(latest->normalized);
+    std::string expectedAssetName = CompatibleAssetName(latest->normalized);
     if (!release.contains("assets") || !release["assets"].is_array()) {
         result.status = CheckStatus::NoCompatibleAsset;
         result.message = "GitHub release has no assets.";
@@ -420,9 +440,9 @@ CheckResult ParseGitHubLatestReleaseBody(std::string_view body, std::string_view
 CheckResult CheckForUpdate() {
     CheckResult unsupported;
     unsupported.currentVersion = CurrentVersion();
-    if (!IsMacArm64Supported()) {
+    if (!IsSelfUpdateSupported()) {
         unsupported.status = CheckStatus::UnsupportedPlatform;
-        unsupported.message = "Self-update is currently supported only on macOS arm64.";
+        unsupported.message = "Self-update is currently supported only on macOS arm64 and Windows x64.";
         return unsupported;
     }
 
@@ -527,6 +547,21 @@ DownloadResult DownloadReleaseAsset(const ReleaseInfo& release, ProgressCallback
 StageResult StageDownloadedUpdate(const ReleaseInfo& release, const fs::path& zipPath, bool verifySignature) {
     StageResult result;
     result.zipPath = zipPath;
+#if defined(_WIN32) && defined(_WIN64)
+    (void)release;
+    (void)verifySignature;
+    std::error_code ec;
+    if (!fs::is_regular_file(zipPath, ec) || ec) {
+        result.error = "downloaded Windows installer does not exist";
+        return result;
+    }
+    if (zipPath.extension() != ".msi") {
+        result.error = "downloaded Windows update is not an MSI installer";
+        return result;
+    }
+    result.ok = true;
+    return result;
+#else
     if (!IsMacArm64Supported()) {
         result.error = "self-update is currently supported only on macOS arm64";
         return result;
@@ -581,6 +616,7 @@ StageResult StageDownloadedUpdate(const ReleaseInfo& release, const fs::path& zi
     }
 
     return ValidateStagedUpdate(release, zipPath, expectedRoot, verifySignature);
+#endif
 }
 
 InstallResult LaunchInstallAndRelaunch(const StageResult& staged, int currentPid) {
@@ -590,6 +626,18 @@ InstallResult LaunchInstallAndRelaunch(const StageResult& staged, int currentPid
         result.error = staged.error.empty() ? "update was not staged successfully" : staged.error;
         return result;
     }
+#if defined(_WIN32) && defined(_WIN64)
+    (void)currentPid;
+    std::wstring params = L"/i \"" + staged.zipPath.wstring() + L"\"";
+    HINSTANCE launched = ShellExecuteW(nullptr, L"open", L"msiexec.exe", params.c_str(), nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<intptr_t>(launched) <= 32) {
+        result.manualInstallRequired = true;
+        result.error = "could not launch Windows installer";
+        return result;
+    }
+    result.ok = true;
+    return result;
+#else
 
     fs::path targetApp = CurrentAppBundlePath();
     if (targetApp.empty()) {
@@ -633,6 +681,7 @@ InstallResult LaunchInstallAndRelaunch(const StageResult& staged, int currentPid
     result.helperPath = helperPath;
     result.logPath = logPath;
     return result;
+#endif
 }
 
 fs::path CurrentAppBundlePath() {
@@ -663,12 +712,30 @@ bool IsMacArm64Supported() {
 #endif
 }
 
+bool IsWindowsX64Supported() {
+#if defined(_WIN32) && defined(_WIN64)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool IsSelfUpdateSupported() {
+    return IsMacArm64Supported() || IsWindowsX64Supported();
+}
+
 bool RevealInFinder(const fs::path& path) {
 #if defined(__APPLE__)
     if (path.empty()) {
         return false;
     }
     return RunCommand("/usr/bin/open -R " + ShellQuote(path.string()) + " >/dev/null 2>&1");
+#elif defined(_WIN32)
+    if (path.empty()) {
+        return false;
+    }
+    std::wstring params = L"/select,\"" + path.wstring() + L"\"";
+    return reinterpret_cast<intptr_t>(ShellExecuteW(nullptr, L"open", L"explorer.exe", params.c_str(), nullptr, SW_SHOWNORMAL)) > 32;
 #else
     (void)path;
     return false;
