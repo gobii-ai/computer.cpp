@@ -200,7 +200,9 @@ void TestUpdaterVersionParsing() {
 }
 
 void TestUpdaterReleaseParsing() {
+    assert(ComputerCpp::Updater::CompatibleMacAssetName("0.3.0") == "computer.cpp-0.3.0-macos-arm64.zip");
     assert(ComputerCpp::Updater::CompatibleWindowsAssetName("0.3.0") == "computer.cpp-0.3.0-windows-x64.msi");
+    std::string compatibleAssetName = ComputerCpp::Updater::CompatibleAssetName("0.3.0");
 
     nlohmann::json release = {
         {"tag_name", "v0.3.0"},
@@ -208,8 +210,8 @@ void TestUpdaterReleaseParsing() {
         {"body", "notes"},
         {"assets", nlohmann::json::array({
             {
-                {"name", "computer.cpp-0.3.0-macos-arm64.zip"},
-                {"browser_download_url", "https://example.test/computer.cpp-0.3.0-macos-arm64.zip"},
+                {"name", compatibleAssetName},
+                {"browser_download_url", "https://example.test/" + compatibleAssetName},
                 {"size", 1234}
             }
         })}
@@ -219,8 +221,8 @@ void TestUpdaterReleaseParsing() {
     assert(available.status == ComputerCpp::Updater::CheckStatus::UpdateAvailable);
     assert(available.latestVersion == "0.3.0");
     assert(available.release.hasCompatibleAsset);
-    assert(available.release.asset.name == "computer.cpp-0.3.0-macos-arm64.zip");
-    assert(available.release.asset.browserDownloadUrl == "https://example.test/computer.cpp-0.3.0-macos-arm64.zip");
+    assert(available.release.asset.name == compatibleAssetName);
+    assert(available.release.asset.browserDownloadUrl == "https://example.test/" + compatibleAssetName);
 
     auto current = ComputerCpp::Updater::ParseGitHubLatestRelease(release, "0.3.0");
     assert(current.status == ComputerCpp::Updater::CheckStatus::UpToDate);
@@ -284,6 +286,17 @@ void TestLuaInterpreterResolution() {
     auto originalPath = CurrentEnvValue("PATH");
 
     fs::path root = MakeTempHome() / "lua-resolution";
+#if defined(_WIN32)
+    fs::path envLua = root / "env" / "custom-lua.exe";
+    fs::path pathBin = root / "path-bin";
+    fs::path pathLua = pathBin / "lua.exe";
+    fs::path appExe = root / "bin" / "computer.cpp.exe";
+    fs::path bundledLua = root / "bin" / "lua" / "bin" / "lua.exe";
+    fs::path parentBundledLua = root / "lua" / "bin" / "lua.exe";
+    fs::path cliBin = root / "cli-bin";
+    fs::path pathCli = cliBin / "computer.cpp.exe";
+    fs::path pathBundledLua = cliBin / "lua" / "bin" / "lua.exe";
+#else
     fs::path envLua = root / "env" / "custom-lua";
     fs::path pathBin = root / "path-bin";
     fs::path pathLua = pathBin / "lua";
@@ -293,6 +306,7 @@ void TestLuaInterpreterResolution() {
     fs::path cliBin = root / "cli-bin";
     fs::path pathCli = cliBin / "computer.cpp";
     fs::path pathBundledLua = cliBin / "ComputerCpp.app" / "Contents" / "Resources" / "lua" / "bin" / "lua";
+#endif
 
     WriteExecutableFile(envLua);
     SetEnvValue("COMPUTER_CPP_LUA", envLua.string());
@@ -302,13 +316,23 @@ void TestLuaInterpreterResolution() {
     RestoreEnvValue("COMPUTER_CPP_LUA", std::nullopt);
     WriteExecutableFile(bundledLua);
     assert(ComputerCpp::FindLuaInterpreter(appExe) == bundledLua);
+#if defined(_WIN32)
+    fs::remove(bundledLua);
+    WriteExecutableFile(parentBundledLua);
+    assert(ComputerCpp::FindLuaInterpreter(appExe) == parentBundledLua);
+#else
     assert(ComputerCpp::FindLuaInterpreter(siblingCli) == bundledLua);
+#endif
     WriteExecutableFile(pathCli);
     WriteExecutableFile(pathBundledLua);
     SetEnvValue("PATH", cliBin.string());
     assert(ComputerCpp::FindLuaInterpreter("computer.cpp") == pathBundledLua);
 
+#if defined(_WIN32)
+    fs::remove(parentBundledLua);
+#else
     fs::remove(bundledLua);
+#endif
     WriteExecutableFile(pathLua);
     SetEnvValue("PATH", pathBin.string());
     assert(ComputerCpp::FindLuaInterpreter(appExe) == pathLua);
@@ -541,31 +565,37 @@ void TestTimelineStorage() {
 
 }
 
+template <typename Function>
+void RunTest(const char* name, Function function) {
+    std::cout << "[test] " << name << std::endl;
+    function();
+}
+
 }
 
 int main() {
     fs::path tempHome = MakeTempHome();
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
-    TestStringUtils();
-    TestAppConfigServerRoundTrip();
-    TestTrayServerState();
-    TestRefStore();
-    TestNativeDependencies();
-    TestUpdaterVersionParsing();
-    TestUpdaterReleaseParsing();
-    TestLuaInterpreterResolution();
-    TestUpdaterInstallHelperScript();
-    TestUpdaterStagingValidation();
-    TestLinuxPngUtilities();
-    TestImageUtilities();
-    TestHumanInputPlans();
-    ComputerCpp::Tests::RunInferenceTests();
-    ComputerCpp::Tests::RunControlSessionTests();
-    ComputerCpp::Tests::RunDaemonTests();
-    ComputerCpp::Tests::RunDaemonDispatchTests();
-    ComputerCpp::Tests::RunCliTests();
-    TestTimelineStorage();
+    RunTest("StringUtils", TestStringUtils);
+    RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
+    RunTest("TrayServerState", TestTrayServerState);
+    RunTest("RefStore", TestRefStore);
+    RunTest("NativeDependencies", TestNativeDependencies);
+    RunTest("UpdaterVersionParsing", TestUpdaterVersionParsing);
+    RunTest("UpdaterReleaseParsing", TestUpdaterReleaseParsing);
+    RunTest("LuaInterpreterResolution", TestLuaInterpreterResolution);
+    RunTest("UpdaterInstallHelperScript", TestUpdaterInstallHelperScript);
+    RunTest("UpdaterStagingValidation", TestUpdaterStagingValidation);
+    RunTest("LinuxPngUtilities", TestLinuxPngUtilities);
+    RunTest("ImageUtilities", TestImageUtilities);
+    RunTest("HumanInputPlans", TestHumanInputPlans);
+    RunTest("InferenceTests", ComputerCpp::Tests::RunInferenceTests);
+    RunTest("ControlSessionTests", ComputerCpp::Tests::RunControlSessionTests);
+    RunTest("DaemonTests", ComputerCpp::Tests::RunDaemonTests);
+    RunTest("DaemonDispatchTests", ComputerCpp::Tests::RunDaemonDispatchTests);
+    RunTest("CliTests", ComputerCpp::Tests::RunCliTests);
+    RunTest("TimelineStorage", TestTimelineStorage);
 
     std::cout << "computer.cpp core tests passed." << std::endl;
     return 0;

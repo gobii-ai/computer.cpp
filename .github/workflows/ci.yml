@@ -49,10 +49,10 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ env.VCPKG_DEFAULT_TRIPLET }}-
 
-      - name: Install build dependencies
+      - name: Verify build dependencies
         shell: pwsh
         run: |
-          choco install ninja -y
+          ninja --version
 
       - name: Configure MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -63,16 +63,17 @@ jobs:
         shell: pwsh
         run: |
           cmake -S . -B "$env:BUILD_DIR" -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_BUILD_TYPE=Debug `
             -DBUILD_TESTING=ON `
             -DCOMPUTER_CPP_BUILD_GUI=OFF `
+            -DCOMPUTER_CPP_BUNDLE_LUA=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build and test
         shell: pwsh
         run: |
-          cmake --build "$env:BUILD_DIR" --target all --config Release
-          ctest --test-dir "$env:BUILD_DIR" --build-config Release --output-on-failure
+          cmake --build "$env:BUILD_DIR" --target all --config Debug
+          ctest --test-dir "$env:BUILD_DIR" --build-config Debug --output-on-failure
 
       - name: Runtime smoke
         shell: pwsh

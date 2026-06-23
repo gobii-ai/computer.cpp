@@ -11,6 +11,11 @@ option(COMPUTER_CPP_CODE_SIGN_APP "Code sign the macOS ComputerCpp.app bundle af
 option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project targets" ON)
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
 option(COMPUTER_CPP_BUILD_GUI "Build the ComputerCpp desktop tray application when wxWidgets is available" ON)
+option(COMPUTER_CPP_BUNDLE_LUA "Copy a Lua executable beside Windows build and install artifacts" ON)
+
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
 
 function(computer_cpp_target_defaults target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
@@ -402,7 +407,7 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     endif()
 endif()
 
-if(WIN32)
+if(WIN32 AND COMPUTER_CPP_BUNDLE_LUA)
     find_program(COMPUTER_CPP_LUA_EXECUTABLE NAMES lua.exe lua lua5.4.exe lua5.4 lua5.3.exe lua5.3 luajit.exe luajit)
     if(COMPUTER_CPP_LUA_EXECUTABLE)
         add_custom_command(TARGET computer.cpp POST_BUILD

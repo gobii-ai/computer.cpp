@@ -36,8 +36,8 @@ bool IsExecutable(const fs::path& path) {
 #endif
 }
 
-std::vector<std::string> PathExtensions() {
 #if defined(_WIN32)
+std::vector<std::string> PathExtensions() {
     std::vector<std::string> extensions{""};
     if (const char* raw = std::getenv("PATHEXT")) {
         std::stringstream stream(raw);
@@ -50,9 +50,21 @@ std::vector<std::string> PathExtensions() {
     }
     extensions.push_back(".exe");
     return extensions;
-#else
-    return {""};
+}
 #endif
+
+std::vector<fs::path> WithPathExtensions(const fs::path& path) {
+    std::vector<fs::path> candidates{path};
+#if defined(_WIN32)
+    for (const auto& ext : PathExtensions()) {
+        if (!ext.empty()) {
+            fs::path candidate = path;
+            candidate += ext;
+            candidates.push_back(candidate);
+        }
+    }
+#endif
+    return candidates;
 }
 
 fs::path FindOnPath(const std::string& name) {
@@ -62,20 +74,11 @@ fs::path FindOnPath(const std::string& name) {
 #endif
     ) {
         fs::path path(name);
-        if (IsExecutable(path)) {
-            return path;
-        }
-#if defined(_WIN32)
-        if (!path.has_extension()) {
-            for (const auto& ext : PathExtensions()) {
-                fs::path candidate = path;
-                candidate += ext;
-                if (IsExecutable(candidate)) {
-                    return candidate;
-                }
+        for (const auto& candidate : WithPathExtensions(path)) {
+            if (IsExecutable(candidate)) {
+                return candidate;
             }
         }
-#endif
         return {};
     }
     const char* pathEnv = std::getenv("PATH");
@@ -94,15 +97,7 @@ fs::path FindOnPath(const std::string& name) {
         if (dir.empty()) {
             dir = ".";
         }
-        for (const auto& ext : PathExtensions()) {
-            fs::path candidate = fs::path(dir) / name;
-#if defined(_WIN32)
-            if (!candidate.has_extension()) {
-                candidate += ext;
-            }
-#else
-            (void)ext;
-#endif
+        for (const auto& candidate : WithPathExtensions(fs::path(dir) / name)) {
             if (IsExecutable(candidate)) {
                 return candidate;
             }
