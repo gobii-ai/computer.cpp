@@ -2055,9 +2055,11 @@ void TestConfigCliCanonicalFile() {
     assert(error.empty());
     assert(config.providers["router"].apiKey == "or-test-secret");
 
-    std::ifstream configFile(ComputerCpp::ConfigPath());
-    std::string toml((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
-    assert(toml.find("api_key = \"or-test-secret\"") != std::string::npos);
+    {
+        std::ifstream configFile(ComputerCpp::ConfigPath());
+        std::string toml((std::istreambuf_iterator<char>(configFile)), std::istreambuf_iterator<char>());
+        assert(toml.find("api_key = \"or-test-secret\"") != std::string::npos);
+    }
 
     auto show = RunConfigCommand({"config", "show"});
     assert(show.exitCode == 0);
