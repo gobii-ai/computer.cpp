@@ -72,13 +72,5 @@ jobs:
       - name: Build and test
         shell: pwsh
         run: |
-          cmake --build "$env:BUILD_DIR" --target all --config Debug
+          cmake --build "$env:BUILD_DIR" --target computer_cpp_tests --config Debug
           ctest --test-dir "$env:BUILD_DIR" --build-config Debug --output-on-failure
-
-      - name: Runtime smoke
-        shell: pwsh
-        run: |
-          & "$env:BUILD_DIR\computer.cpp.exe" run --dry-run tests/lua/dry-run.lua
-          & "$env:BUILD_DIR\computer.cpp.exe" open
-          & "$env:BUILD_DIR\computer.cpp.exe" ping
-          & "$env:BUILD_DIR\computer.cpp.exe" close

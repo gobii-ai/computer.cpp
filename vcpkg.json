@@ -9,7 +9,6 @@
         "ssl"
       ]
     },
-    "lua",
     "nlohmann-json",
     "sqlite3",
     "tomlplusplus",
@@ -20,6 +19,12 @@
       "description": "Build and package the ComputerCpp desktop tray application.",
       "dependencies": [
         "wxwidgets"
+      ]
+    },
+    "bundled-lua": {
+      "description": "Install Lua for release artifacts that bundle lua/bin/lua.exe.",
+      "dependencies": [
+        "lua"
       ]
     }
   }
