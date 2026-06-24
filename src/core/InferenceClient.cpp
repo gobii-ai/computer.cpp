@@ -121,6 +121,24 @@ json Ok(json data) {
     };
 }
 
+json TransportError(const InferenceConfig& config, const std::string& url, CURLcode code) {
+    std::string message = "llm_chat could not reach inference endpoint " + url +
+        " for profile '" + config.profile + "' (provider=" + config.provider +
+        ", model=" + config.model + "): " + curl_easy_strerror(code) +
+        ". Check your computer.cpp inference config and verify the base URL is running.";
+    auto error = Error(message, "curl_failed");
+    error["data"] = {
+        {"profile", config.profile},
+        {"provider", config.provider},
+        {"baseUrl", config.baseUrl},
+        {"url", url},
+        {"model", config.model},
+        {"curlCode", static_cast<int>(code)},
+        {"curlError", curl_easy_strerror(code)}
+    };
+    return error;
+}
+
 std::string Truncate(std::string value, size_t limit = 4000) {
     if (value.size() <= limit) {
         return value;
@@ -250,7 +268,7 @@ json ChatCompletion(const json& params) {
     curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &httpCode);
 
     if (code != CURLE_OK) {
-        return Error(curl_easy_strerror(code), "curl_failed");
+        return TransportError(config, url, code);
     }
     if (httpCode < 200 || httpCode >= 300) {
         auto error = Error("inference endpoint returned HTTP " + std::to_string(httpCode), "inference_http_error");
