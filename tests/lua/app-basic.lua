@@ -13,6 +13,7 @@ app:command("echo", {
     message = { type = "string", required = true, description = "Message to echo." },
     count = { type = "integer", default = 1, minimum = 1, maximum = 5, description = "Repeat count." },
     loud = { type = "boolean", default = false, description = "Mark the response as loud." },
+    apiKey = { type = "string", description = "Secret test input." },
   },
 
   output = {

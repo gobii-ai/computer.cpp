@@ -151,6 +151,57 @@ std::string NowIsoUtc() {
     return out.str();
 }
 
+bool RuntimeLoggingEnabled() {
+    const char* raw = std::getenv("COMPUTER_CPP_LOG");
+    if (raw == nullptr || *raw == '\0') {
+        return true;
+    }
+    std::string value = Trim(raw);
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value != "0" && value != "false" && value != "off" && value != "quiet";
+}
+
+std::string CompactLogValue(std::string value) {
+    for (char& ch : value) {
+        if (ch == '\n' || ch == '\r') {
+            ch = ' ';
+        }
+    }
+    if (value.size() > 160) {
+        value.resize(157);
+        value += "...";
+    }
+    return value;
+}
+
+void AppendRuntimeLog(
+    const std::string& category,
+    const std::string& message,
+    const std::map<std::string, std::string>& fields = {}
+) {
+    if (!RuntimeLoggingEnabled()) {
+        return;
+    }
+    const char* rawPath = std::getenv("COMPUTER_CPP_LOG_FILE");
+    if (rawPath == nullptr || *rawPath == '\0') {
+        return;
+    }
+    try {
+        std::ofstream log(rawPath, std::ios::app);
+        if (!log) {
+            return;
+        }
+        log << "[" << NowIsoUtc() << "] computer.cpp " << category << " " << message;
+        for (const auto& [key, value] : fields) {
+            log << " " << key << "=" << CompactLogValue(value);
+        }
+        log << "\n";
+    } catch (...) {
+    }
+}
+
 uint64_t Fnv1a64(const std::string& value) {
     uint64_t hash = 14695981039346656037ULL;
     for (unsigned char ch : value) {
@@ -1718,19 +1769,23 @@ bool HandleMcpJsonRpcRequest(
             return SendJsonRpcError(fd, 400, id, -32602, "Unknown tool: " + toolName);
         }
 
+        AppendRuntimeLog("server", "mcp_tool_start", {{"tool", toolName}});
         std::string error;
         auto payload = RunAppCommand(options, executablePath, serveOptions.appPath, toolName, arguments, std::nullopt, error);
         if (!payload) {
+            AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"error", error.empty() ? "tool execution failed" : error}});
             return SendJsonRpcError(fd, 500, id, -32603, error.empty() ? "tool execution failed" : error);
         }
         if (!payload->value("ok", false)) {
             const std::string code = payload->value("code", "operation_failed");
             const std::string messageText = payload->value("error", "operation failed");
+            AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"code", code}, {"error", messageText}});
             return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolErrorResult(code, messageText)));
         }
 
         const json data = payload->value("data", json::object());
         const json result = data.value("result", json::object());
+        AppendRuntimeLog("server", "mcp_tool_done", {{"tool", toolName}});
         return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolSuccessResult(result)));
     }
 
@@ -1812,19 +1867,27 @@ bool HandleHttpCommand(
     const std::string commandName = UrlDecode(request.path.substr(prefix.size()));
     const json commands = schema.value("commands", json::object());
     if (commandName.empty() || !commands.contains(commandName)) {
+        AppendRuntimeLog("server", "command_rejected", {{"command", commandName}, {"code", "unknown_command"}});
         return SendJsonResponse(fd, 404, HttpErrorBody("unknown_command", "unknown command: " + commandName));
     }
     json input;
     std::string error;
     if (!ParseJsonObjectBody(request, input, error)) {
+        AppendRuntimeLog("server", "command_rejected", {{"command", commandName}, {"code", "invalid_input"}, {"error", error}});
         return SendJsonResponse(fd, 400, HttpErrorBody("invalid_input", error));
     }
 
     if (QueryFlagTrue(request.query, "async")) {
+        AppendRuntimeLog("server", "command_async_start", {{"command", commandName}});
         auto operation = CreateAsyncOperation(options, executablePath, serveOptions.appPath, schema, commandName, input, error);
         if (!operation) {
+            AppendRuntimeLog("server", "command_async_failed", {{"command", commandName}, {"error", error}});
             return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
         }
+        AppendRuntimeLog("server", "command_async_created", {
+            {"command", commandName},
+            {"operation", operation->value("operation", "")}
+        });
         return SendJsonResponse(
             fd,
             202,
@@ -1832,19 +1895,23 @@ bool HandleHttpCommand(
             {{"Location", (*operation)["result_url"].get<std::string>()}, {"Retry-After", "2"}});
     }
 
+    AppendRuntimeLog("server", "command_start", {{"command", commandName}});
     auto payload = RunAppCommand(options, executablePath, serveOptions.appPath, commandName, input, std::nullopt, error);
     if (!payload) {
+        AppendRuntimeLog("server", "command_failed", {{"command", commandName}, {"code", "internal_error"}, {"error", error}});
         return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
     }
     if (!payload->value("ok", false)) {
         const std::string code = payload->value("code", "operation_failed");
         const json data = payload->value("data", json::object());
         const json details = data.is_object() ? data.value("error", json::object()) : json::object();
+        AppendRuntimeLog("server", "command_failed", {{"command", commandName}, {"code", code}, {"error", payload->value("error", "operation failed")}});
         return SendJsonResponse(
             fd,
             HttpStatusForErrorCode(code),
             HttpErrorBody(code, payload->value("error", "operation failed"), details));
     }
+    AppendRuntimeLog("server", "command_done", {{"command", commandName}});
     return SendJsonResponse(fd, 200, (*payload)["data"]["result"]);
 }
 
@@ -1942,12 +2009,14 @@ bool HandleHttpRequest(
     const HttpRequest& request
 ) {
     if (!OriginAllowed(request, serveOptions)) {
+        AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "origin_not_allowed"}});
         if (request.path == kMcpEndpointPath) {
             return SendJsonResponse(fd, 403, JsonRpcError(nullptr, -32000, "origin is not allowed"));
         }
         return SendJsonResponse(fd, 403, HttpErrorBody("permission_denied", "origin is not allowed"));
     }
     if (!Authorized(request, serveOptions)) {
+        AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "permission_denied"}});
         if (request.path == kMcpEndpointPath) {
             return SendJsonResponse(
                 fd,
@@ -1958,6 +2027,7 @@ bool HandleHttpRequest(
         return SendJsonResponse(fd, 401, HttpErrorBody("permission_denied", "missing or invalid bearer token"));
     }
     if (request.method == "POST" && request.path == "/shutdown") {
+        AppendRuntimeLog("server", "shutdown_requested");
         bool sent = SendJsonResponse(fd, 200, {{"ok", true}});
         gAppServeStopRequested = true;
         return sent;
@@ -1977,6 +2047,7 @@ bool HandleHttpRequest(
     if (StartsWith(request.path, "/operations/")) {
         return HandleHttpOperation(fd, appId, request);
     }
+    AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "not_found"}});
     return SendJsonResponse(fd, 404, HttpErrorBody("not_found", "unknown endpoint"));
 }
 
@@ -2130,6 +2201,10 @@ int RunHttpServer(
 #endif
     std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port
               << " (MCP endpoint: /mcp)\n";
+    AppendRuntimeLog("server", "listening", {
+        {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)},
+        {"app", fs::absolute(serveOptions.appPath).string()}
+    });
 
     if (serveOptions.trayStateFile.has_value()) {
         TrayAppServerState state;
@@ -2148,6 +2223,7 @@ int RunHttpServer(
         std::string stateError;
         if (!SaveTrayAppServerState(state, *serveOptions.trayStateFile, &stateError)) {
             std::cerr << "warning: " << stateError << "\n";
+            AppendRuntimeLog("server", "state_save_failed", {{"error", stateError}});
         }
     }
 
@@ -2163,6 +2239,7 @@ int RunHttpServer(
         HttpRequest request;
         std::string error;
         if (!ReadHttpRequest(clientFd, request, error)) {
+            AppendRuntimeLog("server", "request_rejected", {{"code", "invalid_input"}, {"error", error}});
             SendJsonResponse(clientFd, 400, HttpErrorBody("invalid_input", error));
         } else {
             HandleHttpRequest(clientFd, options, executablePath, serveOptions, schema, appId, request);
@@ -2188,6 +2265,9 @@ int RunHttpServer(
 #if defined(_WIN32)
     WSACleanup();
 #endif
+    AppendRuntimeLog("server", "stopped", {
+        {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)}
+    });
     return 0;
 #else
     (void)executablePath;
