@@ -1026,7 +1026,7 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
             {"scope", "desktop:local"},
             {"owner", "core-test"},
             {"purpose", "daemon-gate"},
-            {"ttlMs", 5000}
+            {"ttlMs", 60000}
         }}
     });
     assert(acquired["ok"] == true);
