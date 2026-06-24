@@ -229,7 +229,7 @@ std::filesystem::path ComputerCppCliHelperPath() {
 std::string NormalizeBindHost(std::string host) {
     host = ComputerCpp::Trim(host);
     if (host.empty()) {
-        return "127.0.0.1";
+        return "0.0.0.0";
     }
     return host == "localhost" ? "127.0.0.1" : host;
 }
@@ -444,6 +444,8 @@ std::vector<std::string> CompatibleListenHosts(const std::string& host) {
     std::vector<std::string> hosts{host};
     if (host == "127.0.0.1") {
         hosts.push_back("0.0.0.0");
+    } else if (host == "0.0.0.0") {
+        hosts.push_back("127.0.0.1");
     }
     return hosts;
 }
@@ -1707,7 +1709,7 @@ private:
     bool FlushServerFields() {
         std::string host = NormalizeBindHost(FieldValue(serverHost_));
         if (host.empty()) {
-            host = "127.0.0.1";
+            host = "0.0.0.0";
         }
         std::string basePortError;
         auto basePort = ParsePortField(serverBasePort_, "Base port", &basePortError);

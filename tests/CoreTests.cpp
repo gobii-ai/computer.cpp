@@ -59,12 +59,12 @@ void TestAppConfigServerRoundTrip() {
     std::string missingError;
     ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
     assert(missingError.empty());
-    assert(missing.server.host == "127.0.0.1");
+    assert(missing.server.host == "0.0.0.0");
     assert(missing.server.basePort == 8787);
     assert(missing.server.apps.empty());
 
     ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
-    assert(defaults.server.host == "127.0.0.1");
+    assert(defaults.server.host == "0.0.0.0");
     assert(defaults.server.basePort == 8787);
     assert(defaults.server.authToken.empty());
 

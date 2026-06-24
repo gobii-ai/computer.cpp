@@ -37,7 +37,7 @@ struct ServerAppConfig {
 };
 
 struct ServerConfig {
-    std::string host = "127.0.0.1";
+    std::string host = "0.0.0.0";
     int basePort = 8787;
     std::string authToken;
     std::vector<std::string> allowedOrigins;

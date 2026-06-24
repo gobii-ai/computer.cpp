@@ -24,7 +24,7 @@ Daemon:
                                       Run a semantic Lua app command
   app operation get|result|cancel <app.lua> <operation-id>
                                       Inspect async semantic app operations
-	  app serve <app.lua> [--listen 127.0.0.1:8787] [--auth-token-env ENV]
+	  app serve <app.lua> [--listen 0.0.0.0:8787] [--auth-token-env ENV]
 	          [--allowed-origin https://host]
 	                                      Serve a semantic Lua app over HTTP and MCP at /mcp
 	  config path                         Print user config.toml path

@@ -1130,7 +1130,7 @@ int HandleAppOperation(
 
 struct AppServeOptions {
     fs::path appPath;
-    std::string host = "127.0.0.1";
+    std::string host = "0.0.0.0";
     int port = 8787;
     std::string authToken;
     std::set<std::string> allowedOrigins;
