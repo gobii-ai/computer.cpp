@@ -694,12 +694,21 @@ bool WriteOperationRecord(const OperationPaths& paths, const json& record, std::
     return WriteJsonFile(paths.operationJson, record, error);
 }
 
-void MarkOperationFailed(const OperationPaths& paths, json record, std::string code, std::string message) {
+void MarkOperationFailed(
+    const OperationPaths& paths,
+    json record,
+    std::string code,
+    std::string message,
+    json details = json::object()
+) {
     const std::string now = NowIsoUtc();
     record["status"] = "failed";
     record["updated_at"] = now;
     record["finished_at"] = now;
     record["error"] = {{"code", std::move(code)}, {"message", std::move(message)}};
+    if (!details.empty()) {
+        record["error"]["details"] = std::move(details);
+    }
     std::string ignored;
     WriteJsonFile(paths.errorJson, record["error"], ignored);
     WriteOperationRecord(paths, record, ignored);
@@ -786,9 +795,13 @@ int RunStoredOperation(
     const std::string code = payload->value("code", "operation_failed");
     const std::string message = payload->value("error", "operation failed");
     const json data = payload->value("data", json::object());
+    const json details = data.is_object() ? data.value("error", json::object()) : json::object();
     WriteTraceJsonl(paths.traceJsonl, data.value("trace", json::array()), error);
     latest["status"] = code == "operation_cancelled" ? "cancelled" : "failed";
     latest["error"] = {{"code", code}, {"message", message}};
+    if (!details.empty()) {
+        latest["error"]["details"] = details;
+    }
     if (data.contains("progress") && data["progress"].is_array() && !data["progress"].empty()) {
         latest["progress"] = data["progress"].back();
     }
@@ -1825,7 +1838,12 @@ bool HandleHttpCommand(
     }
     if (!payload->value("ok", false)) {
         const std::string code = payload->value("code", "operation_failed");
-        return SendJsonResponse(fd, HttpStatusForErrorCode(code), HttpErrorBody(code, payload->value("error", "operation failed")));
+        const json data = payload->value("data", json::object());
+        const json details = data.is_object() ? data.value("error", json::object()) : json::object();
+        return SendJsonResponse(
+            fd,
+            HttpStatusForErrorCode(code),
+            HttpErrorBody(code, payload->value("error", "operation failed"), details));
     }
     return SendJsonResponse(fd, 200, (*payload)["data"]["result"]);
 }

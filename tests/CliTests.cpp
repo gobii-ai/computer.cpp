@@ -2223,6 +2223,31 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
     assert(data["invalid_args"]["reported"] == false);
 }
 
+void TestLuaAppErrorsAreUserFacing() {
+    if (SkipLuaTestIfUnavailable("TestLuaAppErrorsAreUserFacing")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-basic.lua";
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "fail";
+    options.vars["__ac_app_input_json"] = "{}";
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    assert(result.exitCode != 0);
+
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["ok"] == false);
+    assert(payload["code"] == "operation_failed");
+    std::string message = payload["error"].get<std::string>();
+    assert(message == "The screenshot shows a browser proxy authentication dialog, which blocks access to the LinkedIn page.");
+    assert(message.find("stack traceback") == std::string::npos);
+    assert(message.find(".lua:") == std::string::npos);
+    std::string raw = payload["data"]["error"]["raw"].get<std::string>();
+    assert(raw.find("stack traceback") != std::string::npos);
+}
+
 void TestLuaDesktopToolPixelRects() {
     if (SkipLuaTestIfUnavailable("TestLuaDesktopToolPixelRects")) {
         return;
@@ -2309,6 +2334,7 @@ void RunCliTests() {
     TestConfigCliCanonicalFile();
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
+    TestLuaAppErrorsAreUserFacing();
     TestLuaDesktopToolPixelRects();
 }
 

@@ -59,9 +59,6 @@ json RunWaitCommand(const json& params) {
     if (*stableMsParam < 0) {
         return Error("wait stableScreenMs must be non-negative", "invalid_wait");
     }
-    int timeoutMs = *timeoutMsParam;
-    int pollMs = *pollMsParam;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     auto frontmostParam = StringParam(params, "frontmost", "");
     if (!frontmostParam) {
         return Error("wait frontmost must be a string", "invalid_wait");
@@ -70,6 +67,12 @@ json RunWaitCommand(const json& params) {
     if (params.contains("frontmost") && IsBlank(frontmost)) {
         return Error("wait frontmost must be non-empty when provided", "invalid_wait");
     }
+    if (frontmost.empty() && *stableMsParam == 0) {
+        return Error("wait requires frontmost or stableScreenMs", "invalid_wait");
+    }
+    int timeoutMs = *timeoutMsParam;
+    int pollMs = *pollMsParam;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     int stableMs = *stableMsParam;
     std::string lastSignature;
     auto stableSince = std::chrono::steady_clock::now();

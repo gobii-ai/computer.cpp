@@ -1222,6 +1222,35 @@ local function handle_app_mode(app)
     return { ok = false, code = "invalid_app_mode", error = "unknown app mode: " .. tostring(mode) }
   end
 
+  local function app_error_message(raw_error)
+    if type(raw_error) == "table" then
+      local mt = getmetatable(raw_error)
+      if mt and mt.__tostring then
+        return tostring(raw_error)
+      end
+      return tostring(raw_error.message or raw_error.error or raw_error.code or "operation failed")
+    end
+    local text = tostring(raw_error or "")
+    text = text:gsub("\r\n", "\n")
+    local stack_start = text:find("\nstack traceback:", 1, true)
+    if stack_start then
+      text = text:sub(1, stack_start - 1)
+    end
+    local line = text:match("([^\n]*)") or text
+    while true do
+      local stripped = line:match("^.-%.lua:%d+:%s*(.+)$") or line:match("^%[string.-%]:%d+:%s*(.+)$")
+      if not stripped or stripped == line then
+        break
+      end
+      line = stripped
+    end
+    line = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if line == "" then
+      return "operation failed"
+    end
+    return line
+  end
+
   local command_name = tostring(context.vars.__ac_app_command or "")
   local command = app.commands[command_name]
   if not command then
@@ -1251,16 +1280,17 @@ local function handle_app_mode(app)
     return command.handler(ctx, input)
   end, debug.traceback)
   if not run_ok then
+    local message = app_error_message(result)
     log_line("app", "failed", {
       command = command_name,
       elapsed_ms = math.floor((os.clock() - started_at) * 1000),
-      error = tostring(result),
+      error = message,
     })
     return {
       ok = false,
       code = "operation_failed",
-      error = tostring(result),
-      data = { trace = trace, progress = ctx.progress_history },
+      error = message,
+      data = { trace = trace, progress = ctx.progress_history, error = { message = message, raw = tostring(result) } },
     }
   end
   if type(result) == "table" and result.__ac_status == "cancelled" then

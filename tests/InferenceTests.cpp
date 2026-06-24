@@ -51,6 +51,27 @@ void TestInferenceRejectsInvalidTimeout() {
     assert(error == "llm_chat requires integer timeoutMs");
 }
 
+void TestInferenceTransportErrorIncludesEndpointContext() {
+    auto response = ComputerCpp::Inference::ChatCompletion({
+        {"profile", "main"},
+        {"baseUrl", "http://127.0.0.1:9/v1"},
+        {"model", "unit-model"},
+        {"apiKey", ""},
+        {"timeoutMs", 250},
+        {"messages", nlohmann::json::array({
+            {{"role", "user"}, {"content", "ping"}}
+        })}
+    });
+    assert(response["ok"] == false);
+    assert(response["code"] == "curl_failed");
+    std::string error = response["error"].get<std::string>();
+    assert(error.find("could not reach inference endpoint http://127.0.0.1:9/v1/chat/completions") != std::string::npos);
+    assert(error.find("profile 'main'") != std::string::npos);
+    assert(error.find("model=unit-model") != std::string::npos);
+    assert(response["data"]["baseUrl"] == "http://127.0.0.1:9/v1");
+    assert(response["data"]["url"] == "http://127.0.0.1:9/v1/chat/completions");
+}
+
 void TestInferenceLocalBaseUrlPolicy() {
     using ComputerCpp::Inference::BaseUrlAllowsMissingApiKey;
 
@@ -218,6 +239,7 @@ namespace ComputerCpp::Tests {
 void RunInferenceTests() {
     TestInferenceRequiresKeyForMainFabric();
     TestInferenceRejectsInvalidTimeout();
+    TestInferenceTransportErrorIncludesEndpointContext();
     TestInferenceLocalBaseUrlPolicy();
     TestInferenceConfigFileProfiles();
     TestInferenceRequestBodyNormalizesImages();

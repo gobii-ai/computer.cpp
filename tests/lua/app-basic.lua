@@ -58,4 +58,18 @@ app:command("slow", {
   end,
 })
 
+app:command("fail", {
+  description = "Raise a clean test error",
+
+  input = {},
+
+  output = {
+    done = { type = "boolean" },
+  },
+
+  handler = function()
+    error("The screenshot shows a browser proxy authentication dialog, which blocks access to the LinkedIn page.", 2)
+  end,
+})
+
 return app

@@ -1026,7 +1026,7 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
             {"scope", "desktop:local"},
             {"owner", "core-test"},
             {"purpose", "daemon-gate"},
-            {"ttlMs", 5000}
+            {"ttlMs", 60000}
         }}
     });
     assert(acquired["ok"] == true);
@@ -2458,6 +2458,16 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
     });
     assert(invalidWaitTimeoutRange["ok"] == false);
     assert(invalidWaitTimeoutRange["code"] == "invalid_wait");
+
+    auto invalidWaitNoPredicate = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"controlSession", token},
+            {"timeoutMs", 1}
+        }}
+    });
+    assert(invalidWaitNoPredicate["ok"] == false);
+    assert(invalidWaitNoPredicate["code"] == "invalid_wait");
 
     auto invalidWaitPollRange = ComputerCpp::HandleDaemonRequest("unit", {
         {"method", "wait"},
