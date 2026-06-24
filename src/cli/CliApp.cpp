@@ -795,7 +795,7 @@ int RunStoredOperation(
     const std::string code = payload->value("code", "operation_failed");
     const std::string message = payload->value("error", "operation failed");
     const json data = payload->value("data", json::object());
-    const json details = data.value("error", json::object());
+    const json details = data.is_object() ? data.value("error", json::object()) : json::object();
     WriteTraceJsonl(paths.traceJsonl, data.value("trace", json::array()), error);
     latest["status"] = code == "operation_cancelled" ? "cancelled" : "failed";
     latest["error"] = {{"code", code}, {"message", message}};
@@ -1839,10 +1839,11 @@ bool HandleHttpCommand(
     if (!payload->value("ok", false)) {
         const std::string code = payload->value("code", "operation_failed");
         const json data = payload->value("data", json::object());
+        const json details = data.is_object() ? data.value("error", json::object()) : json::object();
         return SendJsonResponse(
             fd,
             HttpStatusForErrorCode(code),
-            HttpErrorBody(code, payload->value("error", "operation failed"), data.value("error", json::object())));
+            HttpErrorBody(code, payload->value("error", "operation failed"), details));
     }
     return SendJsonResponse(fd, 200, (*payload)["data"]["result"]);
 }

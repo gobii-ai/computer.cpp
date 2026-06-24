@@ -1224,6 +1224,10 @@ local function handle_app_mode(app)
 
   local function app_error_message(raw_error)
     if type(raw_error) == "table" then
+      local mt = getmetatable(raw_error)
+      if mt and mt.__tostring then
+        return tostring(raw_error)
+      end
       return tostring(raw_error.message or raw_error.error or raw_error.code or "operation failed")
     end
     local text = tostring(raw_error or "")
