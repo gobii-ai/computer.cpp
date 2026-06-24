@@ -173,7 +173,17 @@ std::string CompactLogValue(std::string value) {
         value.resize(157);
         value += "...";
     }
-    return value;
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped += '"';
+    for (char ch : value) {
+        if (ch == '"' || ch == '\\') {
+            escaped += '\\';
+        }
+        escaped += ch;
+    }
+    escaped += '"';
+    return escaped;
 }
 
 void AppendRuntimeLog(
@@ -189,7 +199,11 @@ void AppendRuntimeLog(
         return;
     }
     try {
-        std::ofstream log(rawPath, std::ios::app);
+        fs::path logPath(rawPath);
+        if (!logPath.parent_path().empty()) {
+            fs::create_directories(logPath.parent_path());
+        }
+        std::ofstream log(logPath, std::ios::app);
         if (!log) {
             return;
         }

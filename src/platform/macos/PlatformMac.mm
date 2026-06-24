@@ -202,7 +202,7 @@ std::string PermissionRuntimeSummary() {
 
 void AppendPermissionTrace(const std::string& event) {
     try {
-        std::filesystem::path logPath = ComputerCpp::AppDataDir() / "computer.cpp.log";
+        std::filesystem::path logPath = ComputerCpp::AppLogPath();
         std::filesystem::create_directories(logPath.parent_path());
         std::ofstream log(logPath, std::ios::app);
         log << PermissionTraceTimestamp() << " computer.cpp permissions platform event=" << event

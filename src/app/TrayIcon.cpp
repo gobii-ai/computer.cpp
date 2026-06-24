@@ -767,10 +767,6 @@ std::string PermissionStatusSummary(const Platform::PermissionStatus& status) {
         " screen_capture=" + BoolString(status.screenCapture);
 }
 
-std::filesystem::path AppLogPath() {
-    return ComputerCpp::AppDataDir() / "computer.cpp.log";
-}
-
 std::tm PermissionTraceLocalTime(std::time_t time) {
     std::tm local{};
 #ifdef _WIN32
@@ -801,8 +797,8 @@ std::string PermissionTraceTimestamp() {
 
 void AppendAppLog(const std::string& category, const std::string& event) {
     try {
-        std::filesystem::create_directories(AppLogPath().parent_path());
-        std::ofstream log(AppLogPath(), std::ios::app);
+        std::filesystem::create_directories(ComputerCpp::AppLogPath().parent_path());
+        std::ofstream log(ComputerCpp::AppLogPath(), std::ios::app);
         log << PermissionTraceTimestamp() << " computer.cpp " << category
             << " pid=" << PermissionTraceProcessId()
             << " event=" << event << "\n";
@@ -2707,7 +2703,7 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
 }
 
 void TrayIcon::OnShowLogs(wxCommandEvent&) {
-    const std::filesystem::path logPath = AppLogPath();
+    const std::filesystem::path logPath = ComputerCpp::AppLogPath();
     {
         std::filesystem::create_directories(logPath.parent_path());
         std::ofstream log(logPath, std::ios::app);
@@ -2856,7 +2852,7 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
     wxString previousLogFile;
     const bool hadPreviousLogFile = wxGetEnv("COMPUTER_CPP_LOG_FILE", &previousLogFile);
     wxSetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", wxString::FromUTF8(config.server.authToken));
-    wxSetEnv("COMPUTER_CPP_LOG_FILE", wxString::FromUTF8(AppLogPath().string()));
+    wxSetEnv("COMPUTER_CPP_LOG_FILE", wxString::FromUTF8(ComputerCpp::AppLogPath().string()));
     AppendAppLog("server", "start_requested app=" + displayName + " listen=" + listen);
 
     serverProcess_ = new wxProcess(this, ID_SERVER_PROCESS);
