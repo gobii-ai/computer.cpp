@@ -6,6 +6,7 @@
 namespace ComputerCpp {
 
 std::filesystem::path AppDataDir();
+std::filesystem::path AppLogPath();
 std::filesystem::path ConfigDir();
 std::filesystem::path ConfigPath();
 std::filesystem::path SessionDir(const std::string& session);

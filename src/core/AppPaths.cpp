@@ -70,6 +70,10 @@ fs::path AppDataDir() {
     return path;
 }
 
+fs::path AppLogPath() {
+    return AppDataDir() / "computer.cpp.log";
+}
+
 fs::path ConfigDir() {
     if (HasHomeOverride()) {
         return AppDataDir();

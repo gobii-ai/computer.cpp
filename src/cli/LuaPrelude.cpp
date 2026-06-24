@@ -387,6 +387,7 @@ local function logging_enabled()
 end
 
 local log_enabled = logging_enabled()
+local log_file_path = os.getenv("COMPUTER_CPP_LOG_FILE")
 
 local function short_string(value, limit)
   limit = limit or 160
@@ -460,8 +461,16 @@ local function log_line(kind, message, fields)
     end
   end
   local suffix = #parts > 0 and ("  " .. table.concat(parts, " ")) or ""
-  io.stderr:write(string.format("[%s] computer.cpp %-9s %s%s\n", os.date("%H:%M:%S"), tostring(kind), tostring(message), suffix))
+  local line = string.format("[%s] computer.cpp %-9s %s%s\n", os.date("%H:%M:%S"), tostring(kind), tostring(message), suffix)
+  io.stderr:write(line)
   io.stderr:flush()
+  if log_file_path and log_file_path ~= "" then
+    local file = io.open(log_file_path, "a")
+    if file then
+      file:write(line)
+      file:close()
+    end
+  end
 end
 
 local function usage_fields(usage)

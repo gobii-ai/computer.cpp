@@ -767,10 +767,6 @@ std::string PermissionStatusSummary(const Platform::PermissionStatus& status) {
         " screen_capture=" + BoolString(status.screenCapture);
 }
 
-std::filesystem::path PermissionTraceLogPath() {
-    return ComputerCpp::AppDataDir() / "permission-onboarding.log";
-}
-
 std::tm PermissionTraceLocalTime(std::time_t time) {
     std::tm local{};
 #ifdef _WIN32
@@ -799,13 +795,19 @@ std::string PermissionTraceTimestamp() {
     return out.str();
 }
 
-void AppendPermissionTrace(const std::string& event) {
+void AppendAppLog(const std::string& category, const std::string& event) {
     try {
-        std::ofstream log(PermissionTraceLogPath(), std::ios::app);
-        log << PermissionTraceTimestamp() << " app pid=" << PermissionTraceProcessId()
+        std::filesystem::create_directories(ComputerCpp::AppLogPath().parent_path());
+        std::ofstream log(ComputerCpp::AppLogPath(), std::ios::app);
+        log << PermissionTraceTimestamp() << " computer.cpp " << category
+            << " pid=" << PermissionTraceProcessId()
             << " event=" << event << "\n";
     } catch (...) {
     }
+}
+
+void AppendPermissionTrace(const std::string& event) {
+    AppendAppLog("permissions", event);
 }
 
 std::filesystem::path PermissionSetupMarkerPath() {
@@ -2675,9 +2677,7 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     advanced->Append(ID_STATE, "Show State");
     advanced->Append(ID_TEST_SCREENSHOT, "Test Screenshot");
     advanced->Append(ID_TEST_MOUSE, "Test Mouse Move");
-#ifdef __APPLE__
     advanced->Append(ID_SHOW_LOGS, "Show Logs");
-#endif
     menu->AppendSubMenu(advanced, "Advanced");
 
     menu->AppendSeparator();
@@ -2703,11 +2703,12 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
 }
 
 void TrayIcon::OnShowLogs(wxCommandEvent&) {
-    const std::filesystem::path logPath = PermissionTraceLogPath();
+    const std::filesystem::path logPath = ComputerCpp::AppLogPath();
     {
+        std::filesystem::create_directories(logPath.parent_path());
         std::ofstream log(logPath, std::ios::app);
     }
-    AppendPermissionTrace("show_logs_requested path=" + logPath.string());
+    AppendAppLog("tray", "show_logs_requested path=" + logPath.string());
 
     bool opened = false;
 #ifdef __APPLE__
@@ -2848,7 +2849,11 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
 
     wxString previousToken;
     const bool hadPreviousToken = wxGetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", &previousToken);
+    wxString previousLogFile;
+    const bool hadPreviousLogFile = wxGetEnv("COMPUTER_CPP_LOG_FILE", &previousLogFile);
     wxSetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN", wxString::FromUTF8(config.server.authToken));
+    wxSetEnv("COMPUTER_CPP_LOG_FILE", wxString::FromUTF8(ComputerCpp::AppLogPath().string()));
+    AppendAppLog("server", "start_requested app=" + displayName + " listen=" + listen);
 
     serverProcess_ = new wxProcess(this, ID_SERVER_PROCESS);
     long pid = wxExecute(argv.data(), wxEXEC_ASYNC, serverProcess_);
@@ -2857,10 +2862,16 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
     } else {
         wxUnsetEnv("COMPUTER_CPP_TRAY_SERVER_TOKEN");
     }
+    if (hadPreviousLogFile) {
+        wxSetEnv("COMPUTER_CPP_LOG_FILE", previousLogFile);
+    } else {
+        wxUnsetEnv("COMPUTER_CPP_LOG_FILE");
+    }
 
     if (pid == 0) {
         delete serverProcess_;
         serverProcess_ = nullptr;
+        AppendAppLog("server", "start_failed app=" + displayName + " listen=" + listen);
         wxMessageBox("Failed to start app server.", "ComputerCpp Server", wxOK | wxICON_ERROR);
         return;
     }
@@ -2881,12 +2892,14 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
     startedState.displayName = displayName;
     if (!WaitForServerHealth(startedState, config.server.authToken)) {
         StopServerProcess(false);
+        AppendAppLog("server", "health_failed app=" + displayName + " listen=" + listen + " pid=" + std::to_string(pid));
         wxMessageBox(
             "The server process started but did not become healthy. Check that the Lua runtime is bundled and the Lua app can load.",
             "ComputerCpp Server",
             wxOK | wxICON_ERROR);
         return;
     }
+    AppendAppLog("server", "started app=" + displayName + " url=" + serverUrl_ + " pid=" + std::to_string(pid));
     wxMessageBox(
         "Started " + serverAppDisplayName_ + " at " + serverUrl_,
         "ComputerCpp Server",
@@ -2984,6 +2997,7 @@ bool TrayIcon::TryAdoptConfiguredServer(const ServerConfig& server, const Server
         serverUrl_ = state->url;
         serverAppDisplayName_ = state->displayName;
         serverProcess_ = nullptr;
+        AppendAppLog("server", "adopted app=" + serverAppDisplayName_ + " url=" + serverUrl_ + " pid=" + std::to_string(serverPid_));
         return true;
     }
     return false;
@@ -3025,6 +3039,7 @@ bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
         if (!currentSessionChild && !VerifyAdoptedServerBeforeStop(pid, notifyOnFailure)) {
             return false;
         }
+        AppendAppLog("server", "stop_requested pid=" + std::to_string(pid) + " url=" + serverUrl_);
         bool shutdownRequested = false;
         std::string configError;
         AppConfig config = LoadAppConfig(&configError);
@@ -3048,10 +3063,12 @@ bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
                     "ComputerCpp Server",
                     wxOK | wxICON_ERROR);
             }
+            AppendAppLog("server", "stop_failed pid=" + std::to_string(pid) + " url=" + serverUrl_);
             return false;
         }
         std::string stateError;
         RemoveTrayAppServerStateForPid(TrayAppServerStatePath(), pid, &stateError);
+        AppendAppLog("server", "stopped pid=" + std::to_string(pid));
     }
     ClearServerProcessState(true);
     return true;

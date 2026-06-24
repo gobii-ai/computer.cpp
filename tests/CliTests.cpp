@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -97,6 +98,14 @@ bool SkipLuaTestIfUnavailable(const char* testName) {
     }
     std::cout << "[skip] " << testName << ": Lua interpreter not available" << std::endl;
     return true;
+}
+
+std::string ReadTextFile(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+        return {};
+    }
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
 void AssertLuaRunSucceeded(const ComputerCpp::LuaRunResult& result) {
@@ -2248,6 +2257,60 @@ void TestLuaAppErrorsAreUserFacing() {
     assert(raw.find("stack traceback") != std::string::npos);
 }
 
+void TestLuaRuntimeWritesConfiguredLogFile() {
+    if (SkipLuaTestIfUnavailable("TestLuaRuntimeWritesConfiguredLogFile")) {
+        return;
+    }
+
+    ScopedEnvVar logFileEnv("COMPUTER_CPP_LOG_FILE");
+    ScopedEnvVar logFlagEnv("COMPUTER_CPP_LOG");
+    std::filesystem::path logPath = ComputerCpp::Tests::MakeTempHome() / "computer.cpp.log";
+    logFileEnv.Set(logPath.string());
+    logFlagEnv.Set("1");
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-basic.lua";
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "echo";
+    options.vars["__ac_app_input_json"] = nlohmann::json({
+        {"message", "hello"},
+        {"apiKey", "super-secret"}
+    }).dump();
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+
+    std::string log = ReadTextFile(logPath);
+    assert(log.find("computer.cpp app") != std::string::npos);
+    assert(log.find("computer.cpp progress") != std::string::npos);
+    assert(log.find("start") != std::string::npos);
+    assert(log.find("done") != std::string::npos);
+    assert(log.find("<redacted>") != std::string::npos);
+    assert(log.find("super-secret") == std::string::npos);
+}
+
+void TestLuaRuntimeLogFileHonorsQuietFlag() {
+    if (SkipLuaTestIfUnavailable("TestLuaRuntimeLogFileHonorsQuietFlag")) {
+        return;
+    }
+
+    ScopedEnvVar logFileEnv("COMPUTER_CPP_LOG_FILE");
+    ScopedEnvVar logFlagEnv("COMPUTER_CPP_LOG");
+    std::filesystem::path logPath = ComputerCpp::Tests::MakeTempHome() / "computer.cpp.log";
+    logFileEnv.Set(logPath.string());
+    logFlagEnv.Set("off");
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-basic.lua";
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "echo";
+    options.vars["__ac_app_input_json"] = nlohmann::json({{"message", "hello"}}).dump();
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    assert(ReadTextFile(logPath).empty());
+}
+
 void TestLuaDesktopToolPixelRects() {
     if (SkipLuaTestIfUnavailable("TestLuaDesktopToolPixelRects")) {
         return;
@@ -2335,6 +2398,8 @@ void RunCliTests() {
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestLuaAppErrorsAreUserFacing();
+    TestLuaRuntimeWritesConfiguredLogFile();
+    TestLuaRuntimeLogFileHonorsQuietFlag();
     TestLuaDesktopToolPixelRects();
 }
 
