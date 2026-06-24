@@ -271,7 +271,13 @@ std::string HealthConnectHost(const std::string& host) {
     return normalized == "0.0.0.0" ? "127.0.0.1" : normalized;
 }
 
-bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToken) {
+bool HttpServerRequestOk(
+    const TrayAppServerState& state,
+    const std::string& bearerToken,
+    const std::string& method,
+    const std::string& path,
+    int expectedStatus
+) {
 #if defined(__unix__) || defined(__APPLE__)
     if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
         return false;
@@ -300,8 +306,9 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
     }
 
     std::string request =
-        "GET /health HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
+        method + " " + path + " HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
         "\r\nAuthorization: Bearer " + bearerToken +
+        "\r\nContent-Length: 0" +
         "\r\nConnection: close\r\n\r\n";
     const char* cursor = request.data();
     size_t remaining = request.size();
@@ -323,7 +330,9 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
     }
     buffer[read] = '\0';
     std::string response(buffer);
-    return response.rfind("HTTP/1.1 200", 0) == 0 || response.rfind("HTTP/1.0 200", 0) == 0;
+    std::string expected11 = "HTTP/1.1 " + std::to_string(expectedStatus);
+    std::string expected10 = "HTTP/1.0 " + std::to_string(expectedStatus);
+    return response.rfind(expected11, 0) == 0 || response.rfind(expected10, 0) == 0;
 #else
     if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
         return false;
@@ -338,8 +347,9 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
     }
     std::string host = HealthConnectHost(state.host);
     std::string request =
-        "GET /health HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
+        method + " " + path + " HTTP/1.1\r\nHost: " + host + ":" + std::to_string(state.port) +
         "\r\nAuthorization: Bearer " + bearerToken +
+        "\r\nContent-Length: 0" +
         "\r\nConnection: close\r\n\r\n";
     socket.Write(request.data(), request.size());
     if (socket.Error()) {
@@ -354,8 +364,18 @@ bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToke
         return false;
     }
     std::string response(buffer, read);
-    return response.rfind("HTTP/1.1 200", 0) == 0 || response.rfind("HTTP/1.0 200", 0) == 0;
+    std::string expected11 = "HTTP/1.1 " + std::to_string(expectedStatus);
+    std::string expected10 = "HTTP/1.0 " + std::to_string(expectedStatus);
+    return response.rfind(expected11, 0) == 0 || response.rfind(expected10, 0) == 0;
 #endif
+}
+
+bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToken) {
+    return HttpServerRequestOk(state, bearerToken, "GET", "/health", 200);
+}
+
+bool RequestServerShutdown(const TrayAppServerState& state, const std::string& bearerToken) {
+    return HttpServerRequestOk(state, bearerToken, "POST", "/shutdown", 200);
 }
 
 std::string ProcessCommandLine(long pid) {
@@ -3005,7 +3025,17 @@ bool TrayIcon::StopServerProcess(bool notifyOnFailure) {
         if (!currentSessionChild && !VerifyAdoptedServerBeforeStop(pid, notifyOnFailure)) {
             return false;
         }
-        SignalServerProcess(pid, wxSIGTERM, currentSessionChild);
+        bool shutdownRequested = false;
+        std::string configError;
+        AppConfig config = LoadAppConfig(&configError);
+        std::string loadStateError;
+        auto state = LoadTrayAppServerState(TrayAppServerStatePath(), &loadStateError);
+        if (configError.empty() && state && state->pid == pid) {
+            shutdownRequested = RequestServerShutdown(*state, config.server.authToken);
+        }
+        if (!shutdownRequested) {
+            SignalServerProcess(pid, wxSIGTERM, currentSessionChild);
+        }
         bool stopped = WaitForProcessExit(pid, currentSessionChild);
         if (!stopped) {
             SignalServerProcess(pid, wxSIGKILL, currentSessionChild);

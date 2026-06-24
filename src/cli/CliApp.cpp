@@ -109,6 +109,8 @@ private:
     Handler previousTerm_ = nullptr;
     Handler previousInt_ = nullptr;
 };
+#else
+bool gAppServeStopRequested = false;
 #endif
 
 struct AppRunArgs {
@@ -1937,6 +1939,11 @@ bool HandleHttpRequest(
         }
         return SendJsonResponse(fd, 401, HttpErrorBody("permission_denied", "missing or invalid bearer token"));
     }
+    if (request.method == "POST" && request.path == "/shutdown") {
+        bool sent = SendJsonResponse(fd, 200, {{"ok", true}});
+        gAppServeStopRequested = true;
+        return sent;
+    }
     if (request.method == "GET" && request.path == "/health") {
         return SendJsonResponse(fd, 200, {{"ok", true}});
     }
@@ -2046,6 +2053,7 @@ int RunHttpServer(
     const std::string& appId
 ) {
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
+    gAppServeStopRequested = false;
 #if defined(_WIN32)
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -2125,13 +2133,7 @@ int RunHttpServer(
         }
     }
 
-    while (
-#if defined(__unix__) || defined(__APPLE__)
-        !gAppServeStopRequested
-#else
-        true
-#endif
-    ) {
+    while (!gAppServeStopRequested) {
         AppSocket clientFd = ::accept(serverFd, nullptr, nullptr);
         if (clientFd == kInvalidSocket) {
 #if defined(__unix__) || defined(__APPLE__)
