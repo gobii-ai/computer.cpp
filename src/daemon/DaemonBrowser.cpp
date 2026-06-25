@@ -10,7 +10,6 @@
 #include <array>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -29,12 +28,16 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#include "computer_cpp/WindowsUtil.h"
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <spawn.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char** environ;
 #endif
 
 using json = nlohmann::json;
@@ -150,44 +153,37 @@ bool ProbeCdp(const std::string& host, int port) {
     return !HttpGet(CdpBaseUrl(host, port) + "/json/version", 500).empty();
 }
 
-std::string ShellArg(std::string_view value) {
-#if defined(_WIN32)
-    std::string out = "\"";
-    for (char ch : value) {
-        if (ch == '"' || ch == '\\') {
-            out.push_back('\\');
-        }
-        out.push_back(ch);
-    }
-    out.push_back('"');
-    return out;
-#else
-    std::string out = "'";
-    for (char ch : value) {
-        if (ch == '\'') {
-            out += "'\\''";
-        } else {
-            out.push_back(ch);
-        }
-    }
-    out.push_back('\'');
-    return out;
-#endif
-}
-
 bool LaunchBrowserForCdp(const std::string& browser, int port) {
     const std::string flag = "--remote-debugging-port=" + std::to_string(port);
 #if defined(__APPLE__)
-    const std::string command = "/usr/bin/open -a " + ShellArg(browser) + " --args " + flag + " >/dev/null 2>&1";
-    return std::system(command.c_str()) == 0;
+    pid_t pid = 0;
+    std::string app = browser.empty() ? "Google Chrome" : browser;
+    char* const argv[] = {
+        const_cast<char*>("/usr/bin/open"),
+        const_cast<char*>("-a"),
+        app.data(),
+        const_cast<char*>("--args"),
+        const_cast<char*>(flag.c_str()),
+        nullptr
+    };
+    int rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr, argv, environ);
+    if (rc != 0) {
+        return false;
+    }
+    int status = 0;
+    return waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #elif defined(_WIN32)
     std::string chosen = browser.empty() ? "chrome" : browser;
-    std::string command = "cmd /c start \"\" " + ShellArg(chosen) + " " + flag + " >NUL 2>NUL";
-    return std::system(command.c_str()) == 0;
+    return Windows::LaunchDetached({chosen, flag});
 #else
     std::string chosen = browser.empty() ? "google-chrome" : browser;
-    std::string command = ShellArg(chosen) + " " + flag + " >/dev/null 2>&1 &";
-    return std::system(command.c_str()) == 0;
+    pid_t pid = 0;
+    char* const argv[] = {
+        chosen.data(),
+        const_cast<char*>(flag.c_str()),
+        nullptr
+    };
+    return posix_spawnp(&pid, chosen.c_str(), nullptr, nullptr, argv, environ) == 0;
 #endif
 }
 
@@ -198,7 +194,9 @@ bool EnsureCdp(const std::string& browser, const std::string& host, int port, bo
     if (!launch) {
         return false;
     }
-    LaunchBrowserForCdp(browser, port);
+    if (!LaunchBrowserForCdp(browser, port)) {
+        return false;
+    }
     for (int i = 0; i < 12; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         if (ProbeCdp(host, port)) {
@@ -275,7 +273,24 @@ std::optional<std::string> ChooseTargetWebSocket(
     return linkedinCandidate ? linkedinCandidate : firstPage;
 }
 
-SocketOwner ConnectTcp(const std::string& host, int port) {
+bool SetSocketTimeouts(SocketHandle socket, int timeoutMs) {
+    if (timeoutMs <= 0) {
+        return true;
+    }
+#if defined(_WIN32)
+    DWORD timeout = static_cast<DWORD>(timeoutMs);
+    return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == 0 &&
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == 0;
+#else
+    timeval tv {};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
+        setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
+SocketOwner ConnectTcp(const std::string& host, int port, int timeoutMs) {
     SocketOwner owner;
     if (!EnsureSocketsInitialized()) {
         return owner;
@@ -291,6 +306,10 @@ SocketOwner ConnectTcp(const std::string& host, int port) {
     for (addrinfo* item = results; item != nullptr; item = item->ai_next) {
         SocketHandle candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
         if (candidate == kInvalidSocket) {
+            continue;
+        }
+        if (!SetSocketTimeouts(candidate, timeoutMs)) {
+            CloseSocket(candidate);
             continue;
         }
         if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
@@ -431,12 +450,17 @@ bool WebSocketUpgrade(SocketHandle socket, const ParsedWebSocketUrl& url) {
         return false;
     }
     std::string response;
-    std::array<uint8_t, 1> ch {};
+    std::array<uint8_t, 1024> buffer {};
     while (response.find("\r\n\r\n") == std::string::npos && response.size() < 8192) {
-        if (!RecvExact(socket, ch.data(), 1)) {
+#if defined(_WIN32)
+        int n = recv(socket, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
+#else
+        ssize_t n = recv(socket, buffer.data(), buffer.size(), 0);
+#endif
+        if (n <= 0) {
             return false;
         }
-        response.push_back(static_cast<char>(ch[0]));
+        response.append(reinterpret_cast<const char*>(buffer.data()), static_cast<size_t>(n));
     }
     return response.rfind("HTTP/1.1 101", 0) == 0 || response.rfind("HTTP/1.0 101", 0) == 0;
 }
@@ -449,7 +473,7 @@ std::string ToLowerAscii(std::string value) {
 }
 
 bool LooksMutatingScript(const std::string& script) {
-    const std::string lower = ToLowerAscii(script);
+    std::string lower = ToLowerAscii(script);
     const std::array<std::string_view, 11> blocked = {
         ".click(",
         "dispatchevent",
@@ -468,12 +492,12 @@ bool LooksMutatingScript(const std::string& script) {
             return true;
         }
     }
+    lower.erase(std::remove_if(lower.begin(), lower.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), lower.end());
     return lower.find(".value=") != std::string::npos ||
-        lower.find(".value =") != std::string::npos ||
         lower.find(".checked=") != std::string::npos ||
-        lower.find(".checked =") != std::string::npos ||
-        lower.find(".selected=") != std::string::npos ||
-        lower.find(".selected =") != std::string::npos;
+        lower.find(".selected=") != std::string::npos;
 }
 
 json CdpEvaluate(
@@ -484,8 +508,7 @@ json CdpEvaluate(
     const std::string& script,
     int timeoutMs
 ) {
-    (void)timeoutMs;
-    std::string targetsBody = HttpGet(CdpBaseUrl(host, port) + "/json/list", 1000);
+    std::string targetsBody = HttpGet(CdpBaseUrl(host, port) + "/json/list", timeoutMs);
     if (targetsBody.empty()) {
         return Error("Chrome DevTools endpoint is not available on " + host + ":" + std::to_string(port), "browser_debug_unavailable");
     }
@@ -501,7 +524,7 @@ json CdpEvaluate(
     if (!parsedUrl) {
         return Error("Chrome DevTools target returned an unsupported WebSocket URL", "browser_debug_invalid_response");
     }
-    auto socket = ConnectTcp(parsedUrl->host, parsedUrl->port);
+    auto socket = ConnectTcp(parsedUrl->host, parsedUrl->port, timeoutMs);
     if (!socket.valid()) {
         return Error("could not connect to Chrome DevTools WebSocket", "browser_debug_unavailable");
     }
