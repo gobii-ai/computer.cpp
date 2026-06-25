@@ -210,6 +210,16 @@ void TestDaemonDispatch() {
     });
     assert(whitespaceMutatingBrowserEval["ok"] == false);
     assert(whitespaceMutatingBrowserEval["code"] == "invalid_browser_eval");
+
+    auto browserEvalWithControlMetadata = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "browser_eval"},
+        {"params", {
+            {"script", "document.title"},
+            {"launch", false},
+            {"controlScope", "desktop:local"}
+        }}
+    });
+    assert(browserEvalWithControlMetadata["code"] != "invalid_browser_eval");
     assert(batchSchema.find("requested, executed, failed") != std::string::npos);
     auto targetSchema = schema["data"]["target"].dump();
     assert(targetSchema.find("rect:left,top,right,bottom") != std::string::npos);

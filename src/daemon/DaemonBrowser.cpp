@@ -591,7 +591,10 @@ json RunBrowserEvalCommand(const json& params) {
             "port",
             "launch",
             "timeoutMs",
-            "readOnly"
+            "readOnly",
+            "controlScope",
+            "controlSession",
+            "controlSessionToken"
         })) {
         return Error("unknown browser_eval parameter: " + *unknown, "invalid_browser_eval");
     }
