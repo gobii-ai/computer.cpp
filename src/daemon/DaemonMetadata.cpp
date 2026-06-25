@@ -26,6 +26,7 @@ json CapabilitiesJson() {
             "target.find", "target.explain", "get", "click", "click.multi", "click.motion", "click.timing", "click.hover-safe", "click.park", "mouse.click", "mouse.click.motion", "mouse.move", "mouse.drag", "mouse.down", "mouse.up",
             "window.active", "window.list", "window.close", "window.bounds", "scroll", "scroll.anchor", "scroll.clustered", "scroll.humanize", "scroll.read",
             "image.info", "image.split", "llm.chat", "open.url", "press", "type",
+            "browser.eval", "browser.eval.cdp", "browser.eval.read-only",
             "clipboard", "clipboard.read", "clipboard.write", "clipboard.paste",
             "wait", "wait.frontmost", "wait.stable-screen", "batch"
         }},
@@ -81,7 +82,7 @@ json SchemaJson() {
             {"events", "control_session_events params: optional scope and positive limit; response events include redacted token prefix, event, code, message, createdAtMs, and metadata"},
             {"releaseActive", "CLI session release-active debug/audit helper releases current active lease with optional owner/purpose match and reason"},
             {"record", "session record includes scope, daemonSession, owner, purpose, state, createdAtMs, acquiredAtMs, renewedAtMs, expiresAtMs, releasedAtMs, lastSeenAtMs, maxRuntimeMs, and maxExpiresAtMs"},
-            {"protectedMethods", "all methods except ping, capabilities, schema, control_session_*, shutdown, metrics/events, and non-requesting permissions"}
+            {"protectedMethods", "all methods except ping, capabilities, schema, browser_eval, control_session_*, shutdown, metrics/events, and non-requesting permissions"}
         }},
         {"target", {"@ref", "point:x,y", "rect:left,top,right,bottom", "role:button[name=\"Save\"]"}},
         {"targetCommands", {
@@ -178,6 +179,19 @@ json SchemaJson() {
             {"newInstance", "boolean; default false"},
             {"response", "url, browser, newWindow, newInstance, and opened window metadata when available"}
         }},
+        {"browserEval", {
+            {"method", "browser_eval"},
+            {"script", "required non-empty read-only JavaScript expression for DOM/page inspection"},
+            {"targetUrlPrefix", "optional URL prefix used to choose the Chrome DevTools page target"},
+            {"browserContextId", "optional Chrome DevTools browser context id filter"},
+            {"browser", "optional browser app name for launch attempt; default Google Chrome"},
+            {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},
+            {"port", "optional Chrome DevTools port; default 9222"},
+            {"launch", "boolean default true; attempts to start Chrome with --remote-debugging-port when endpoint is unavailable"},
+            {"readOnly", "must be true; obvious DOM/input mutation snippets are rejected"},
+            {"response", "backend cdp, value, JavaScript result type, host, port, and targetUrlPrefix"},
+            {"inputBoundary", "browser_eval is for inspection only; user-like input must use native click/type/press/mouse commands"}
+        }},
         {"window", {
             {"active", "response: current active window metadata"},
             {"list", "params: optional non-empty app filter; response: windows array"},
@@ -237,11 +251,12 @@ json SchemaJson() {
             "exception", "focus_guard_failed", "image_crop_failed", "image_read_failed",
             "inference_bad_json", "inference_http_error", "input_failed", "invalid_app", "invalid_batch", "invalid_control_scope",
             "invalid_batch_step", "invalid_click", "invalid_control_session", "invalid_event_ref",
-            "invalid_image_info", "invalid_image_split", "invalid_key", "invalid_limit",
+            "invalid_browser_eval", "invalid_image_info", "invalid_image_split", "invalid_key", "invalid_limit",
             "invalid_llm_request", "invalid_mouse_down", "invalid_mouse_drag", "invalid_mouse_move",
             "invalid_mouse_up", "invalid_permissions", "invalid_screenshot", "invalid_screenshot_region",
             "invalid_scroll", "invalid_snapshot", "invalid_target", "invalid_type", "invalid_url",
-            "invalid_wait", "invalid_window", "missing_api_key", "open_url_failed",
+            "invalid_wait", "invalid_window", "browser_debug_invalid_response", "browser_debug_unavailable",
+            "browser_eval_failed", "browser_eval_timeout", "browser_target_not_found", "missing_api_key", "open_url_failed",
             "permission_or_capture_failed", "target_not_found", "unknown_method", "unsupported_visual_target",
             "wait_timeout", "window_close_failed"
         }}

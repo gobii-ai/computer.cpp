@@ -126,6 +126,7 @@ add_library(computer_cpp_core
     src/daemon/Daemon.cpp
     src/daemon/DaemonArtifacts.cpp
     src/daemon/DaemonBatch.cpp
+    src/daemon/DaemonBrowser.cpp
     src/daemon/DaemonDesktop.cpp
     src/daemon/DaemonClick.cpp
     src/daemon/DaemonControlSession.cpp

@@ -144,6 +144,7 @@ void TestDaemonDispatch() {
     assert(commands.find("wait.frontmost") != std::string::npos);
     assert(commands.find("wait.stable-screen") != std::string::npos);
     assert(commands.find("llm.chat") != std::string::npos);
+    assert(commands.find("browser.eval") != std::string::npos);
     assert(commands.find("canvas.") == std::string::npos);
     assert(commands.find("observe.text") == std::string::npos);
     assert(commands.find("observe.find") == std::string::npos);
@@ -182,12 +183,24 @@ void TestDaemonDispatch() {
     assert(schema["data"]["batchResponse"]["executed"].is_string());
     assert(schema["data"]["batchResponse"]["failed"].is_string());
     assert(schema["data"]["batchResponse"]["stoppedOnError"].is_string());
+    auto browserEvalSchema = schema["data"]["browserEval"].dump();
+    assert(browserEvalSchema.find("read-only") != std::string::npos);
+    assert(browserEvalSchema.find("native click/type/press/mouse") != std::string::npos);
     auto batchSchema = schema["data"]["batch"].dump();
     assert(batchSchema.find("CLI reads the array from stdin") != std::string::npos);
     assert(batchSchema.find("--continue-on-error") != std::string::npos);
     assert(batchSchema.find("invalid_batch_step") != std::string::npos);
     assert(batchSchema.find("controlSession/controlScope") != std::string::npos);
     assert(batchSchema.find("step-1") != std::string::npos);
+
+    auto mutatingBrowserEval = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "browser_eval"},
+        {"params", {
+            {"script", "document.querySelector('button').click()"}
+        }}
+    });
+    assert(mutatingBrowserEval["ok"] == false);
+    assert(mutatingBrowserEval["code"] == "invalid_browser_eval");
     assert(batchSchema.find("requested, executed, failed") != std::string::npos);
     auto targetSchema = schema["data"]["target"].dump();
     assert(targetSchema.find("rect:left,top,right,bottom") != std::string::npos);
