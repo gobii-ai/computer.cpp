@@ -3129,17 +3129,48 @@ void TrayIcon::OnTestScreenshot(wxCommandEvent&) {
 
 void TrayIcon::OnTestMouse(wxCommandEvent&) {
     std::thread([] {
+        Platform::PermissionStatus status = Platform::CheckPermissions(false);
+        if (!status.accessibility) {
+            wxTheApp->CallAfter([] {
+                wxMessageBox("Mouse move test failed: Accessibility permission is missing.",
+                             "ComputerCpp Mouse",
+                             wxOK | wxICON_ERROR);
+            });
+            return;
+        }
         int width = 0;
         int height = 0;
         Platform::GetScreenSize(width, height);
         double cx = width / 2.0;
         double cy = height / 2.0;
         double radius = std::max(80.0, std::min(width, height) / 12.0);
+        double startX = 0.0;
+        double startY = 0.0;
+        Platform::GetCursorPosition(startX, startY);
         for (int i = 0; i <= 80; ++i) {
             double angle = i * (2.0 * M_PI / 80.0);
             Platform::MoveMouse(cx + std::cos(angle) * radius, cy + std::sin(angle) * radius);
             std::this_thread::sleep_for(std::chrono::milliseconds(8));
         }
+        double endX = 0.0;
+        double endY = 0.0;
+        Platform::GetCursorPosition(endX, endY);
+        double distance = std::hypot(endX - startX, endY - startY);
+        bool moved = distance > 8.0;
+        wxTheApp->CallAfter([moved, distance] {
+            std::ostringstream message;
+            if (moved) {
+                message << "Mouse move test passed. Cursor moved "
+                        << std::fixed << std::setprecision(1) << distance << " px.";
+            } else {
+                message << "Mouse move test failed. Cursor only moved "
+                        << std::fixed << std::setprecision(1) << distance
+                        << " px. Restart ComputerCpp after granting Accessibility, then test again.";
+            }
+            wxMessageBox(message.str(),
+                         "ComputerCpp Mouse",
+                         wxOK | (moved ? wxICON_INFORMATION : wxICON_ERROR));
+        });
     }).detach();
 }
 

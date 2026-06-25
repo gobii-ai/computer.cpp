@@ -1268,6 +1268,8 @@ void GetCursorPosition(double& x, double& y) {
 }
 
 void MoveMouse(double x, double y) {
+    CGPoint point = CGPointMake(x, y);
+    CGWarpMouseCursorPosition(point);
     CGEventType type = kCGEventMouseMoved;
     CGMouseButton button = kCGMouseButtonLeft;
     if (gLeftDown) {
@@ -1279,11 +1281,11 @@ void MoveMouse(double x, double y) {
         type = kCGEventOtherMouseDragged;
         button = kCGMouseButtonCenter;
     }
-    ScopedCFRef<CGEventRef> event(CGEventCreateMouseEvent(nullptr, type, CGPointMake(x, y), button));
+    ScopedCFRef<CGEventRef> event(CGEventCreateMouseEvent(nullptr, type, point, button));
     if (!event) {
         return;
     }
-    CGEventPost(kCGSessionEventTap, event.get());
+    CGEventPost(kCGHIDEventTap, event.get());
 }
 
 void MoveMouseSmooth(double x, double y, int durationMs, int steps) {
