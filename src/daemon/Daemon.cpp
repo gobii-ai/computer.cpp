@@ -7,6 +7,7 @@
 
 #include "DaemonArtifacts.h"
 #include "DaemonBatch.h"
+#include "DaemonBrowser.h"
 #include "DaemonControlSession.h"
 #include "DaemonDesktop.h"
 #include "DaemonIdle.h"
@@ -78,6 +79,7 @@ constexpr auto kParamsRoutes = std::to_array<ParamsRoute>({
     {"wait", RunWaitCommand},
     {"press", RunPressCommand},
     {"clipboard_write", RunClipboardWriteCommand},
+    {"browser_eval", RunBrowserEvalCommand},
 });
 
 constexpr auto kNoParamsRoutes = std::to_array<NoParamsRoute>({

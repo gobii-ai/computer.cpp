@@ -40,6 +40,7 @@ bool MethodRequiresControlSession(const std::string& method, const json& params)
         "capabilities",
         "schema",
         "batch",
+        "browser_eval",
         "shutdown",
         "control_session_acquire",
         "control_session_resume",

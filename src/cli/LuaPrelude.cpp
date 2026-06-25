@@ -1382,6 +1382,9 @@ ac.browser = {}
 function ac.browser.open(url, opts)
   return ac.request("open_url", merge({ url = url, browser = "firefox", newWindow = true }, opts or {}))
 end
+function ac.browser.eval(script, opts)
+  return ac.request("browser_eval", merge({ script = script, readOnly = true }, opts or {}), { allow_error = true })
+end
 
 function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
 function ac.wait_frontmost(app, opts) return ac.wait(merge({ frontmost = app }, opts)) end
