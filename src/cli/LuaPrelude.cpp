@@ -2635,6 +2635,7 @@ if not script then
   os.exit(2)
 end
 table.remove(arg, 1)
+local unpack_args = table.unpack or unpack
 
 local chunk, load_error = loadfile(script)
 if not chunk then
@@ -2643,7 +2644,7 @@ if not chunk then
 end
 
 local function main()
-  return chunk(table.unpack(arg))
+  return chunk(unpack_args(arg))
 end
 
 local ok, result = xpcall(main, debug.traceback)
