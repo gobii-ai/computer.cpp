@@ -2585,6 +2585,7 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_STATE, TrayIcon::OnState)
     EVT_MENU(ID_TEST_SCREENSHOT, TrayIcon::OnTestScreenshot)
     EVT_MENU(ID_TEST_MOUSE, TrayIcon::OnTestMouse)
+    EVT_TASKBAR_RIGHT_UP(TrayIcon::OnTaskbarRightUp)
     EVT_END_PROCESS(ID_SERVER_PROCESS, TrayIcon::OnServerProcessEnded)
     EVT_MENU(ID_QUIT, TrayIcon::OnQuit)
 wxEND_EVENT_TABLE()
@@ -3172,6 +3173,13 @@ void TrayIcon::OnTestMouse(wxCommandEvent&) {
                          wxOK | (moved ? wxICON_INFORMATION : wxICON_ERROR));
         });
     }).detach();
+}
+
+void TrayIcon::OnTaskbarRightUp(wxTaskBarIconEvent&) {
+    std::unique_ptr<wxMenu> menu(CreatePopupMenu());
+    if (menu) {
+        PopupMenu(menu.get());
+    }
 }
 
 void TrayIcon::OnQuit(wxCommandEvent&) {
