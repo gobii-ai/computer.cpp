@@ -212,9 +212,7 @@ HANDLE ConnectNamedPipeClient(const std::string& session) {
         if (error != ERROR_PIPE_BUSY) {
             return INVALID_HANDLE_VALUE;
         }
-        if (error == ERROR_PIPE_BUSY) {
-            WaitNamedPipeW(pipeName.c_str(), std::min<DWORD>(250, timeoutMs));
-        }
+        WaitNamedPipeW(pipeName.c_str(), std::min<DWORD>(250, timeoutMs));
     }
     return INVALID_HANDLE_VALUE;
 }
