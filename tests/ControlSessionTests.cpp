@@ -186,7 +186,7 @@ void TestControlSessionPrometheusEscapesLabels() {
     assert(acquired.ok);
 
     auto prometheus = ComputerCpp::ControlSessionPrometheus(options.scope, 60000, 60000);
-    assert(prometheus.find(R"(owner="owner \"quoted\" \\ path")") != std::string::npos);
+    assert(prometheus.find("owner=\"owner \\\"quoted\\\" \\\\ path\"") != std::string::npos);
     assert(prometheus.find("purpose=\"line one line two\"") != std::string::npos);
     assert(prometheus.find("computer_cpp_control_session_seconds_until_expiry") != std::string::npos);
 

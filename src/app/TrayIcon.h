@@ -37,6 +37,7 @@ private:
     void OnState(wxCommandEvent& event);
     void OnTestScreenshot(wxCommandEvent& event);
     void OnTestMouse(wxCommandEvent& event);
+    void OnTaskbarRightUp(wxTaskBarIconEvent& event);
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
     bool TryAdoptExistingServer(bool removeInvalidState);

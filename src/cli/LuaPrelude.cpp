@@ -412,7 +412,7 @@ local function compact_value(value, depth)
   depth = depth or 2
   local value_type = type(value)
   if value == nil then return "nil" end
-  if value_type == "boolean" or value_type == "number" then return tostring(value) end
+)LUA" R"LUA(  if value_type == "boolean" or value_type == "number" then return tostring(value) end
   if value_type == "string" then return '"' .. short_string(value, 120) .. '"' end
   if value_type ~= "table" then return tostring(value) end
   if depth <= 0 then return "{...}" end
@@ -743,7 +743,7 @@ function ac.batch(steps, opts)
 end
 
 function ac.batch_result(response, id)
-  for _, result in ipairs(response.data and response.data.results or {}) do
+)LUA" R"LUA(  for _, result in ipairs(response.data and response.data.results or {}) do
     if result.id == id then
       return result.data or result
     end
@@ -1064,7 +1064,7 @@ local function app_schema(app)
   local schema = {
     name = app.name or "",
     title = app.title or app.name or "",
-    version = app.version or "",
+)LUA" R"LUA(    version = app.version or "",
     commands = commands,
   }
   if app.description then
@@ -1359,7 +1359,7 @@ function ac.app.define(spec)
     name = spec.name,
     title = spec.title or spec.name,
     version = spec.version or "",
-    description = spec.description,
+)LUA" R"LUA(    description = spec.description,
     commands = {},
     command_order = {},
   }, AppDefinition)
@@ -1607,7 +1607,7 @@ function ac.desktop.vision_task(ctx, spec)
     if type(spec.agent) == "table" then
       local agent = merge({}, spec.agent)
       agent.user_content = agent.user_content or user_content
-      if agent.state == nil then
+)LUA" R"LUA(      if agent.state == nil then
         agent.state = data
       end
       out.result = ac.micro_agent.run(ctx, agent)
@@ -2127,7 +2127,7 @@ function ac.tools.type_text(spec)
       paste = { type = "boolean", default = true },
     },
   }, function(_, args)
-    local params = { text = args.text, paste = args.paste ~= false }
+)LUA" R"LUA(    local params = { text = args.text, paste = args.paste ~= false }
     local result = focus_app and ac.desktop.step_for_app(focus_app, "type", "type", params, spec) or response_data(ac.request("type", params))
     return ac.tool_result.ok(result)
   end)
@@ -2419,7 +2419,7 @@ function MicroAgent:run_loop(ctx, opts)
     })
     if type(tool_calls) ~= "table" or #tool_calls == 0 then
       missing_tool_replies = missing_tool_replies + 1
-      log_line("agent", "missing tool call", { name = self.name, step = step })
+)LUA" R"LUA(      log_line("agent", "missing tool call", { name = self.name, step = step })
       if missing_tool_replies <= max_missing_tool_replies and step < max_steps then
         messages[#messages + 1] = preserve_assistant_retry_message(message)
         messages[#messages + 1] = {
@@ -2673,7 +2673,7 @@ end
 if context.vars and context.vars.__ac_app_mode then
   local app_ok, payload = xpcall(function() return handle_app_mode(result) end, debug.traceback)
   if not app_ok then
-    io.stdout:write(json.encode({ ok = false, code = "internal_error", error = tostring(payload), data = { trace = trace } }) .. "\n")
+)LUA" R"LUA(    io.stdout:write(json.encode({ ok = false, code = "internal_error", error = tostring(payload), data = { trace = trace } }) .. "\n")
     os.exit(1)
   end
   io.stdout:write(json.encode(payload) .. "\n")
