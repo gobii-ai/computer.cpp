@@ -17,6 +17,11 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
+if(APPLE AND NOT DEFINED CACHE{CMAKE_FIND_FRAMEWORK})
+    # Prefer SDK/Homebrew libraries over stale third-party framework bundles in /Library/Frameworks.
+    set(CMAKE_FIND_FRAMEWORK LAST)
+endif()
+
 function(computer_cpp_target_defaults target_name)
     target_compile_features(${target_name} PRIVATE cxx_std_20)
 
