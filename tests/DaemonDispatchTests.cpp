@@ -185,6 +185,7 @@ void TestDaemonDispatch() {
     assert(schema["data"]["batchResponse"]["stoppedOnError"].is_string());
     auto browserEvalSchema = schema["data"]["browserEval"].dump();
     assert(browserEvalSchema.find("read-only") != std::string::npos);
+    assert(browserEvalSchema.find("exact Chrome DevTools page target id") != std::string::npos);
     assert(browserEvalSchema.find("native click/type/press/mouse") != std::string::npos);
     auto batchSchema = schema["data"]["batch"].dump();
     assert(batchSchema.find("CLI reads the array from stdin") != std::string::npos);

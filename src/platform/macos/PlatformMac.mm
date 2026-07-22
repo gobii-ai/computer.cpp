@@ -1114,7 +1114,55 @@ bool ActivateAppByPid(int pid) {
     if (!app || [app isTerminated]) {
         return false;
     }
-    return [app activateWithOptions:NSApplicationActivateAllWindows];
+
+    [app unhide];
+
+    auto isExactAppFrontmost = [&]() {
+        if ([app isActive]) {
+            return true;
+        }
+        NSRunningApplication* workspaceFrontmost = [[NSWorkspace sharedWorkspace] frontmostApplication];
+        if (workspaceFrontmost && [workspaceFrontmost processIdentifier] == pid) {
+            return true;
+        }
+        return GetFrontmostAppPid() == pid;
+    };
+
+    ScopedCFRef<AXUIElementRef> appElement(AXUIElementCreateApplication(pid));
+    if (appElement) {
+        AXUIElementSetAttributeValue(appElement.get(), kAXFrontmostAttribute, kCFBooleanTrue);
+
+        ScopedCFRef<AXUIElementRef> window(CopyFocusedWindow(appElement.get()));
+        if (!window) {
+            window.reset(CopyFocusedElementWindowFallback(appElement.get()));
+        }
+        if (window) {
+            AXUIElementSetAttributeValue(window.get(), kAXMinimizedAttribute, kCFBooleanFalse);
+            AXUIElementSetAttributeValue(window.get(), kAXMainAttribute, kCFBooleanTrue);
+            AXUIElementSetAttributeValue(window.get(), kAXFocusedAttribute, kCFBooleanTrue);
+            AXUIElementPerformAction(window.get(), kAXRaiseAction);
+        }
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    const bool activationRequested = [app activateWithOptions:
+        NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps];
+#pragma clang diagnostic pop
+    if (!activationRequested && !isExactAppFrontmost()) {
+        return false;
+    }
+
+    constexpr auto kFocusTimeout = std::chrono::milliseconds(2500);
+    constexpr auto kFocusPollInterval = std::chrono::milliseconds(50);
+    const auto deadline = std::chrono::steady_clock::now() + kFocusTimeout;
+    do {
+        if (isExactAppFrontmost()) {
+            return true;
+        }
+        std::this_thread::sleep_for(kFocusPollInterval);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return isExactAppFrontmost();
 }
 
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {

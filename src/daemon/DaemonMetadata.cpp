@@ -182,6 +182,7 @@ json SchemaJson() {
         {"browserEval", {
             {"method", "browser_eval"},
             {"script", "required non-empty read-only JavaScript expression for DOM/page inspection"},
+            {"targetId", "optional exact Chrome DevTools page target id; remains stable while that tab navigates"},
             {"targetUrlPrefix", "optional URL prefix that the Chrome DevTools page target must match"},
             {"browserContextId", "optional Chrome DevTools browser context id filter"},
             {"browser", "optional browser app name for launch attempt; default Google Chrome"},
@@ -189,7 +190,7 @@ json SchemaJson() {
             {"port", "optional Chrome DevTools port; default 9222"},
             {"launch", "boolean default true; attempts to start Chrome with --remote-debugging-port when endpoint is unavailable"},
             {"readOnly", "must be true; obvious DOM/input mutation snippets are rejected"},
-            {"response", "backend cdp, value, JavaScript result type, host, port, targetUrlPrefix, and browserPid when querying without a prefix"},
+            {"response", "backend cdp, value, JavaScript result type, host, port, exact targetId/targetUrl/browserContextId, targetUrlPrefix, and browserPid when querying without a prefix"},
             {"inputBoundary", "browser_eval is for inspection only; user-like input must use native click/type/press/mouse commands"}
         }},
         {"window", {
