@@ -126,6 +126,72 @@ std::string IdFromHwnd(HWND hwnd) {
     return out.str();
 }
 
+bool ActivateWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) {
+        return false;
+    }
+    ShowWindowAsync(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+
+    HWND foreground = GetForegroundWindow();
+    DWORD currentThread = GetCurrentThreadId();
+    DWORD targetThread = GetWindowThreadProcessId(hwnd, nullptr);
+    DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+    bool attachedTarget = targetThread != 0 && targetThread != currentThread &&
+        AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
+    bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && foregroundThread != targetThread &&
+        AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
+
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+    SwitchToThisWindow(hwnd, TRUE);
+
+    if (GetForegroundWindow() != hwnd) {
+        RECT rect{};
+        POINT originalCursor{};
+        if (GetWindowRect(hwnd, &rect) && GetCursorPos(&originalCursor)) {
+            const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            const int virtualRight = virtualLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1;
+            const int virtualBottom = virtualTop + GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1;
+            // Click the left non-client edge after raising the HWND. This is a
+            // native-input fallback for Windows foreground-lock restrictions
+            // and avoids interacting with browser page content.
+            const int clickX = std::clamp(static_cast<int>(rect.left) + 2, virtualLeft + 1, virtualRight - 1);
+            const int clickY = std::clamp(
+                static_cast<int>(rect.top + (rect.bottom - rect.top) / 2),
+                virtualTop + 1,
+                virtualBottom - 1);
+            SetCursorPos(clickX, clickY);
+            INPUT click[2]{};
+            click[0].type = INPUT_MOUSE;
+            click[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            click[1].type = INPUT_MOUSE;
+            click[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+            SendInput(2, click, sizeof(INPUT));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            SetCursorPos(originalCursor.x, originalCursor.y);
+        }
+    }
+
+    if (attachedForeground) {
+        AttachThreadInput(currentThread, foregroundThread, FALSE);
+    }
+    if (attachedTarget) {
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    }
+
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (GetForegroundWindow() == hwnd) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+}
+
 bool IsRealWindow(HWND hwnd) {
     return IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr && GetWindowTextLengthW(hwnd) > 0;
 }
@@ -166,7 +232,7 @@ void SendMouseButton(const std::string& button, bool down) {
 
 std::optional<WORD> KeyNameToVirtualKey(const std::string& keyName) {
     std::string key = Lowercase(keyName);
-    if (key == "control" || key == "ctrl") return VK_CONTROL;
+    if (key == "control" || key == "ctrl" || key == "primary") return VK_CONTROL;
     if (key == "shift") return VK_SHIFT;
     if (key == "alt" || key == "option") return VK_MENU;
     if (key == "win" || key == "windows" || key == "super" || key == "cmd" || key == "command") return VK_LWIN;
@@ -499,7 +565,7 @@ bool ActivateAppByPid(int pid) {
     for (const auto& window : ListWindows("")) {
         if (window.pid == pid) {
             auto hwnd = HwndFromId(window.id);
-            return hwnd && SetForegroundWindow(*hwnd);
+            return hwnd && ActivateWindow(*hwnd);
         }
     }
     return false;
@@ -508,10 +574,14 @@ bool ActivateAppByPid(int pid) {
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     for (const auto& window : ListWindows(query)) {
         if (auto hwnd = HwndFromId(window.id)) {
-            ShowWindow(*hwnd, SW_RESTORE);
-            SetForegroundWindow(*hwnd);
-            appInfo = GetFrontmostApp();
-            return appInfo.available;
+            if (!ActivateWindow(*hwnd)) {
+                return false;
+            }
+            appInfo.available = true;
+            appInfo.pid = window.pid;
+            appInfo.name = window.appClass;
+            appInfo.bundleId = window.appClass;
+            return true;
         }
     }
     std::wstring wide = Utf8ToWide(query);

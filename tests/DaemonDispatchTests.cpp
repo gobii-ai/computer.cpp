@@ -2521,6 +2521,28 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
     assert(invalidWaitStableRange["ok"] == false);
     assert(invalidWaitStableRange["code"] == "invalid_wait");
 
+    auto validWaitDelay = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"controlSession", token},
+            {"delayMs", 1},
+            {"timeoutMs", 1}
+        }}
+    });
+    assert(validWaitDelay["ok"] == true);
+    assert(validWaitDelay["data"]["matched"] == true);
+    assert(validWaitDelay["data"]["evidence"]["delayMs"] == 1);
+
+    auto invalidWaitDelayRange = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"controlSession", token},
+            {"delayMs", -1}
+        }}
+    });
+    assert(invalidWaitDelayRange["ok"] == false);
+    assert(invalidWaitDelayRange["code"] == "invalid_wait");
+
     auto removedWaitText = ComputerCpp::HandleDaemonRequest("unit", {
         {"method", "wait"},
         {"params", {

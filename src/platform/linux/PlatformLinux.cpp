@@ -640,7 +640,7 @@ std::string Lower(std::string value) {
 
 std::string NormalizeKey(const std::string& key) {
     std::string lower = Lower(key);
-    if (lower == "command" || lower == "cmd" || lower == "meta" || lower == "control" || lower == "ctrl") return "ctrl";
+    if (lower == "command" || lower == "cmd" || lower == "meta" || lower == "control" || lower == "ctrl" || lower == "primary") return "ctrl";
     if (lower == "option" || lower == "alt") return "alt";
     if (lower == "shift") return "shift";
     if (lower == "return" || lower == "enter") return "Return";

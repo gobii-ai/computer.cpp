@@ -178,6 +178,19 @@ json HandleDaemonRequest(const std::string& session, const json& request) {
             return finish(Ok({{"stopping", true}}));
         }
 
+        // Pure observation and delay calls do not manipulate desktop state and
+        // can safely run without holding the exclusive input lease.
+        if (method == "browser_eval" &&
+            params.contains("launch") && params["launch"].is_boolean() &&
+            !params["launch"].get<bool>()) {
+            return finish(RunBrowserEvalCommand(params));
+        }
+        if (method == "wait" &&
+            params.contains("delayMs") && params["delayMs"].is_number_integer() &&
+            !params.contains("frontmost") && !params.contains("stableScreenMs")) {
+            return finish(RunWaitCommand(params));
+        }
+
         auto controlGate = RequireControlSessionForRequest(request, method, params);
         if (!controlGate.value("ok", false)) {
             return finish(controlGate);

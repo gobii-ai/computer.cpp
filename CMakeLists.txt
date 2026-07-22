@@ -409,16 +409,33 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
 endif()
 
 if(WIN32 AND COMPUTER_CPP_BUNDLE_LUA)
-    find_program(COMPUTER_CPP_LUA_EXECUTABLE NAMES lua.exe lua lua5.4.exe lua5.4 lua5.3.exe lua5.3 luajit.exe luajit)
-    if(COMPUTER_CPP_LUA_EXECUTABLE)
+    find_package(unofficial-lua CONFIG QUIET)
+    if(TARGET unofficial::lua::lua)
+        add_executable(computer_cpp_lua src/cli/LuaMain.cpp)
+        set_target_properties(computer_cpp_lua PROPERTIES OUTPUT_NAME lua)
+        computer_cpp_target_defaults(computer_cpp_lua)
+        target_link_libraries(computer_cpp_lua PRIVATE unofficial::lua::lua)
+        add_custom_command(TARGET computer_cpp_lua POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:computer.cpp>/lua/bin"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:computer_cpp_lua>" "$<TARGET_FILE_DIR:computer.cpp>/lua/bin/lua.exe"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:unofficial::lua::lua>" "$<TARGET_FILE_DIR:computer.cpp>/lua/bin/$<TARGET_FILE_NAME:unofficial::lua::lua>"
+            VERBATIM
+        )
+        add_dependencies(computer.cpp computer_cpp_lua)
+        install(TARGETS computer_cpp_lua RUNTIME DESTINATION bin/lua/bin)
+        install(FILES "$<TARGET_FILE:unofficial::lua::lua>" DESTINATION bin/lua/bin)
+    else()
+        find_program(COMPUTER_CPP_LUA_EXECUTABLE NAMES lua.exe lua lua5.4.exe lua5.4 lua5.3.exe lua5.3 luajit.exe luajit)
+    endif()
+    if(NOT TARGET unofficial::lua::lua AND COMPUTER_CPP_LUA_EXECUTABLE)
         add_custom_command(TARGET computer.cpp POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:computer.cpp>/lua/bin"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${COMPUTER_CPP_LUA_EXECUTABLE}" "$<TARGET_FILE_DIR:computer.cpp>/lua/bin/lua.exe"
             VERBATIM
         )
         install(PROGRAMS "${COMPUTER_CPP_LUA_EXECUTABLE}" DESTINATION bin/lua/bin RENAME lua.exe)
-    else()
-        message(WARNING "Lua executable not found; Windows artifacts will rely on COMPUTER_CPP_LUA or PATH at runtime.")
+    elseif(NOT TARGET unofficial::lua::lua)
+        message(WARNING "Lua library or executable not found; Windows artifacts will rely on COMPUTER_CPP_LUA or PATH at runtime.")
     endif()
 
     install(RUNTIME_DEPENDENCY_SET computer_cpp_runtime_deps

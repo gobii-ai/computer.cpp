@@ -561,14 +561,32 @@ local function summarize_action_params(method, params)
   return redacted(params)
 end
 
+local shell_is_windows = package.config:sub(1, 1) == "\\"
+
 local function shell_quote(value)
-  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+  value = tostring(value)
+  if shell_is_windows then
+    if value:find('["\r\n]') then
+      error("Windows command arguments cannot contain quotes or newlines", 3)
+    end
+    return '"' .. value .. '"'
+  end
+  return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
 local function capture(command, allow_nonzero)
-  local handle = assert(io.popen(command .. " 2>&1", "r"))
-  local output = handle:read("*a")
-  local ok, why, code = handle:close()
+  local output_path = os.tmpname()
+  local redirected = command .. " > " .. shell_quote(output_path) .. " 2>&1"
+  if shell_is_windows then
+    -- cmd.exe strips the first quote from a command that begins with a quoted
+    -- executable unless the complete command is wrapped in another pair.
+    redirected = '"' .. redirected .. '"'
+  end
+  local ok, why, code = os.execute(redirected)
+  local file = io.open(output_path, "rb")
+  local output = file and (file:read("*a") or "") or ""
+  if file then file:close() end
+  os.remove(output_path)
   if ok == true or ok == 0 then
     return output
   end
@@ -1389,6 +1407,10 @@ end
 function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
 function ac.wait_frontmost(app, opts) return ac.wait(merge({ frontmost = app }, opts)) end
 function ac.wait_stable_screen(ms, opts) return ac.wait(merge({ stable_screen_ms = ms }, opts)) end
+function ac.sleep(ms)
+  ms = math.max(1, math.floor(tonumber(ms) or 1))
+  return ac.wait({ delayMs = ms, timeoutMs = ms })
+end
 
 function ac.snapshot(opts) return ac.request("snapshot", opts or {}) end
 function ac.screenshot(path, opts)

@@ -37,7 +37,7 @@ std::vector<std::string> KeyChordFromParams(const json& params) {
 json RunWaitCommand(const json& params) {
     static const std::set<std::string> allowedParams = {
         "controlSession", "controlSessionToken", "controlScope",
-        "frontmost", "timeoutMs", "pollMs", "stableScreenMs"
+        "frontmost", "timeoutMs", "pollMs", "stableScreenMs", "delayMs"
     };
     for (const auto& item : params.items()) {
         if (allowedParams.count(item.key()) == 0) {
@@ -47,8 +47,9 @@ json RunWaitCommand(const json& params) {
     auto timeoutMsParam = IntParam(params, "timeoutMs", 10000);
     auto pollMsParam = IntParam(params, "pollMs", 250);
     auto stableMsParam = IntParam(params, "stableScreenMs", 0);
-    if (!timeoutMsParam || !pollMsParam || !stableMsParam) {
-        return Error("wait requires integer timeoutMs, pollMs, and stableScreenMs", "invalid_wait");
+    auto delayMsParam = IntParam(params, "delayMs", 0);
+    if (!timeoutMsParam || !pollMsParam || !stableMsParam || !delayMsParam) {
+        return Error("wait requires integer timeoutMs, pollMs, stableScreenMs, and delayMs", "invalid_wait");
     }
     if (*timeoutMsParam < 1 || *timeoutMsParam > 120000) {
         return Error("wait timeoutMs must be between 1 and 120000", "invalid_wait");
@@ -59,6 +60,9 @@ json RunWaitCommand(const json& params) {
     if (*stableMsParam < 0) {
         return Error("wait stableScreenMs must be non-negative", "invalid_wait");
     }
+    if (*delayMsParam < 0 || *delayMsParam > 120000) {
+        return Error("wait delayMs must be between 0 and 120000", "invalid_wait");
+    }
     auto frontmostParam = StringParam(params, "frontmost", "");
     if (!frontmostParam) {
         return Error("wait frontmost must be a string", "invalid_wait");
@@ -67,13 +71,19 @@ json RunWaitCommand(const json& params) {
     if (params.contains("frontmost") && IsBlank(frontmost)) {
         return Error("wait frontmost must be non-empty when provided", "invalid_wait");
     }
-    if (frontmost.empty() && *stableMsParam == 0) {
-        return Error("wait requires frontmost or stableScreenMs", "invalid_wait");
+    if (frontmost.empty() && *stableMsParam == 0 && *delayMsParam == 0) {
+        return Error("wait requires frontmost, stableScreenMs, or delayMs", "invalid_wait");
     }
     int timeoutMs = *timeoutMsParam;
     int pollMs = *pollMsParam;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     int stableMs = *stableMsParam;
+    if (*delayMsParam > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(*delayMsParam));
+        if (frontmost.empty() && stableMs == 0) {
+            return Ok({{"matched", true}, {"evidence", {{"delayMs", *delayMsParam}}}});
+        }
+    }
     std::string lastSignature;
     auto stableSince = std::chrono::steady_clock::now();
 
@@ -82,8 +92,12 @@ json RunWaitCommand(const json& params) {
         json evidence = json::object();
         if (!frontmost.empty()) {
             auto app = Platform::GetFrontmostApp();
-            matched = matched && ContainsCaseInsensitive(app.name + " " + app.bundleId, frontmost);
+            auto window = Platform::GetActiveWindow();
+            matched = matched && ContainsCaseInsensitive(
+                app.name + " " + app.bundleId + " " + window.appClass + " " + window.title,
+                frontmost);
             evidence["frontmostApp"] = AppToJson(app);
+            evidence["frontmostWindow"] = WindowToJson(window);
         }
         if (matched && stableMs > 0) {
             auto path = DefaultArtifactDir() / ("stable-" + std::to_string(NowMs()) + ".png");
@@ -205,7 +219,7 @@ json RunClipboardWriteCommand(const json& params) {
 }
 
 json RunClipboardPasteCommand() {
-    bool pasted = Platform::SendHotkey({"command", "v"}, 55);
+    bool pasted = Platform::SendHotkey({"primary", "v"}, 55);
     return Ok({{"pasted", pasted}});
 }
 

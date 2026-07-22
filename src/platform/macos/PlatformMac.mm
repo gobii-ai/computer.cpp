@@ -249,6 +249,9 @@ std::string NormalizeKeyName(std::string keyName) {
     if (normalized == "cmd") {
         return "command";
     }
+    if (normalized == "primary") {
+        return "command";
+    }
     if (normalized == "ctrl") {
         return "control";
     }
