@@ -237,7 +237,7 @@ json SchemaJson() {
         {"wait", {
             {"frontmost", "optional non-empty substring matched against the frontmost app, bundle id, window class, or active-window title"},
             {"stableScreenMs", "non-negative integer; require screenshot-size stability for at least this many ms"},
-            {"delayMs", "non-negative integer up to 120000; platform-neutral delay, usable by itself or before other conditions"},
+            {"delayMs", "non-negative integer up to 120000; platform-neutral delay, usable by itself or before other conditions; delay-only calls above 1000 require a control session"},
             {"timeoutMs", "integer 1..120000, default 10000"},
             {"pollMs", "integer 50..5000, default 250"},
             {"response", "matched boolean and evidence including delayMs, frontmostApp/window, and stableScreenMs when requested"},

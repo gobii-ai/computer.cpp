@@ -54,6 +54,8 @@ namespace {
 using ParamsHandler = json (*)(const json&);
 using NoParamsHandler = json (*)();
 
+constexpr int kMaxUnleasedDelayMs = 1000;
+
 struct ParamsRoute {
     std::string_view method;
     ParamsHandler run;
@@ -178,8 +180,9 @@ json HandleDaemonRequest(const std::string& session, const json& request) {
             return finish(Ok({{"stopping", true}}));
         }
 
-        // Pure observation and delay calls do not manipulate desktop state and
-        // can safely run without holding the exclusive input lease.
+        // Pure observation and short polling delays do not manipulate desktop
+        // state. Longer delays still require a lease so an unleased caller
+        // cannot monopolize the daemon's serial request loop for minutes.
         if (method == "browser_eval" &&
             params.contains("launch") && params["launch"].is_boolean() &&
             !params["launch"].get<bool>()) {
@@ -187,6 +190,7 @@ json HandleDaemonRequest(const std::string& session, const json& request) {
         }
         if (method == "wait" &&
             params.contains("delayMs") && params["delayMs"].is_number_integer() &&
+            params["delayMs"].get<int>() <= kMaxUnleasedDelayMs &&
             !params.contains("frontmost") && !params.contains("stableScreenMs")) {
             return finish(RunWaitCommand(params));
         }

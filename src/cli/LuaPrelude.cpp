@@ -552,6 +552,7 @@ local function summarize_action_params(method, params)
     return {
       frontmost = params.frontmost,
       stableScreenMs = params.stableScreenMs,
+      delayMs = params.delayMs,
       timeoutMs = params.timeoutMs,
       pollMs = params.pollMs,
     }
@@ -574,8 +575,30 @@ local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
+local function portable_tmpname(mode)
+  local candidate = os.tmpname()
+  if shell_is_windows then
+    local temp_dir = os.getenv("TEMP") or os.getenv("TMP")
+    if not temp_dir or temp_dir == "" then
+      error("TEMP or TMP must name a writable temporary directory on Windows", 3)
+    end
+    local basename = candidate:match("([^\\/]+)$")
+    if not basename or basename == "" then
+      error("could not derive a temporary filename", 3)
+    end
+    temp_dir = temp_dir:gsub("[\\/]+$", "")
+    candidate = temp_dir .. "\\" .. basename
+  end
+  local file, err = io.open(candidate, mode or "wb")
+  if not file then
+    error("could not create temporary file " .. tostring(candidate) .. ": " .. tostring(err), 3)
+  end
+  return candidate, file
+end
+
 local function capture(command, allow_nonzero)
-  local output_path = os.tmpname()
+  local output_path, output_file = portable_tmpname("wb")
+  output_file:close()
   local redirected = command .. " > " .. shell_quote(output_path) .. " 2>&1"
   if shell_is_windows then
     -- cmd.exe strips the first quote from a command that begins with a quoted
@@ -689,11 +712,11 @@ function ac.batch(steps, opts)
   if context.dry_run then
     response = dry_run_batch(normalized_steps)
   else
-    local tmp = os.tmpname()
+    local tmp
     local output
     local file
     local ok, err = pcall(function()
-      file = assert(io.open(tmp, "w"))
+      tmp, file = portable_tmpname("w")
       file:write(json.encode(normalized_steps))
       file:close()
       file = nil
@@ -720,7 +743,7 @@ function ac.batch(steps, opts)
     if file then
       pcall(function() file:close() end)
     end
-    os.remove(tmp)
+    if tmp then os.remove(tmp) end
     if not ok then
       error(err, 0)
     end

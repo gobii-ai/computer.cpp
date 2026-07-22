@@ -126,6 +126,58 @@ std::string IdFromHwnd(HWND hwnd) {
     return out.str();
 }
 
+bool IsSafeActivationHit(LRESULT hit) {
+    switch (hit) {
+        case HTCAPTION:
+        case HTLEFT:
+        case HTRIGHT:
+        case HTTOP:
+        case HTBOTTOM:
+        case HTTOPLEFT:
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT:
+        case HTBOTTOMRIGHT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<POINT> SafeActivationClickPoint(HWND hwnd, const RECT& rect) {
+    const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virtualRight = virtualLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1;
+    const int virtualBottom = virtualTop + GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1;
+    const int centerX = rect.left + (rect.right - rect.left) / 2;
+    const int centerY = rect.top + (rect.bottom - rect.top) / 2;
+    POINT candidates[] = {
+        {rect.left + 1, centerY},
+        {rect.right - 2, centerY},
+        {centerX, rect.top + 1},
+        {centerX, rect.bottom - 2},
+        {centerX, rect.top + 8},
+        {rect.left + (rect.right - rect.left) / 4, rect.top + 8},
+        {rect.left + ((rect.right - rect.left) * 3) / 4, rect.top + 8},
+    };
+    for (auto point : candidates) {
+        point.x = std::clamp<LONG>(point.x, virtualLeft, virtualRight);
+        point.y = std::clamp<LONG>(point.y, virtualTop, virtualBottom);
+        DWORD_PTR hit = HTNOWHERE;
+        if (SendMessageTimeoutW(
+                hwnd,
+                WM_NCHITTEST,
+                0,
+                MAKELPARAM(point.x, point.y),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                100,
+                &hit) != 0 &&
+            IsSafeActivationHit(static_cast<LRESULT>(hit))) {
+            return point;
+        }
+    }
+    return std::nullopt;
+}
+
 bool ActivateWindow(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) {
         return false;
@@ -152,26 +204,27 @@ bool ActivateWindow(HWND hwnd) {
         RECT rect{};
         POINT originalCursor{};
         if (GetWindowRect(hwnd, &rect) && GetCursorPos(&originalCursor)) {
-            const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            const int virtualRight = virtualLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1;
-            const int virtualBottom = virtualTop + GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1;
-            // Click the left non-client edge after raising the HWND. This is a
-            // native-input fallback for Windows foreground-lock restrictions
-            // and avoids interacting with browser page content.
-            const int clickX = std::clamp(static_cast<int>(rect.left) + 2, virtualLeft + 1, virtualRight - 1);
-            const int clickY = std::clamp(
-                static_cast<int>(rect.top + (rect.bottom - rect.top) / 2),
-                virtualTop + 1,
-                virtualBottom - 1);
-            SetCursorPos(clickX, clickY);
-            INPUT click[2]{};
-            click[0].type = INPUT_MOUSE;
-            click[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-            click[1].type = INPUT_MOUSE;
-            click[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-            SendInput(2, click, sizeof(INPUT));
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Only click a point the target itself identifies as caption or
+            // resize chrome. Borderless/maximized windows may have no such
+            // point; in that case fail activation instead of touching content.
+            auto clickPoint = SafeActivationClickPoint(hwnd, rect);
+            if (clickPoint && SetCursorPos(clickPoint->x, clickPoint->y)) {
+                INPUT click[2]{};
+                click[0].type = INPUT_MOUSE;
+                click[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+                click[1].type = INPUT_MOUSE;
+                click[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                const UINT sent = SendInput(2, click, sizeof(INPUT));
+                if (sent == 1) {
+                    INPUT release{};
+                    release.type = INPUT_MOUSE;
+                    release.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                    SendInput(1, &release, sizeof(INPUT));
+                }
+                if (sent == 2) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            }
             SetCursorPos(originalCursor.x, originalCursor.y);
         }
     }
