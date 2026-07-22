@@ -11,7 +11,9 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -153,37 +155,109 @@ bool ProbeCdp(const std::string& host, int port) {
     return !HttpGet(CdpBaseUrl(host, port) + "/json/version", 500).empty();
 }
 
+std::string LowerBrowserName(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+std::string CdpUserDataDir() {
+    if (const char* configured = std::getenv("COMPUTER_CPP_CHROME_USER_DATA_DIR")) {
+        if (*configured != '\0') {
+            return configured;
+        }
+    }
+#if defined(_WIN32)
+    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
+        return (std::filesystem::path(localAppData) / "computer.cpp" / "chrome-cdp").string();
+    }
+#elif defined(__APPLE__)
+    if (const char* home = std::getenv("HOME")) {
+        return (std::filesystem::path(home) / "Library" / "Application Support" / "computer.cpp" / "chrome-cdp").string();
+    }
+#else
+    if (const char* stateHome = std::getenv("XDG_STATE_HOME")) {
+        return (std::filesystem::path(stateHome) / "computer.cpp" / "chrome-cdp").string();
+    }
+    if (const char* home = std::getenv("HOME")) {
+        return (std::filesystem::path(home) / ".local" / "state" / "computer.cpp" / "chrome-cdp").string();
+    }
+#endif
+    return {};
+}
+
+#if defined(_WIN32)
+std::vector<std::string> WindowsBrowserCandidates(const std::string& browser) {
+    std::vector<std::string> candidates;
+    if (!browser.empty()) {
+        candidates.push_back(browser);
+    }
+    const std::string lower = LowerBrowserName(browser);
+    const bool chrome = lower.empty() || lower.find("chrome") != std::string::npos;
+    const bool edge = lower.find("edge") != std::string::npos;
+    const std::string executable = edge ? "msedge.exe" : "chrome.exe";
+    if (chrome || edge) {
+        for (const char* variable : {"PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"}) {
+            if (const char* root = std::getenv(variable)) {
+                std::filesystem::path path(root);
+                path /= edge ? "Microsoft/Edge/Application/msedge.exe" : "Google/Chrome/Application/chrome.exe";
+                std::error_code ec;
+                if (std::filesystem::is_regular_file(path, ec) && !ec) {
+                    candidates.push_back(path.string());
+                }
+            }
+        }
+        candidates.push_back(executable);
+    }
+    return candidates;
+}
+#endif
+
 bool LaunchBrowserForCdp(const std::string& browser, int port) {
     const std::string flag = "--remote-debugging-port=" + std::to_string(port);
+    const std::string userDataDir = CdpUserDataDir();
+    const std::string userDataFlag = userDataDir.empty() ? "" : "--user-data-dir=" + userDataDir;
 #if defined(__APPLE__)
     pid_t pid = 0;
     std::string app = browser.empty() ? "Google Chrome" : browser;
-    char* const argv[] = {
-        const_cast<char*>("/usr/bin/open"),
-        const_cast<char*>("-a"),
-        app.data(),
-        const_cast<char*>("--args"),
-        const_cast<char*>(flag.c_str()),
-        nullptr
-    };
-    int rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr, argv, environ);
+    std::vector<std::string> args = {"/usr/bin/open", "-n", "-a", app, "--args", flag};
+    if (!userDataFlag.empty()) args.push_back(userDataFlag);
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    argv.push_back(nullptr);
+    int rc = posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr, argv.data(), environ);
     if (rc != 0) {
         return false;
     }
     int status = 0;
     return waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #elif defined(_WIN32)
-    std::string chosen = browser.empty() ? "chrome" : browser;
-    return Windows::LaunchDetached({chosen, flag});
+    for (const auto& chosen : WindowsBrowserCandidates(browser)) {
+        std::vector<std::string> args = {chosen, flag};
+        if (!userDataFlag.empty()) args.push_back(userDataFlag);
+        if (Windows::LaunchDetached(args)) return true;
+    }
+    return false;
 #else
-    std::string chosen = browser.empty() ? "google-chrome" : browser;
-    pid_t pid = 0;
-    char* const argv[] = {
-        chosen.data(),
-        const_cast<char*>(flag.c_str()),
-        nullptr
-    };
-    return posix_spawnp(&pid, chosen.c_str(), nullptr, nullptr, argv, environ) == 0;
+    std::vector<std::string> candidates;
+    const std::string lower = LowerBrowserName(browser);
+    if (!browser.empty()) candidates.push_back(browser);
+    if (lower.empty() || lower.find("chrome") != std::string::npos) {
+        candidates.push_back("google-chrome");
+        candidates.push_back("chromium");
+        candidates.push_back("chromium-browser");
+    }
+    for (auto& chosen : candidates) {
+        std::vector<std::string> args = {chosen, flag};
+        if (!userDataFlag.empty()) args.push_back(userDataFlag);
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        pid_t pid = 0;
+        if (posix_spawnp(&pid, chosen.c_str(), nullptr, nullptr, argv.data(), environ) == 0) return true;
+    }
+    return false;
 #endif
 }
 
@@ -197,7 +271,7 @@ bool EnsureCdp(const std::string& browser, const std::string& host, int port, bo
     if (!LaunchBrowserForCdp(browser, port)) {
         return false;
     }
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 40; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         if (ProbeCdp(host, port)) {
             return true;
@@ -269,6 +343,9 @@ std::optional<std::string> ChooseTargetWebSocket(
         if (!firstPage) {
             firstPage = ws;
         }
+    }
+    if (!targetUrlPrefix.empty()) {
+        return std::nullopt;
     }
     return linkedinCandidate ? linkedinCandidate : firstPage;
 }
@@ -500,6 +577,46 @@ bool LooksMutatingScript(const std::string& script) {
         lower.find(".selected=") != std::string::npos;
 }
 
+std::optional<std::int64_t> CdpBrowserProcessId(
+    const std::string& host,
+    int port,
+    int timeoutMs
+) {
+    const std::string versionBody = HttpGet(CdpBaseUrl(host, port) + "/json/version", timeoutMs);
+    const json version = json::parse(versionBody, nullptr, false);
+    if (version.is_discarded() || !version.contains("webSocketDebuggerUrl") ||
+        !version["webSocketDebuggerUrl"].is_string()) {
+        return std::nullopt;
+    }
+    auto parsedUrl = ParseWebSocketUrl(version["webSocketDebuggerUrl"].get<std::string>());
+    if (!parsedUrl) return std::nullopt;
+    auto socket = ConnectTcp(parsedUrl->host, parsedUrl->port, timeoutMs);
+    if (!socket.valid() || !WebSocketUpgrade(socket.socket, *parsedUrl)) return std::nullopt;
+
+    const json message = {
+        {"id", 1},
+        {"method", "SystemInfo.getProcessInfo"},
+        {"params", json::object()}
+    };
+    if (!SendTextFrame(socket.socket, message.dump())) return std::nullopt;
+    for (int i = 0; i < 100; ++i) {
+        auto responseText = ReceiveTextFrame(socket.socket);
+        if (!responseText) return std::nullopt;
+        const json response = json::parse(*responseText, nullptr, false);
+        if (response.is_discarded() || response.value("id", 0) != 1) continue;
+        const json processes = response.value("result", json::object()).value("processInfo", json::array());
+        if (!processes.is_array()) return std::nullopt;
+        for (const auto& process : processes) {
+            if (process.is_object() && process.value("type", "") == "browser" &&
+                process.contains("id") && process["id"].is_number_integer()) {
+                return process["id"].get<std::int64_t>();
+            }
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 json CdpEvaluate(
     const std::string& host,
     int port,
@@ -573,6 +690,11 @@ json CdpEvaluate(
             data["value"] = remote["value"];
         } else {
             data["value"] = remote.value("description", "");
+        }
+        if (targetUrlPrefix.empty()) {
+            if (auto browserPid = CdpBrowserProcessId(host, port, timeoutMs)) {
+                data["browserPid"] = *browserPid;
+            }
         }
         return Ok(std::move(data));
     }

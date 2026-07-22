@@ -18,6 +18,9 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #elif defined(_WIN32)
 #include <windows.h>
 #endif
@@ -107,10 +110,33 @@ fs::path FindOnPath(const std::string& name) {
 }
 
 std::vector<fs::path> BundledLuaCandidates(const fs::path& executablePath) {
-    if (executablePath.empty()) {
+    fs::path executable = executablePath;
+    if (executable.empty()) {
+#if defined(_WIN32)
+        std::wstring buffer(32768, L'\0');
+        DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if (length > 0 && length < buffer.size()) {
+            buffer.resize(length);
+            executable = buffer;
+        }
+#elif defined(__APPLE__)
+        uint32_t size = 0;
+        _NSGetExecutablePath(nullptr, &size);
+        std::string buffer(size, '\0');
+        if (_NSGetExecutablePath(buffer.data(), &size) == 0) {
+            executable = fs::path(buffer.c_str());
+        }
+#elif defined(__linux__)
+        std::vector<char> buffer(4096, '\0');
+        ssize_t length = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+        if (length > 0) {
+            executable = fs::path(std::string(buffer.data(), static_cast<size_t>(length)));
+        }
+#endif
+    }
+    if (executable.empty()) {
         return {};
     }
-    fs::path executable = executablePath;
     if (executable.filename() == executable) {
         fs::path resolved = FindOnPath(executable.string());
         if (!resolved.empty()) {

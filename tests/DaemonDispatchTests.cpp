@@ -2521,6 +2521,58 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
     assert(invalidWaitStableRange["ok"] == false);
     assert(invalidWaitStableRange["code"] == "invalid_wait");
 
+    auto validWaitDelay = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"controlSession", token},
+            {"delayMs", 1},
+            {"timeoutMs", 1}
+        }}
+    });
+    assert(validWaitDelay["ok"] == true);
+    assert(validWaitDelay["data"]["matched"] == true);
+    assert(validWaitDelay["data"]["evidence"]["delayMs"] == 1);
+
+    auto validUnleasedShortDelay = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"delayMs", 1},
+            {"timeoutMs", 1}
+        }}
+    });
+    assert(validUnleasedShortDelay["ok"] == true);
+    assert(validUnleasedShortDelay["data"]["matched"] == true);
+
+    auto rejectedUnleasedLongDelay = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"delayMs", 1001},
+            {"timeoutMs", 1001}
+        }}
+    });
+    assert(rejectedUnleasedLongDelay["ok"] == false);
+    assert(rejectedUnleasedLongDelay["code"] == "control_session_required");
+
+    auto rejectedUnleasedConditionalDelay = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"delayMs", 1},
+            {"frontmost", "test"}
+        }}
+    });
+    assert(rejectedUnleasedConditionalDelay["ok"] == false);
+    assert(rejectedUnleasedConditionalDelay["code"] == "control_session_required");
+
+    auto invalidWaitDelayRange = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "wait"},
+        {"params", {
+            {"controlSession", token},
+            {"delayMs", -1}
+        }}
+    });
+    assert(invalidWaitDelayRange["ok"] == false);
+    assert(invalidWaitDelayRange["code"] == "invalid_wait");
+
     auto removedWaitText = ComputerCpp::HandleDaemonRequest("unit", {
         {"method", "wait"},
         {"params", {

@@ -182,14 +182,14 @@ json SchemaJson() {
         {"browserEval", {
             {"method", "browser_eval"},
             {"script", "required non-empty read-only JavaScript expression for DOM/page inspection"},
-            {"targetUrlPrefix", "optional URL prefix used to choose the Chrome DevTools page target"},
+            {"targetUrlPrefix", "optional URL prefix that the Chrome DevTools page target must match"},
             {"browserContextId", "optional Chrome DevTools browser context id filter"},
             {"browser", "optional browser app name for launch attempt; default Google Chrome"},
             {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},
             {"port", "optional Chrome DevTools port; default 9222"},
             {"launch", "boolean default true; attempts to start Chrome with --remote-debugging-port when endpoint is unavailable"},
             {"readOnly", "must be true; obvious DOM/input mutation snippets are rejected"},
-            {"response", "backend cdp, value, JavaScript result type, host, port, and targetUrlPrefix"},
+            {"response", "backend cdp, value, JavaScript result type, host, port, targetUrlPrefix, and browserPid when querying without a prefix"},
             {"inputBoundary", "browser_eval is for inspection only; user-like input must use native click/type/press/mouse commands"}
         }},
         {"window", {
@@ -235,11 +235,12 @@ json SchemaJson() {
             {"response", "dy, dx, durationMs, steps, jitter, humanized, maxGestureDelta, optional clusters, anchor, focusApp/frontmost, observed event metadata, and db"}
         }},
         {"wait", {
-            {"frontmost", "optional non-empty app name or bundle id substring matched against frontmost app"},
+            {"frontmost", "optional non-empty substring matched against the frontmost app, bundle id, window class, or active-window title"},
             {"stableScreenMs", "non-negative integer; require screenshot-size stability for at least this many ms"},
+            {"delayMs", "non-negative integer up to 120000; platform-neutral delay, usable by itself or before other conditions; delay-only calls above 1000 require a control session"},
             {"timeoutMs", "integer 1..120000, default 10000"},
             {"pollMs", "integer 50..5000, default 250"},
-            {"response", "matched boolean and evidence including frontmostApp and stableScreenMs when requested"},
+            {"response", "matched boolean and evidence including delayMs, frontmostApp/window, and stableScreenMs when requested"},
             {"timeout", "wait_timeout error when conditions are not met before timeoutMs"}
         }},
         {"bounds", {{"available", "boolean"}, {"x", "number"}, {"y", "number"}, {"width", "number"}, {"height", "number"}}},

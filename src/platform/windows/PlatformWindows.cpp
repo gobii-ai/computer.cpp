@@ -126,6 +126,125 @@ std::string IdFromHwnd(HWND hwnd) {
     return out.str();
 }
 
+bool IsSafeActivationHit(LRESULT hit) {
+    switch (hit) {
+        case HTCAPTION:
+        case HTLEFT:
+        case HTRIGHT:
+        case HTTOP:
+        case HTBOTTOM:
+        case HTTOPLEFT:
+        case HTTOPRIGHT:
+        case HTBOTTOMLEFT:
+        case HTBOTTOMRIGHT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::optional<POINT> SafeActivationClickPoint(HWND hwnd, const RECT& rect) {
+    const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virtualRight = virtualLeft + GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1;
+    const int virtualBottom = virtualTop + GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1;
+    const int centerX = rect.left + (rect.right - rect.left) / 2;
+    const int centerY = rect.top + (rect.bottom - rect.top) / 2;
+    POINT candidates[] = {
+        {rect.left + 1, centerY},
+        {rect.right - 2, centerY},
+        {centerX, rect.top + 1},
+        {centerX, rect.bottom - 2},
+        {centerX, rect.top + 8},
+        {rect.left + (rect.right - rect.left) / 4, rect.top + 8},
+        {rect.left + ((rect.right - rect.left) * 3) / 4, rect.top + 8},
+    };
+    for (auto point : candidates) {
+        point.x = std::clamp<LONG>(point.x, virtualLeft, virtualRight);
+        point.y = std::clamp<LONG>(point.y, virtualTop, virtualBottom);
+        DWORD_PTR hit = HTNOWHERE;
+        if (SendMessageTimeoutW(
+                hwnd,
+                WM_NCHITTEST,
+                0,
+                MAKELPARAM(point.x, point.y),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                100,
+                &hit) != 0 &&
+            IsSafeActivationHit(static_cast<LRESULT>(hit))) {
+            return point;
+        }
+    }
+    return std::nullopt;
+}
+
+bool ActivateWindow(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) {
+        return false;
+    }
+    ShowWindowAsync(hwnd, IsIconic(hwnd) ? SW_RESTORE : SW_SHOW);
+
+    HWND foreground = GetForegroundWindow();
+    DWORD currentThread = GetCurrentThreadId();
+    DWORD targetThread = GetWindowThreadProcessId(hwnd, nullptr);
+    DWORD foregroundThread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+    bool attachedTarget = targetThread != 0 && targetThread != currentThread &&
+        AttachThreadInput(currentThread, targetThread, TRUE) != FALSE;
+    bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && foregroundThread != targetThread &&
+        AttachThreadInput(currentThread, foregroundThread, TRUE) != FALSE;
+
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+    SwitchToThisWindow(hwnd, TRUE);
+
+    if (GetForegroundWindow() != hwnd) {
+        RECT rect{};
+        POINT originalCursor{};
+        if (GetWindowRect(hwnd, &rect) && GetCursorPos(&originalCursor)) {
+            // Only click a point the target itself identifies as caption or
+            // resize chrome. Borderless/maximized windows may have no such
+            // point; in that case fail activation instead of touching content.
+            auto clickPoint = SafeActivationClickPoint(hwnd, rect);
+            if (clickPoint && SetCursorPos(clickPoint->x, clickPoint->y)) {
+                INPUT click[2]{};
+                click[0].type = INPUT_MOUSE;
+                click[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+                click[1].type = INPUT_MOUSE;
+                click[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                const UINT sent = SendInput(2, click, sizeof(INPUT));
+                if (sent == 1) {
+                    INPUT release{};
+                    release.type = INPUT_MOUSE;
+                    release.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                    SendInput(1, &release, sizeof(INPUT));
+                }
+                if (sent == 2) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+            }
+            SetCursorPos(originalCursor.x, originalCursor.y);
+        }
+    }
+
+    if (attachedForeground) {
+        AttachThreadInput(currentThread, foregroundThread, FALSE);
+    }
+    if (attachedTarget) {
+        AttachThreadInput(currentThread, targetThread, FALSE);
+    }
+
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (GetForegroundWindow() == hwnd) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+}
+
 bool IsRealWindow(HWND hwnd) {
     return IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr && GetWindowTextLengthW(hwnd) > 0;
 }
@@ -166,7 +285,7 @@ void SendMouseButton(const std::string& button, bool down) {
 
 std::optional<WORD> KeyNameToVirtualKey(const std::string& keyName) {
     std::string key = Lowercase(keyName);
-    if (key == "control" || key == "ctrl") return VK_CONTROL;
+    if (key == "control" || key == "ctrl" || key == "primary") return VK_CONTROL;
     if (key == "shift") return VK_SHIFT;
     if (key == "alt" || key == "option") return VK_MENU;
     if (key == "win" || key == "windows" || key == "super" || key == "cmd" || key == "command") return VK_LWIN;
@@ -499,7 +618,7 @@ bool ActivateAppByPid(int pid) {
     for (const auto& window : ListWindows("")) {
         if (window.pid == pid) {
             auto hwnd = HwndFromId(window.id);
-            return hwnd && SetForegroundWindow(*hwnd);
+            return hwnd && ActivateWindow(*hwnd);
         }
     }
     return false;
@@ -508,10 +627,14 @@ bool ActivateAppByPid(int pid) {
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     for (const auto& window : ListWindows(query)) {
         if (auto hwnd = HwndFromId(window.id)) {
-            ShowWindow(*hwnd, SW_RESTORE);
-            SetForegroundWindow(*hwnd);
-            appInfo = GetFrontmostApp();
-            return appInfo.available;
+            if (!ActivateWindow(*hwnd)) {
+                return false;
+            }
+            appInfo.available = true;
+            appInfo.pid = window.pid;
+            appInfo.name = window.appClass;
+            appInfo.bundleId = window.appClass;
+            return true;
         }
     }
     std::wstring wide = Utf8ToWide(query);

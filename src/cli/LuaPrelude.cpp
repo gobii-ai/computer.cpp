@@ -552,6 +552,7 @@ local function summarize_action_params(method, params)
     return {
       frontmost = params.frontmost,
       stableScreenMs = params.stableScreenMs,
+      delayMs = params.delayMs,
       timeoutMs = params.timeoutMs,
       pollMs = params.pollMs,
     }
@@ -561,14 +562,54 @@ local function summarize_action_params(method, params)
   return redacted(params)
 end
 
+local shell_is_windows = package.config:sub(1, 1) == "\\"
+
 local function shell_quote(value)
-  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+  value = tostring(value)
+  if shell_is_windows then
+    if value:find('["\r\n]') then
+      error("Windows command arguments cannot contain quotes or newlines", 3)
+    end
+    return '"' .. value .. '"'
+  end
+  return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+local function portable_tmpname(mode)
+  local candidate = os.tmpname()
+  if shell_is_windows then
+    local temp_dir = os.getenv("TEMP") or os.getenv("TMP")
+    if not temp_dir or temp_dir == "" then
+      error("TEMP or TMP must name a writable temporary directory on Windows", 3)
+    end
+    local basename = candidate:match("([^\\/]+)$")
+    if not basename or basename == "" then
+      error("could not derive a temporary filename", 3)
+    end
+    temp_dir = temp_dir:gsub("[\\/]+$", "")
+    candidate = temp_dir .. "\\" .. basename
+  end
+  local file, err = io.open(candidate, mode or "wb")
+  if not file then
+    error("could not create temporary file " .. tostring(candidate) .. ": " .. tostring(err), 3)
+  end
+  return candidate, file
 end
 
 local function capture(command, allow_nonzero)
-  local handle = assert(io.popen(command .. " 2>&1", "r"))
-  local output = handle:read("*a")
-  local ok, why, code = handle:close()
+  local output_path, output_file = portable_tmpname("wb")
+  output_file:close()
+  local redirected = command .. " > " .. shell_quote(output_path) .. " 2>&1"
+  if shell_is_windows then
+    -- cmd.exe strips the first quote from a command that begins with a quoted
+    -- executable unless the complete command is wrapped in another pair.
+    redirected = '"' .. redirected .. '"'
+  end
+  local ok, why, code = os.execute(redirected)
+  local file = io.open(output_path, "rb")
+  local output = file and (file:read("*a") or "") or ""
+  if file then file:close() end
+  os.remove(output_path)
   if ok == true or ok == 0 then
     return output
   end
@@ -671,11 +712,11 @@ function ac.batch(steps, opts)
   if context.dry_run then
     response = dry_run_batch(normalized_steps)
   else
-    local tmp = os.tmpname()
+    local tmp
     local output
     local file
     local ok, err = pcall(function()
-      file = assert(io.open(tmp, "w"))
+      tmp, file = portable_tmpname("w")
       file:write(json.encode(normalized_steps))
       file:close()
       file = nil
@@ -702,7 +743,7 @@ function ac.batch(steps, opts)
     if file then
       pcall(function() file:close() end)
     end
-    os.remove(tmp)
+    if tmp then os.remove(tmp) end
     if not ok then
       error(err, 0)
     end
@@ -1389,6 +1430,10 @@ end
 function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
 function ac.wait_frontmost(app, opts) return ac.wait(merge({ frontmost = app }, opts)) end
 function ac.wait_stable_screen(ms, opts) return ac.wait(merge({ stable_screen_ms = ms }, opts)) end
+function ac.sleep(ms)
+  ms = math.max(1, math.floor(tonumber(ms) or 1))
+  return ac.wait({ delayMs = ms, timeoutMs = ms })
+end
 
 function ac.snapshot(opts) return ac.request("snapshot", opts or {}) end
 function ac.screenshot(path, opts)

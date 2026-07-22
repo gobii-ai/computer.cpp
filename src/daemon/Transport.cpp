@@ -191,6 +191,7 @@ HANDLE ConnectNamedPipeClient(const std::string& session) {
     std::wstring pipeName = Windows::Utf8ToWide(PipeNameForSession(session));
     const DWORD timeoutMs = static_cast<DWORD>(TransportTimeoutMs());
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    const auto missingPipeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
     while (std::chrono::steady_clock::now() < deadline) {
         HANDLE pipe = CreateFileW(
             pipeName.c_str(),
@@ -207,7 +208,11 @@ HANDLE ConnectNamedPipeClient(const std::string& session) {
         }
         DWORD error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND) {
-            return INVALID_HANDLE_VALUE;
+            if (std::chrono::steady_clock::now() >= missingPipeDeadline) {
+                return INVALID_HANDLE_VALUE;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
         }
         if (error != ERROR_PIPE_BUSY) {
             return INVALID_HANDLE_VALUE;

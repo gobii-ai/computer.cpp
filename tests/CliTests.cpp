@@ -2311,6 +2311,45 @@ void TestLuaRuntimeLogFileHonorsQuietFlag() {
     assert(ReadTextFile(logPath).empty());
 }
 
+void TestLuaPortableTempCapture() {
+    if (SkipLuaTestIfUnavailable("TestLuaPortableTempCapture")) {
+        return;
+    }
+
+    const std::filesystem::path luaInterpreter = ComputerCpp::FindLuaInterpreter();
+    ScopedEnvVar luaEnv("COMPUTER_CPP_LUA");
+    ScopedEnvVar tempEnv("TEMP");
+    ScopedEnvVar tmpEnv("TMP");
+    std::filesystem::path root = ComputerCpp::Tests::MakeTempHome() / "temp capture with spaces";
+    std::filesystem::create_directories(root);
+#if defined(_WIN32)
+    std::filesystem::path fakeCli = root / "fake-computer.cmd";
+    {
+        std::ofstream file(fakeCli);
+        file << "@echo off\r\n";
+        file << "echo {\"ok\":true,\"data\":{\"results\":[{\"ok\":true,\"data\":{\"tempCapture\":true}}]}}\r\n";
+    }
+#else
+    std::filesystem::path fakeCli = root / "fake-computer";
+    {
+        std::ofstream file(fakeCli);
+        file << "#!/bin/sh\n";
+        file << "printf '%s\\n' '{\"ok\":true,\"data\":{\"results\":[{\"ok\":true,\"data\":{\"tempCapture\":true}}]}}'\n";
+    }
+    chmod(fakeCli.c_str(), 0755);
+#endif
+    tempEnv.Set(root.string());
+    tmpEnv.Set(root.string());
+    luaEnv.Set(luaInterpreter.string());
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/temp-capture.lua";
+    options.executablePath = fakeCli;
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    assert(result.stdoutText.find("temp-capture-ok") != std::string::npos);
+}
+
 void TestLuaDesktopToolPixelRects() {
     if (SkipLuaTestIfUnavailable("TestLuaDesktopToolPixelRects")) {
         return;
@@ -2400,6 +2439,7 @@ void RunCliTests() {
     TestLuaAppErrorsAreUserFacing();
     TestLuaRuntimeWritesConfiguredLogFile();
     TestLuaRuntimeLogFileHonorsQuietFlag();
+    TestLuaPortableTempCapture();
     TestLuaDesktopToolPixelRects();
 }
 
