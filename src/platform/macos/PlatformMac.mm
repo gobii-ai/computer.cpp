@@ -978,29 +978,90 @@ WindowInfo GetActiveWindow() {
     window.appClass = app.bundleId;
     window.pid = app.pid;
     window.active = app.available;
-    window.bounds = GetFrontmostWindowBounds();
+    if (!app.available) {
+        return window;
+    }
+
+    ScopedCFRef<AXUIElementRef> appElement(AXUIElementCreateApplication(app.pid));
+    ScopedCFRef<AXUIElementRef> focusedWindow(
+        appElement ? CopyFocusedWindow(appElement.get()) : nullptr);
+    if (!focusedWindow && appElement) {
+        focusedWindow.reset(CopyFocusedElementWindowFallback(appElement.get()));
+    }
+    if (focusedWindow) {
+        const std::string title = CopyStringAttribute(focusedWindow.get(), kAXTitleAttribute);
+        if (!title.empty()) {
+            window.title = title;
+        }
+        window.bounds = CopyBounds(focusedWindow.get());
+    }
+    if (!window.bounds.available) {
+        window.bounds = GetFrontmostWindowBounds();
+    }
     return window;
 }
 
 std::vector<WindowInfo> ListWindows(const std::string& appQuery) {
-    auto window = GetActiveWindow();
-    if (!window.available) {
-        return {};
-    }
-    if (!appQuery.empty()) {
-        std::string haystack = window.appClass + " " + window.title;
-        std::string query = appQuery;
-        std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char ch) {
+    auto lower = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
             return static_cast<char>(std::tolower(ch));
         });
-        std::transform(query.begin(), query.end(), query.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        if (haystack.find(query) == std::string::npos) {
-            return {};
+        return value;
+    };
+    const std::string query = lower(appQuery);
+    const AppInfo frontmost = GetFrontmostApp();
+    std::vector<WindowInfo> result;
+
+    for (NSRunningApplication* app in [[NSWorkspace sharedWorkspace] runningApplications]) {
+        if (!app || [app isTerminated]) {
+            continue;
+        }
+        const int pid = [app processIdentifier];
+        const std::string name = NSStringToString([app localizedName]);
+        const std::string bundleId = NSStringToString([app bundleIdentifier]);
+        if (!query.empty() &&
+            lower(name + " " + bundleId).find(query) == std::string::npos) {
+            continue;
+        }
+
+        ScopedCFRef<AXUIElementRef> appElement(AXUIElementCreateApplication(pid));
+        if (!appElement) {
+            continue;
+        }
+        CFTypeRef rawWindows = nullptr;
+        const AXError windowsError =
+            AXUIElementCopyAttributeValue(appElement.get(), kAXWindowsAttribute, &rawWindows);
+        ScopedCFRef<CFTypeRef> windowsValue(rawWindows);
+        if (windowsError != kAXErrorSuccess || !windowsValue ||
+            CFGetTypeID(windowsValue.get()) != CFArrayGetTypeID()) {
+            continue;
+        }
+
+        ScopedCFRef<AXUIElementRef> focusedWindow(CopyFocusedWindow(appElement.get()));
+        CFArrayRef windows = static_cast<CFArrayRef>(windowsValue.get());
+        const CFIndex count = CFArrayGetCount(windows);
+        for (CFIndex i = 0; i < count; ++i) {
+            AXUIElementRef element =
+                static_cast<AXUIElementRef>(CFArrayGetValueAtIndex(windows, i));
+            if (!element || CFGetTypeID(element) != AXUIElementGetTypeID()) {
+                continue;
+            }
+            WindowInfo window;
+            window.available = true;
+            // Keep the macOS window id compatible with the existing PID-based
+            // activation and close implementations. Multiple windows from one
+            // process can therefore share an id, but retain distinct titles.
+            window.id = std::to_string(pid);
+            window.title = CopyStringAttribute(element, kAXTitleAttribute);
+            window.appClass = bundleId;
+            window.pid = pid;
+            window.active = frontmost.available && frontmost.pid == pid &&
+                focusedWindow && CFEqual(focusedWindow.get(), element);
+            window.bounds = CopyBounds(element);
+            result.push_back(std::move(window));
         }
     }
-    return {window};
+    return result;
 }
 
 bool CloseWindow(const std::string& id) {
@@ -1181,12 +1242,15 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
         NSString* name = [[app localizedName] lowercaseString];
         if ((bundleId && [bundleId isEqualToString:lowerQuery]) ||
             (name && [name isEqualToString:lowerQuery])) {
-            bool activated = [app activateWithOptions:NSApplicationActivateAllWindows];
+            const int pid = [app processIdentifier];
+            if ([app isTerminated] || !ActivateAppByPid(pid)) {
+                continue;
+            }
             appInfo.available = true;
-            appInfo.pid = [app processIdentifier];
+            appInfo.pid = pid;
             appInfo.name = NSStringToString([app localizedName]);
             appInfo.bundleId = NSStringToString([app bundleIdentifier]);
-            return activated;
+            return true;
         }
     }
 
@@ -1217,13 +1281,13 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
     }
 
     NSRunningApplication* app = launchedApp;
-    if (app) {
-        [app activateWithOptions:NSApplicationActivateAllWindows];
+    if (!app || !ActivateAppByPid([app processIdentifier])) {
+        return false;
     }
     appInfo.available = true;
-    appInfo.pid = app ? [app processIdentifier] : -1;
-    appInfo.name = app ? NSStringToString([app localizedName]) : NSStringToString(appURL.lastPathComponent);
-    appInfo.bundleId = app ? NSStringToString([app bundleIdentifier]) : NSStringToString(expectedBundleId);
+    appInfo.pid = [app processIdentifier];
+    appInfo.name = NSStringToString([app localizedName]);
+    appInfo.bundleId = NSStringToString([app bundleIdentifier]);
     return true;
 }
 
