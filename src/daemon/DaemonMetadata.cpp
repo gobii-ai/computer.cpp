@@ -196,6 +196,7 @@ json SchemaJson() {
         {"window", {
             {"active", "response: current active window metadata"},
             {"list", "params: optional non-empty app filter; response: windows array"},
+            {"activate", "params: exact non-empty id from window.list; activates that native window"},
             {"bounds", "params: x/y/width/height numbers and optional non-negative pid; width and height must be positive"},
             {"close", "params: optional id and frontmost boolean; response: found/closed plus window metadata when available"},
             {"responseWindow", "window metadata includes id, title, app, pid, active, available, and bounds"}

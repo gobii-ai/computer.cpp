@@ -808,6 +808,7 @@ void TestDaemonGateCoverageForProtectedMethods() {
         {"screenshot", nlohmann::json::object()},
         {"window_list", nlohmann::json::object()},
         {"window_active", nlohmann::json::object()},
+        {"window_activate", {{"id", "window-1"}}},
         {"window_bounds", {{"x", 0}, {"y", 0}, {"width", 100}, {"height", 100}}},
         {"window_close", {{"id", "window-1"}}},
         {"app_active", nlohmann::json::object()},
@@ -1246,6 +1247,37 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
     });
     assert(blankWindowListApp["ok"] == false);
     assert(blankWindowListApp["code"] == "invalid_window");
+
+    auto unknownWindowActivateParam = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "window_activate"},
+        {"params", {
+            {"controlSession", token},
+            {"id", "missing-window"},
+            {"raw", true}
+        }}
+    });
+    assert(unknownWindowActivateParam["ok"] == false);
+    assert(unknownWindowActivateParam["code"] == "invalid_window");
+
+    auto invalidWindowActivateId = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "window_activate"},
+        {"params", {
+            {"controlSession", token},
+            {"id", true}
+        }}
+    });
+    assert(invalidWindowActivateId["ok"] == false);
+    assert(invalidWindowActivateId["code"] == "invalid_window");
+
+    auto blankWindowActivateId = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "window_activate"},
+        {"params", {
+            {"controlSession", token},
+            {"id", "   "}
+        }}
+    });
+    assert(blankWindowActivateId["ok"] == false);
+    assert(blankWindowActivateId["code"] == "invalid_window");
 
     auto unknownWindowCloseParam = ComputerCpp::HandleDaemonRequest("unit", {
         {"method", "window_close"},

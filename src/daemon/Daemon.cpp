@@ -71,6 +71,7 @@ constexpr auto kParamsRoutes = std::to_array<ParamsRoute>({
     {"open_permissions", RunOpenPermissionsCommand},
     {"window_bounds", RunWindowBoundsCommand},
     {"window_list", RunWindowListCommand},
+    {"window_activate", RunWindowActivateCommand},
     {"app_activate_pid", RunAppActivatePidCommand},
     {"screenshot", RunScreenshotCommand},
     {"image_info", RunImageInfo},

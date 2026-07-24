@@ -91,6 +91,7 @@ FocusedElementInfo GetFocusedElementInfo();
 Bounds GetFrontmostWindowBounds();
 WindowInfo GetActiveWindow();
 std::vector<WindowInfo> ListWindows(const std::string& appQuery = "");
+bool ActivateWindow(const std::string& id);
 bool CloseWindow(const std::string& id);
 bool SetFrontmostWindowBounds(const Bounds& bounds);
 bool SetWindowBoundsForPid(int pid, const Bounds& bounds);

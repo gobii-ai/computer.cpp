@@ -592,6 +592,11 @@ std::vector<WindowInfo> ListWindows(const std::string& appQuery) {
     return windows;
 }
 
+bool ActivateWindow(const std::string& id) {
+    auto hwnd = HwndFromId(id);
+    return hwnd && ActivateWindow(*hwnd);
+}
+
 bool CloseWindow(const std::string& id) {
     auto hwnd = HwndFromId(id);
     return hwnd && PostMessageW(*hwnd, WM_CLOSE, 0, 0);

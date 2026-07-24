@@ -1413,6 +1413,7 @@ ac.app.activate = ac.app.launch
 ac.window = {}
 function ac.window.active() return ac.request("window_active") end
 function ac.window.list(opts) return ac.request("window_list", opts or {}) end
+function ac.window.activate(id) return ac.request("window_activate", { id = tostring(id or "") }) end
 function ac.window.close(id, opts)
   opts = opts or {}
   if id ~= nil and id ~= "" then opts.id = id end

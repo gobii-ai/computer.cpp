@@ -199,6 +199,40 @@ json RunWindowListCommand(const json& params) {
     return Ok({{"windows", windows}});
 }
 
+json RunWindowActivateCommand(const json& params) {
+    if (auto unknown = UnknownParam(params, {
+            "id", "controlSession", "controlSessionToken", "controlScope"
+        })) {
+        return Error("unknown window_activate parameter: " + *unknown, "invalid_window");
+    }
+    auto idParam = StringParam(params, "id", "");
+    if (!idParam) {
+        return Error("window_activate id must be a string", "invalid_window");
+    }
+    const std::string id = *idParam;
+    if (IsBlank(id)) {
+        return Error("window_activate id must be non-empty", "invalid_window");
+    }
+    Platform::WindowInfo target;
+    for (const auto& window : Platform::ListWindows("")) {
+        if (window.id == id) {
+            target = window;
+            break;
+        }
+    }
+    if (!target.available) {
+        return Ok({{"found", false}, {"activated", false}, {"id", id}});
+    }
+    if (!Platform::ActivateWindow(id)) {
+        return Error("could not activate window", "window_activate_failed");
+    }
+    return Ok({
+        {"found", true},
+        {"activated", true},
+        {"window", WindowToJson(Platform::GetActiveWindow())}
+    });
+}
+
 json RunWindowCloseCommand(const json& params, const std::string& activeControlToken) {
     if (auto unknown = UnknownParam(params, {"id", "frontmost", "controlSession", "controlSessionToken", "controlScope"})) {
         return Error("unknown window_close parameter: " + *unknown, "invalid_window");

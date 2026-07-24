@@ -720,6 +720,72 @@ AXUIElementRef CopyFocusedElementWindowFallback(AXUIElementRef appElement) {
     return nullptr;
 }
 
+std::string WindowIdForElement(int pid, AXUIElementRef window) {
+    if (pid <= 0 || !window) {
+        return "";
+    }
+    CFTypeRef rawNumber = nullptr;
+    ScopedCFRef<CFTypeRef> numberValue;
+    if (AXUIElementCopyAttributeValue(window, CFSTR("AXWindowNumber"), &rawNumber) == kAXErrorSuccess &&
+        rawNumber) {
+        numberValue.reset(rawNumber);
+    }
+    if (numberValue && CFGetTypeID(numberValue.get()) == CFNumberGetTypeID()) {
+        std::int64_t number = 0;
+        if (CFNumberGetValue(
+                static_cast<CFNumberRef>(numberValue.get()),
+                kCFNumberSInt64Type,
+                &number) &&
+            number > 0) {
+            return std::to_string(pid) + ":" + std::to_string(number);
+        }
+    }
+    // Preserve the former PID id when Accessibility does not expose a window
+    // number. It remains sufficient for single-window applications.
+    return std::to_string(pid);
+}
+
+std::optional<int> PidFromWindowId(const std::string& id) {
+    const std::string pidText = id.substr(0, id.find(':'));
+    try {
+        size_t consumed = 0;
+        const int pid = std::stoi(pidText, &consumed);
+        if (consumed == pidText.size() && pid > 0) {
+            return pid;
+        }
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+AXUIElementRef CopyWindowById(AXUIElementRef appElement, int pid, const std::string& id) {
+    if (!appElement) {
+        return nullptr;
+    }
+    if (id.find(':') == std::string::npos) {
+        return CopyFocusedWindow(appElement);
+    }
+    CFTypeRef rawWindows = nullptr;
+    ScopedCFRef<CFTypeRef> windowsValue;
+    if (AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &rawWindows) == kAXErrorSuccess &&
+        rawWindows) {
+        windowsValue.reset(rawWindows);
+    }
+    if (!windowsValue || CFGetTypeID(windowsValue.get()) != CFArrayGetTypeID()) {
+        return nullptr;
+    }
+    CFArrayRef windows = static_cast<CFArrayRef>(windowsValue.get());
+    for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
+        AXUIElementRef window =
+            static_cast<AXUIElementRef>(CFArrayGetValueAtIndex(windows, i));
+        if (window && WindowIdForElement(pid, window) == id) {
+            CFRetain(window);
+            return window;
+        }
+    }
+    return nullptr;
+}
+
 }
 
 PermissionStatus CheckPermissions(bool requestIfMissing) {
@@ -989,6 +1055,7 @@ WindowInfo GetActiveWindow() {
         focusedWindow.reset(CopyFocusedElementWindowFallback(appElement.get()));
     }
     if (focusedWindow) {
+        window.id = WindowIdForElement(app.pid, focusedWindow.get());
         const std::string title = CopyStringAttribute(focusedWindow.get(), kAXTitleAttribute);
         if (!title.empty()) {
             window.title = title;
@@ -1048,10 +1115,7 @@ std::vector<WindowInfo> ListWindows(const std::string& appQuery) {
             }
             WindowInfo window;
             window.available = true;
-            // Keep the macOS window id compatible with the existing PID-based
-            // activation and close implementations. Multiple windows from one
-            // process can therefore share an id, but retain distinct titles.
-            window.id = std::to_string(pid);
+            window.id = WindowIdForElement(pid, element);
             window.title = CopyStringAttribute(element, kAXTitleAttribute);
             window.appClass = bundleId;
             window.pid = pid;
@@ -1064,33 +1128,83 @@ std::vector<WindowInfo> ListWindows(const std::string& appQuery) {
     return result;
 }
 
-bool CloseWindow(const std::string& id) {
-    int pid = -1;
-    try {
-        size_t consumed = 0;
-        pid = std::stoi(id, &consumed);
-        if (consumed != id.size()) {
-            return false;
+bool ActivateWindow(const std::string& id) {
+    const auto pidValue = PidFromWindowId(id);
+    if (!pidValue || *pidValue == [[NSProcessInfo processInfo] processIdentifier]) {
+        return false;
+    }
+    const int pid = *pidValue;
+    NSRunningApplication* app =
+        [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    if (!app || [app isTerminated]) {
+        return false;
+    }
+
+    ScopedCFRef<AXUIElementRef> appElement(AXUIElementCreateApplication(pid));
+    ScopedCFRef<AXUIElementRef> window(
+        appElement ? CopyWindowById(appElement.get(), pid, id) : nullptr);
+    if (!window && appElement && id.find(':') == std::string::npos) {
+        window.reset(CopyFocusedElementWindowFallback(appElement.get()));
+    }
+    if (!window) {
+        return false;
+    }
+
+    [app unhide];
+    AXUIElementSetAttributeValue(appElement.get(), kAXFrontmostAttribute, kCFBooleanTrue);
+    AXUIElementSetAttributeValue(window.get(), kAXMinimizedAttribute, kCFBooleanFalse);
+    AXUIElementSetAttributeValue(window.get(), kAXMainAttribute, kCFBooleanTrue);
+    AXUIElementSetAttributeValue(window.get(), kAXFocusedAttribute, kCFBooleanTrue);
+    AXUIElementPerformAction(window.get(), kAXRaiseAction);
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    const bool requested = [app activateWithOptions:
+        NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps];
+#pragma clang diagnostic pop
+    if (!requested && ![app isActive]) {
+        return false;
+    }
+
+    constexpr auto kFocusTimeout = std::chrono::milliseconds(2500);
+    constexpr auto kFocusPollInterval = std::chrono::milliseconds(50);
+    const auto deadline = std::chrono::steady_clock::now() + kFocusTimeout;
+    do {
+        const WindowInfo active = GetActiveWindow();
+        const bool exactWindow = id.find(':') != std::string::npos
+            ? active.id == id
+            : active.pid == pid;
+        if (active.available && exactWindow) {
+            return true;
         }
-    } catch (...) {
+        std::this_thread::sleep_for(kFocusPollInterval);
+    } while (std::chrono::steady_clock::now() < deadline);
+    const WindowInfo active = GetActiveWindow();
+    return active.available && (id.find(':') != std::string::npos
+        ? active.id == id
+        : active.pid == pid);
+}
+
+bool CloseWindow(const std::string& id) {
+    const auto pidValue = PidFromWindowId(id);
+    if (!pidValue || *pidValue == [[NSProcessInfo processInfo] processIdentifier]) {
         return false;
     }
-    if (pid <= 0 || pid == [[NSProcessInfo processInfo] processIdentifier]) {
-        return false;
-    }
+    const int pid = *pidValue;
 
     NSRunningApplication* app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if (!app || [app isTerminated]) {
         return false;
     }
-    [app activateWithOptions:NSApplicationActivateAllWindows];
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    if (!ActivateWindow(id)) {
+        return false;
+    }
 
     ScopedCFRef<AXUIElementRef> appElement(AXUIElementCreateApplication(pid));
     if (!appElement) {
         return false;
     }
-    ScopedCFRef<AXUIElementRef> window(CopyFocusedWindow(appElement.get()));
+    ScopedCFRef<AXUIElementRef> window(CopyWindowById(appElement.get(), pid, id));
     if (!window) {
         window.reset(CopyFocusedElementWindowFallback(appElement.get()));
     }

@@ -1088,6 +1088,14 @@ std::vector<WindowInfo> ListWindows(const std::string& appQuery) {
     return filtered;
 }
 
+bool ActivateWindow(const std::string& id) {
+    if (IsWaylandSession()) {
+        return false;
+    }
+    auto window = ParseWindowId(id);
+    return window && XActivateWindow(static_cast<Window>(*window));
+}
+
 bool CloseWindow(const std::string& id) {
     if (id.empty()) {
         return false;

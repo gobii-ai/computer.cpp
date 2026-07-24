@@ -17,6 +17,7 @@ nlohmann::json RunStateCommand(const std::string& session);
 nlohmann::json RunWindowBoundsCommand(const nlohmann::json& params);
 nlohmann::json RunWindowActiveCommand();
 nlohmann::json RunWindowListCommand(const nlohmann::json& params);
+nlohmann::json RunWindowActivateCommand(const nlohmann::json& params);
 nlohmann::json RunWindowCloseCommand(const nlohmann::json& params, const std::string& activeControlToken);
 nlohmann::json RunAppLaunchCommand(const nlohmann::json& params, const std::string& activeControlToken);
 nlohmann::json RunAppActivatePidCommand(const nlohmann::json& params);
