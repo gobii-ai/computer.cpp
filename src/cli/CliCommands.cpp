@@ -23,6 +23,7 @@ struct CommandRoute {
 
 constexpr auto kCommandRoutes = std::to_array<CommandRoute>({
     {"app", BuildAppCommand},
+    {"desktop", BuildDesktopCommand},
     {"open", BuildOpenCommand},
     {"observe", BuildObserveCommand},
     {"target", BuildTargetCommand},
@@ -132,6 +133,22 @@ CommandRequest BuildAppCommand(const std::vector<std::string>& args) {
         return Ok("app_launch", {{"query", args[2]}});
     }
     return Error("unknown app subcommand");
+}
+
+CommandRequest BuildDesktopCommand(const std::vector<std::string>& args) {
+    if (args.size() < 2) {
+        return Error("desktop requires subcommand: session-state or wake");
+    }
+    if (args.size() > 2) {
+        return Error("unknown desktop " + args[1] + " option: " + args[2]);
+    }
+    if (args[1] == "session-state") {
+        return Ok("desktop_session_state", json::object());
+    }
+    if (args[1] == "wake") {
+        return Ok("desktop_wake", json::object());
+    }
+    return Error("unknown desktop subcommand: " + args[1]);
 }
 
 CommandRequest BuildGetCommand(const std::vector<std::string>& args) {

@@ -188,6 +188,7 @@ if(APPLE)
     find_library(COREGRAPHICS_LIBRARY CoreGraphics REQUIRED)
     find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
     find_library(IMAGEIO_LIBRARY ImageIO REQUIRED)
+    find_library(IOKIT_LIBRARY IOKit REQUIRED)
     find_library(SCREENCAPTUREKIT_LIBRARY ScreenCaptureKit REQUIRED)
 
     target_link_libraries(computer_cpp_core
@@ -198,6 +199,7 @@ if(APPLE)
             ${COREGRAPHICS_LIBRARY}
             ${FOUNDATION_LIBRARY}
             ${IMAGEIO_LIBRARY}
+            ${IOKIT_LIBRARY}
             ${SCREENCAPTUREKIT_LIBRARY}
     )
 elseif(WIN32)

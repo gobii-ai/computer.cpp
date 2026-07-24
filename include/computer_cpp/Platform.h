@@ -20,6 +20,16 @@ struct PermissionStatus {
     bool screenCapture = false;
 };
 
+struct DesktopSessionState {
+    bool detectionSupported = false;
+    bool available = false;
+    bool onConsole = false;
+    bool loginDone = false;
+    bool screenLocked = false;
+    bool screenSaverActive = false;
+    bool displayAsleep = false;
+};
+
 struct AppInfo {
     bool available = false;
     int pid = -1;
@@ -79,6 +89,8 @@ struct SnapshotResult {
 };
 
 PermissionStatus CheckPermissions(bool requestIfMissing);
+DesktopSessionState GetDesktopSessionState();
+bool WakeDesktopSession();
 bool OpenPermissionsSettings();
 bool OpenAccessibilitySettings();
 bool OpenScreenCaptureSettings();

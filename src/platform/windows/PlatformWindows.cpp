@@ -505,6 +505,14 @@ void AppendElementLines(IUIAutomation* automation, IUIAutomationElement* element
 }
 
 PermissionStatus CheckPermissions(bool) { return {true, true}; }
+DesktopSessionState GetDesktopSessionState() {
+    DesktopSessionState state;
+    state.available = true;
+    state.onConsole = true;
+    state.loginDone = true;
+    return state;
+}
+bool WakeDesktopSession() { return false; }
 bool OpenPermissionsSettings() { return OpenSettingsUri(L"ms-settings:easeofaccess"); }
 bool OpenAccessibilitySettings() { return OpenPermissionsSettings(); }
 bool OpenScreenCaptureSettings() { return true; }

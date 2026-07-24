@@ -216,6 +216,14 @@ void TestCliCommandBuilders() {
     assert(appPid.ok());
     assert(appPid.method == "app_activate_pid");
     assert(appPid.params["pid"] == 1234);
+    auto desktopState = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "session-state"});
+    assert(desktopState.ok());
+    assert(desktopState.method == "desktop_session_state");
+    auto desktopWake = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "wake"});
+    assert(desktopWake.ok());
+    assert(desktopWake.method == "desktop_wake");
+    auto invalidDesktop = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "sleep"});
+    assert(!invalidDesktop.ok());
 
     auto openUrl = ComputerCpp::Cli::BuildOpenCommand({
         "open",

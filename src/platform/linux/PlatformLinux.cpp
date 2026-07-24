@@ -1017,6 +1017,14 @@ bool CaptureRootRgb(std::vector<uint8_t>& rgb, int& width, int& height, Bounds b
 } // namespace
 
 PermissionStatus CheckPermissions(bool) { return {true, true}; }
+DesktopSessionState GetDesktopSessionState() {
+    DesktopSessionState state;
+    state.available = true;
+    state.onConsole = true;
+    state.loginDone = true;
+    return state;
+}
+bool WakeDesktopSession() { return false; }
 bool OpenPermissionsSettings() { return false; }
 bool OpenAccessibilitySettings() { return false; }
 bool OpenScreenCaptureSettings() { return false; }

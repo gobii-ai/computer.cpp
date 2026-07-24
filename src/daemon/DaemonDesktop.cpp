@@ -65,6 +65,33 @@ bool IsHttpUrl(const std::string& url) {
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
+json DesktopSessionToJson(const Platform::DesktopSessionState& state) {
+    const bool ready = IsDesktopSessionReady(state);
+    std::string status = "ready";
+    if (!state.detectionSupported) {
+        status = "unsupported";
+    } else if (!state.available || !state.onConsole || !state.loginDone) {
+        status = "unavailable";
+    } else if (state.screenLocked) {
+        status = "locked";
+    } else if (state.displayAsleep) {
+        status = "display_asleep";
+    } else if (state.screenSaverActive) {
+        status = "screensaver";
+    }
+    return {
+        {"detectionSupported", state.detectionSupported},
+        {"available", state.available},
+        {"onConsole", state.onConsole},
+        {"loginDone", state.loginDone},
+        {"screenLocked", state.screenLocked},
+        {"screenSaverActive", state.screenSaverActive},
+        {"displayAsleep", state.displayAsleep},
+        {"ready", ready},
+        {"status", status}
+    };
+}
+
 } // namespace
 
 std::set<std::string> VisibleWindowIds(const std::vector<Platform::WindowInfo>& windows) {
@@ -75,6 +102,24 @@ std::set<std::string> VisibleWindowIds(const std::vector<Platform::WindowInfo>& 
         }
     }
     return ids;
+}
+
+bool IsDesktopSessionReady(const Platform::DesktopSessionState& state) {
+    return state.detectionSupported &&
+        state.available &&
+        state.onConsole &&
+        state.loginDone &&
+        !state.screenLocked &&
+        !state.screenSaverActive &&
+        !state.displayAsleep;
+}
+
+bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state) {
+    return state.detectionSupported &&
+        state.available &&
+        state.onConsole &&
+        state.loginDone &&
+        (!state.screenLocked || state.screenSaverActive);
 }
 
 bool IsPermissionsPane(const std::string& pane) {
@@ -131,11 +176,58 @@ json RunStateCommand(const std::string& session) {
     return Ok({
         {"session", session},
         {"permissions", PermissionToJson(Platform::CheckPermissions(false))},
+        {"desktopSession", DesktopSessionToJson(Platform::GetDesktopSessionState())},
         {"frontmostApp", AppToJson(Platform::GetFrontmostApp())},
         {"focusedElement", FocusedToJson(Platform::GetFocusedElementInfo())},
         {"frontmostWindowBounds", BoundsToJson(Platform::GetFrontmostWindowBounds())},
         {"screen", {{"width", width}, {"height", height}}},
         {"cursor", {{"x", cursorX}, {"y", cursorY}}}
+    });
+}
+
+json RunDesktopSessionStateCommand() {
+    return Ok({
+        {"session", DesktopSessionToJson(Platform::GetDesktopSessionState())},
+        {"frontmostApp", AppToJson(Platform::GetFrontmostApp())}
+    });
+}
+
+json RunDesktopWakeCommand() {
+    const Platform::DesktopSessionState before = Platform::GetDesktopSessionState();
+    if (!before.detectionSupported) {
+        return Error("desktop session detection and wake are not supported on this platform",
+            "desktop_session_unsupported");
+    }
+    if (!before.available || !before.onConsole || !before.loginDone) {
+        return Error("desktop GUI session is unavailable", "desktop_session_unavailable");
+    }
+    if (!CanAttemptDesktopWake(before)) {
+        return Error("desktop session is locked and requires manual unlock", "desktop_locked");
+    }
+
+    const bool alreadyReady = IsDesktopSessionReady(before);
+    const bool wakeSignalSent = alreadyReady ? false : Platform::WakeDesktopSession();
+    Platform::DesktopSessionState after = before;
+    if (!alreadyReady && wakeSignalSent) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            after = Platform::GetDesktopSessionState();
+            if (IsDesktopSessionReady(after)) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } while (std::chrono::steady_clock::now() < deadline);
+    }
+    if (after.screenLocked) {
+        return Error("desktop woke to a lock screen and requires manual unlock", "desktop_locked");
+    }
+    return Ok({
+        {"wakeRequested", !alreadyReady},
+        {"wakeSignalSent", wakeSignalSent},
+        {"ready", IsDesktopSessionReady(after)},
+        {"before", DesktopSessionToJson(before)},
+        {"after", DesktopSessionToJson(after)},
+        {"frontmostApp", AppToJson(Platform::GetFrontmostApp())}
     });
 }
 

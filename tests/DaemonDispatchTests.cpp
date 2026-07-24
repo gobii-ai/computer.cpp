@@ -1,6 +1,7 @@
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/Timeline.h"
 
+#include "DaemonDesktop.h"
 #include "TestSupport.h"
 
 #include <cassert>
@@ -9,6 +10,37 @@
 #include <vector>
 
 namespace {
+
+void TestDesktopSessionReadiness() {
+    ComputerCpp::Platform::DesktopSessionState state;
+    state.available = true;
+    state.onConsole = true;
+    state.loginDone = true;
+    assert(!ComputerCpp::IsDesktopSessionReady(state));
+
+    state.detectionSupported = true;
+    assert(ComputerCpp::IsDesktopSessionReady(state));
+
+    state.screenSaverActive = true;
+    assert(!ComputerCpp::IsDesktopSessionReady(state));
+    state.screenSaverActive = false;
+
+    state.displayAsleep = true;
+    assert(!ComputerCpp::IsDesktopSessionReady(state));
+    state.displayAsleep = false;
+
+    state.screenLocked = true;
+    assert(!ComputerCpp::IsDesktopSessionReady(state));
+    assert(!ComputerCpp::CanAttemptDesktopWake(state));
+
+    state.screenSaverActive = true;
+    assert(ComputerCpp::CanAttemptDesktopWake(state));
+    state.screenSaverActive = false;
+
+    state.screenLocked = false;
+    state.displayAsleep = true;
+    assert(ComputerCpp::CanAttemptDesktopWake(state));
+}
 
 void TestDaemonDispatch() {
     auto response = ComputerCpp::HandleDaemonRequest("unit", {
@@ -803,6 +835,8 @@ void TestDaemonGateCoverageForProtectedMethods() {
     std::vector<std::pair<std::string, nlohmann::json>> protectedMethods = {
         {"permissions", {{"request", true}}},
         {"open_permissions", nlohmann::json::object()},
+        {"desktop_session_state", nlohmann::json::object()},
+        {"desktop_wake", nlohmann::json::object()},
         {"state", nlohmann::json::object()},
         {"snapshot", nlohmann::json::object()},
         {"screenshot", nlohmann::json::object()},
@@ -3083,6 +3117,7 @@ void TestDaemonRequiresControlSessionForProtectedMethods() {
 namespace ComputerCpp::Tests {
 
 void RunDaemonDispatchTests() {
+    TestDesktopSessionReadiness();
     TestDaemonDispatch();
     TestDaemonGateCoverageForProtectedMethods();
     TestBatchDoesNotBypassControlSessionGate();

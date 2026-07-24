@@ -28,6 +28,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <dispatch/dispatch.h>
 
@@ -198,6 +199,52 @@ std::string PermissionRuntimeSummary() {
     }
 
     return out.str();
+}
+
+bool DictionaryBool(CFDictionaryRef dictionary, CFStringRef key, bool fallback) {
+    if (!dictionary || !key) {
+        return fallback;
+    }
+    CFTypeRef value = CFDictionaryGetValue(dictionary, key);
+    if (!value || CFGetTypeID(value) != CFBooleanGetTypeID()) {
+        return fallback;
+    }
+    return CFBooleanGetValue(static_cast<CFBooleanRef>(value));
+}
+
+bool LooksLikeScreenSaver(const AppInfo& app) {
+    std::string identity = app.name + " " + app.bundleId;
+    std::transform(identity.begin(), identity.end(), identity.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return identity.find("screensaver") != std::string::npos ||
+        identity.find("screen saver") != std::string::npos;
+}
+
+bool LooksLikeLoginWindow(const AppInfo& app) {
+    std::string identity = app.name + " " + app.bundleId;
+    std::transform(identity.begin(), identity.end(), identity.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return identity.find("com.apple.loginwindow") != std::string::npos ||
+        identity == "loginwindow ";
+}
+
+bool IsScreenSaverApplicationRunning() {
+    for (NSRunningApplication* running in [[NSWorkspace sharedWorkspace] runningApplications]) {
+        if (!running || [running isTerminated]) {
+            continue;
+        }
+        NSString* name = [running localizedName];
+        NSString* bundleId = [running bundleIdentifier];
+        if ((name && [name rangeOfString:@"screen saver"
+                                 options:NSCaseInsensitiveSearch].location != NSNotFound) ||
+            (bundleId && [bundleId rangeOfString:@"screensaver"
+                                         options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void AppendPermissionTrace(const std::string& event) {
@@ -825,6 +872,51 @@ PermissionStatus CheckPermissions(bool requestIfMissing) {
     }
 
     return status;
+}
+
+DesktopSessionState GetDesktopSessionState() {
+    DesktopSessionState state;
+    state.detectionSupported = true;
+
+    ScopedCFRef<CFDictionaryRef> session(CGSessionCopyCurrentDictionary());
+    state.available = static_cast<bool>(session);
+    if (session) {
+        state.onConsole = DictionaryBool(session.get(), kCGSessionOnConsoleKey, false);
+        state.loginDone = DictionaryBool(session.get(), kCGSessionLoginDoneKey, false);
+        state.screenLocked =
+            DictionaryBool(session.get(), CFSTR("CGSSessionScreenIsLocked"), false);
+    }
+
+    const AppInfo frontmost = GetFrontmostApp();
+    state.screenSaverActive =
+        LooksLikeScreenSaver(frontmost) || IsScreenSaverApplicationRunning();
+    state.screenLocked = state.screenLocked || LooksLikeLoginWindow(frontmost);
+    state.displayAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0;
+    return state;
+}
+
+bool WakeDesktopSession() {
+    const DesktopSessionState state = GetDesktopSessionState();
+    if (!state.available || !state.onConsole || !state.loginDone ||
+        (state.screenLocked && !state.screenSaverActive)) {
+        return false;
+    }
+
+    static IOPMAssertionID assertionId = kIOPMNullAssertionID;
+    const IOReturn activityResult = IOPMAssertionDeclareUserActivity(
+        CFSTR("computer.cpp native desktop control"),
+        kIOPMUserActiveLocal,
+        &assertionId);
+
+    ScopedCFRef<CGEventRef> shiftDown(CGEventCreateKeyboardEvent(nullptr, 56, true));
+    ScopedCFRef<CGEventRef> shiftUp(CGEventCreateKeyboardEvent(nullptr, 56, false));
+    if (shiftDown) {
+        CGEventPost(kCGSessionEventTap, shiftDown.get());
+    }
+    if (shiftUp) {
+        CGEventPost(kCGSessionEventTap, shiftUp.get());
+    }
+    return activityResult == kIOReturnSuccess || (shiftDown && shiftUp);
 }
 
 bool OpenPermissionsSettings() {

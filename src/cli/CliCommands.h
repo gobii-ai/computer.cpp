@@ -18,6 +18,7 @@ struct CommandRequest {
 CommandRequest BuildDaemonCommand(const std::vector<std::string>& args, const std::string& batchInput = "");
 CommandRequest BuildClickCommand(const std::vector<std::string>& args);
 CommandRequest BuildAppCommand(const std::vector<std::string>& args);
+CommandRequest BuildDesktopCommand(const std::vector<std::string>& args);
 CommandRequest BuildClipboardCommand(const std::vector<std::string>& args);
 CommandRequest BuildGetCommand(const std::vector<std::string>& args);
 CommandRequest BuildImageCommand(const std::vector<std::string>& args);

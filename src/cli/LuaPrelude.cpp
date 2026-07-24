@@ -1410,6 +1410,10 @@ function ac.app.launch(query) return ac.request("app_launch", { query = query })
 function ac.app.activate_pid(pid) return ac.request("app_activate_pid", { pid = tonumber(pid) or 0 }) end
 ac.app.activate = ac.app.launch
 
+ac.desktop = {}
+function ac.desktop.session_state() return ac.request("desktop_session_state") end
+function ac.desktop.wake() return ac.request("desktop_wake") end
+
 ac.window = {}
 function ac.window.active() return ac.request("window_active") end
 function ac.window.list(opts) return ac.request("window_list", opts or {}) end

@@ -57,6 +57,8 @@ Observation:
   app launch <name|bundle-id>          Launch or activate app
   app activate <name|bundle-id>        Alias for app launch
   app activate-pid <pid>               Activate app by process id
+  desktop session-state                Inspect desktop lock, screensaver, and display state
+  desktop wake                         Wake an unlocked screensaver or sleeping display
   open url <http-url> [--browser app] [--new-window|--no-new-window] [--new-instance]
                                       Open a URL in a browser
   observe events [limit]               List recent observed input events
