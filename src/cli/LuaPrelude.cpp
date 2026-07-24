@@ -1412,7 +1412,7 @@ ac.app.activate = ac.app.launch
 
 ac.desktop = {}
 function ac.desktop.session_state() return ac.request("desktop_session_state") end
-function ac.desktop.wake() return ac.request("desktop_wake") end
+function ac.desktop.wake(opts) return ac.request("desktop_wake", opts or {}) end
 
 ac.window = {}
 function ac.window.active() return ac.request("window_active") end

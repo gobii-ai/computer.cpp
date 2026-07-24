@@ -139,14 +139,22 @@ CommandRequest BuildDesktopCommand(const std::vector<std::string>& args) {
     if (args.size() < 2) {
         return Error("desktop requires subcommand: session-state or wake");
     }
-    if (args.size() > 2) {
-        return Error("unknown desktop " + args[1] + " option: " + args[2]);
-    }
     if (args[1] == "session-state") {
+        if (args.size() > 2) {
+            return Error("unknown desktop session-state option: " + args[2]);
+        }
         return Ok("desktop_session_state", json::object());
     }
     if (args[1] == "wake") {
-        return Ok("desktop_wake", json::object());
+        json params = json::object();
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--force") {
+                params["force"] = true;
+                continue;
+            }
+            return Error("unknown desktop wake option: " + args[i]);
+        }
+        return Ok("desktop_wake", std::move(params));
     }
     return Error("unknown desktop subcommand: " + args[1]);
 }

@@ -69,6 +69,7 @@ struct NoParamsRoute {
 constexpr auto kParamsRoutes = std::to_array<ParamsRoute>({
     {"permissions", RunPermissionsCommand},
     {"open_permissions", RunOpenPermissionsCommand},
+    {"desktop_wake", RunDesktopWakeCommand},
     {"window_bounds", RunWindowBoundsCommand},
     {"window_list", RunWindowListCommand},
     {"window_activate", RunWindowActivateCommand},
@@ -87,7 +88,6 @@ constexpr auto kParamsRoutes = std::to_array<ParamsRoute>({
 
 constexpr auto kNoParamsRoutes = std::to_array<NoParamsRoute>({
     {"desktop_session_state", RunDesktopSessionStateCommand},
-    {"desktop_wake", RunDesktopWakeCommand},
     {"window_active", RunWindowActiveCommand},
     {"app_active", RunAppActiveCommand},
     {"clipboard_read", RunClipboardReadCommand},

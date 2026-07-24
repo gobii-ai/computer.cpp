@@ -1024,7 +1024,7 @@ DesktopSessionState GetDesktopSessionState() {
     state.loginDone = true;
     return state;
 }
-bool WakeDesktopSession() { return false; }
+bool WakeDesktopSession(bool) { return false; }
 bool OpenPermissionsSettings() { return false; }
 bool OpenAccessibilitySettings() { return false; }
 bool OpenScreenCaptureSettings() { return false; }

@@ -32,6 +32,7 @@ void TestDesktopSessionReadiness() {
     state.screenLocked = true;
     assert(!ComputerCpp::IsDesktopSessionReady(state));
     assert(!ComputerCpp::CanAttemptDesktopWake(state));
+    assert(ComputerCpp::CanAttemptDesktopWake(state, true));
 
     state.screenSaverActive = true;
     assert(ComputerCpp::CanAttemptDesktopWake(state));

@@ -895,10 +895,10 @@ DesktopSessionState GetDesktopSessionState() {
     return state;
 }
 
-bool WakeDesktopSession() {
+bool WakeDesktopSession(bool force) {
     const DesktopSessionState state = GetDesktopSessionState();
     if (!state.available || !state.onConsole || !state.loginDone ||
-        (state.screenLocked && !state.screenSaverActive)) {
+        (state.screenLocked && !state.screenSaverActive && !force)) {
         return false;
     }
 

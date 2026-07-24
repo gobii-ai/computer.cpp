@@ -512,7 +512,7 @@ DesktopSessionState GetDesktopSessionState() {
     state.loginDone = true;
     return state;
 }
-bool WakeDesktopSession() { return false; }
+bool WakeDesktopSession(bool) { return false; }
 bool OpenPermissionsSettings() { return OpenSettingsUri(L"ms-settings:easeofaccess"); }
 bool OpenAccessibilitySettings() { return OpenPermissionsSettings(); }
 bool OpenScreenCaptureSettings() { return true; }

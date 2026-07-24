@@ -12,12 +12,12 @@ namespace ComputerCpp {
 
 std::set<std::string> VisibleWindowIds(const std::vector<Platform::WindowInfo>& windows);
 bool IsDesktopSessionReady(const Platform::DesktopSessionState& state);
-bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state);
+bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state, bool force = false);
 nlohmann::json RunPermissionsCommand(const nlohmann::json& params);
 nlohmann::json RunOpenPermissionsCommand(const nlohmann::json& params);
 nlohmann::json RunStateCommand(const std::string& session);
 nlohmann::json RunDesktopSessionStateCommand();
-nlohmann::json RunDesktopWakeCommand();
+nlohmann::json RunDesktopWakeCommand(const nlohmann::json& params);
 nlohmann::json RunWindowBoundsCommand(const nlohmann::json& params);
 nlohmann::json RunWindowActiveCommand();
 nlohmann::json RunWindowListCommand(const nlohmann::json& params);

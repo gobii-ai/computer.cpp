@@ -222,6 +222,10 @@ void TestCliCommandBuilders() {
     auto desktopWake = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "wake"});
     assert(desktopWake.ok());
     assert(desktopWake.method == "desktop_wake");
+    auto desktopForceWake = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "wake", "--force"});
+    assert(desktopForceWake.ok());
+    assert(desktopForceWake.method == "desktop_wake");
+    assert(desktopForceWake.params["force"] == true);
     auto invalidDesktop = ComputerCpp::Cli::BuildDesktopCommand({"desktop", "sleep"});
     assert(!invalidDesktop.ok());
 

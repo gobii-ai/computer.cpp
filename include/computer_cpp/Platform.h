@@ -90,7 +90,7 @@ struct SnapshotResult {
 
 PermissionStatus CheckPermissions(bool requestIfMissing);
 DesktopSessionState GetDesktopSessionState();
-bool WakeDesktopSession();
+bool WakeDesktopSession(bool force = false);
 bool OpenPermissionsSettings();
 bool OpenAccessibilitySettings();
 bool OpenScreenCaptureSettings();

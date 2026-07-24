@@ -114,12 +114,12 @@ bool IsDesktopSessionReady(const Platform::DesktopSessionState& state) {
         !state.displayAsleep;
 }
 
-bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state) {
+bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state, bool force) {
     return state.detectionSupported &&
         state.available &&
         state.onConsole &&
         state.loginDone &&
-        (!state.screenLocked || state.screenSaverActive);
+        (!state.screenLocked || state.screenSaverActive || force);
 }
 
 bool IsPermissionsPane(const std::string& pane) {
@@ -192,7 +192,17 @@ json RunDesktopSessionStateCommand() {
     });
 }
 
-json RunDesktopWakeCommand() {
+json RunDesktopWakeCommand(const json& params) {
+    if (auto unknown = UnknownParam(params, {
+        "force", "controlSession", "controlSessionToken", "controlScope"
+    })) {
+        return Error("unknown desktop_wake parameter: " + *unknown, "invalid_desktop");
+    }
+    auto forceParam = BoolParam(params, "force", false);
+    if (!forceParam) {
+        return Error("desktop_wake force must be boolean", "invalid_desktop");
+    }
+    const bool force = *forceParam;
     const Platform::DesktopSessionState before = Platform::GetDesktopSessionState();
     if (!before.detectionSupported) {
         return Error("desktop session detection and wake are not supported on this platform",
@@ -201,12 +211,12 @@ json RunDesktopWakeCommand() {
     if (!before.available || !before.onConsole || !before.loginDone) {
         return Error("desktop GUI session is unavailable", "desktop_session_unavailable");
     }
-    if (!CanAttemptDesktopWake(before)) {
+    if (!CanAttemptDesktopWake(before, force)) {
         return Error("desktop session is locked and requires manual unlock", "desktop_locked");
     }
 
-    const bool alreadyReady = IsDesktopSessionReady(before);
-    const bool wakeSignalSent = alreadyReady ? false : Platform::WakeDesktopSession();
+    const bool alreadyReady = !force && IsDesktopSessionReady(before);
+    const bool wakeSignalSent = alreadyReady ? false : Platform::WakeDesktopSession(force);
     Platform::DesktopSessionState after = before;
     if (!alreadyReady && wakeSignalSent) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -223,6 +233,7 @@ json RunDesktopWakeCommand() {
     }
     return Ok({
         {"wakeRequested", !alreadyReady},
+        {"forced", force},
         {"wakeSignalSent", wakeSignalSent},
         {"ready", IsDesktopSessionReady(after)},
         {"before", DesktopSessionToJson(before)},
