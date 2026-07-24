@@ -1747,8 +1747,21 @@ bool TypeText(const std::string& text, int holdMs) {
     }
     for (NSUInteger i = 0; i < [nsText length]; ++i) {
         NSString* ch = [nsText substringWithRange:NSMakeRange(i, 1)];
+        if ([ch isEqualToString:@"\r"] || [ch isEqualToString:@"\n"]) {
+            if ([ch isEqualToString:@"\r"] && i + 1 < [nsText length]) {
+                NSString* next = [nsText substringWithRange:NSMakeRange(i + 1, 1)];
+                if ([next isEqualToString:@"\n"]) {
+                    ++i;
+                }
+            }
+            if (!SendHotkey({"enter"}, holdMs)) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            continue;
+        }
         if (!TypeCharacter(NSStringToString(ch), holdMs)) {
-            return PasteText(text);
+            return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
