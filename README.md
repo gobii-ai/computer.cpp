@@ -401,6 +401,13 @@ Servers are not started automatically when ComputerCpp launches. Any healthy
 configured servers left by an interrupted tray process are adopted, and
 quitting ComputerCpp stops all managed servers.
 
+Server processes keep independent Lua memory and operation storage, while
+top-level app commands share one desktop-control queue. If Notes and Reminders
+receive commands at the same time, one command holds exclusive mouse and
+keyboard control for its entire workflow and the other waits. The lease is
+renewed while a long command runs and released on success or failure. Health,
+schema, and operation-status requests do not acquire desktop control.
+
 With the example above, the MCP endpoints could be:
 
 ```text
