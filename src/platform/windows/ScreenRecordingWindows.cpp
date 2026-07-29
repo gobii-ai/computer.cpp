@@ -1,7 +1,5 @@
 #include "computer_cpp/ScreenRecording.h"
 
-#include "computer_cpp/WindowsUtil.h"
-
 #define NOMINMAX
 #include <windows.h>
 #include <mfapi.h>
@@ -201,8 +199,7 @@ void RunRecording(const std::shared_ptr<WindowsRecordingState>& state) {
             result = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
         }
         if (SUCCEEDED(result)) {
-            const std::wstring path =
-                Windows::Utf8ToWide(state->options.outputPath.string());
+            const std::wstring path = state->options.outputPath.wstring();
             result = MFCreateSinkWriterFromURL(path.c_str(), nullptr, attributes, &writer);
         }
         if (FAILED(result)) {
@@ -230,7 +227,7 @@ void RunRecording(const std::shared_ptr<WindowsRecordingState>& state) {
     if (failure.empty()) {
         result = MFCreateMediaType(&inputType);
         if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_ARGB32);
+        if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
         if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
         if (SUCCEEDED(result)) result = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, targetWidth, targetHeight);
         if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, frameRate, 1);

@@ -395,6 +395,32 @@ void TestNativeCommandRecordingSmoke() {
     assert(fs::exists(path));
     assert(fs::file_size(path) > 0);
     std::cout << "[native-recording] " << path.string() << std::endl;
+
+#if defined(_WIN32)
+    const fs::path unicodeDirectory =
+        ComputerCpp::RecordingDir() / fs::path(L"unicode-\u5F55\u5236");
+    ComputerCpp::EnsureDirectory(unicodeDirectory);
+    const fs::path unicodePath = unicodeDirectory / L"native-recording.mp4";
+    ComputerCpp::Platform::ScreenRecordingOptions unicodeOptions;
+    unicodeOptions.outputPath = unicodePath;
+    std::string unicodeError;
+    auto unicodeRecording = ComputerCpp::Platform::StartScreenRecording(
+        unicodeOptions,
+        5000,
+        &unicodeError);
+    if (!unicodeRecording) {
+        std::cout << "[native-recording-unicode-path-unavailable] "
+                  << unicodeError << std::endl;
+        assert(mode != "required");
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    assert(unicodeRecording->Stop(10000, &unicodeError));
+    assert(fs::exists(unicodePath));
+    assert(fs::file_size(unicodePath) > 0);
+    std::cout << "[native-recording-unicode-path] "
+              << fs::file_size(unicodePath) << " bytes" << std::endl;
+#endif
 }
 
 void TestTrayServerState() {
