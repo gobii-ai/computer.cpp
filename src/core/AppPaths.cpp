@@ -106,7 +106,7 @@ fs::path ConfigPath() {
 }
 
 fs::path RecordingDir() {
-    fs::path path = ConfigDir() / "recordings";
+    fs::path path = AppDataDir() / "recordings";
     EnsurePrivateDirectory(path);
     return path;
 }

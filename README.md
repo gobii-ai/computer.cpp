@@ -794,8 +794,9 @@ retention_days = 14
 Recordings use H.264 MP4 at 15 fps, include the cursor, contain no audio, and
 are capped at a 1920-pixel maximum dimension. macOS records the main display;
 Windows records the full virtual desktop. Files and JSON sidecars are stored by
-app and date under the platform recording folder shown in Settings. Completed
-recordings older than the retention period are cleaned up automatically.
+app and date under the recording folder shown in Settings, next to the
+application artifacts folder. Completed recordings older than the retention
+period are cleaned up automatically.
 
 Recording failures never fail the app command. CLI JSON reports recording
 metadata as `data.recording`; text CLI writes the completed path or failure to

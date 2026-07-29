@@ -123,6 +123,8 @@ void TestAppConfigServerRoundTrip() {
     assert(visible["recording"]["enabled"] == true);
     assert(visible["recording"]["retentionDays"] == 14);
     assert(visible["recording"]["directory"] == ComputerCpp::RecordingDir().string());
+    assert(ComputerCpp::RecordingDir().parent_path() ==
+        ComputerCpp::DefaultArtifactDir().parent_path());
 
     ComputerCpp::AppConfig tokenConfig = ComputerCpp::DefaultAppConfig();
     assert(ComputerCpp::EnsureServerAuthToken(tokenConfig));
