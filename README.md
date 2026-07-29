@@ -69,6 +69,7 @@ programmable.
 - [Quick Start](#quick-start)
 - [Define An App API](#define-an-app-api)
 - [Operations](#operations)
+- [Per-Command Video Recording](#per-command-video-recording)
 - [Micro-Agents](#micro-agents)
 - [Core Desktop Control](#core-desktop-control)
 - [LLM Configuration](#llm-configuration)
@@ -776,6 +777,34 @@ cancelled
 Long-running desktop work should be inspectable, cancellable, traceable, and
 easy to call.
 
+## Per-Command Video Recording
+
+Video recording is opt-in and disabled by default. Enable `Record app commands`
+from the tray menu or the `Recording` tab in Settings. The setting applies to
+new top-level app commands invoked through CLI, HTTP, MCP, and async operations;
+low-level daemon calls are not recorded. Async operations snapshot the setting
+when accepted, and active recordings continue if recording is later disabled.
+
+```toml
+[recording]
+enabled = false
+retention_days = 14
+```
+
+Recordings use H.264 MP4 at 15 fps, include the cursor, contain no audio, and
+are capped at a 1920-pixel maximum dimension. macOS records the main display;
+Windows records the full virtual desktop. Files and JSON sidecars are stored by
+app and date under the platform recording folder shown in Settings. Completed
+recordings older than the retention period are cleaned up automatically.
+
+Recording failures never fail the app command. CLI JSON reports recording
+metadata as `data.recording`; text CLI writes the completed path or failure to
+stderr. MCP tool results use `_meta["org.computercpp/recording"]`. HTTP response
+bodies remain unchanged and expose percent-encoded
+`X-ComputerCpp-Recording-Id`, `X-ComputerCpp-Recording-Status`, and
+`X-ComputerCpp-Recording-Path` headers. Async operation records expose the same
+recording object while it starts, records, and finalizes.
+
 ## Micro-Agents
 
 `computer.cpp` supports small, bounded model-driven loops for narrow desktop
@@ -983,6 +1012,8 @@ window edits the same `config.toml` file:
 - `Config` shows the config file path. `Open Config` opens the TOML file in the
   default editor, `Reload` discards unsaved UI changes, and `Save Changes`
   writes the TOML file.
+- `Recording` enables per-command desktop video capture, shows the private
+  recording folder, and opens that folder.
 
 ## Lua Scripts
 
@@ -1073,6 +1104,7 @@ A process with a control-session token can perform real desktop actions.
 Localhost HTTP serving is intended for local development/control.
 Do not expose the HTTP server broadly without authentication and a proper network boundary.
 Screenshots and traces may contain sensitive data.
+Desktop recordings may contain anything visible on the captured display.
 Model-backed commands may send screenshots or text to a configured model provider.
 ```
 

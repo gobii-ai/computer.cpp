@@ -1,5 +1,6 @@
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/HumanInput.h"
 #include "computer_cpp/Image.h"
 #include "computer_cpp/LuaRunner.h"
@@ -23,13 +24,21 @@
 #include <optional>
 #include <sqlite3.h>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <crtdbg.h>
+#include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 using ComputerCpp::Tests::MakeTempHome;
 
 namespace {
@@ -62,6 +71,8 @@ void TestAppConfigServerRoundTrip() {
     assert(missing.server.host == "0.0.0.0");
     assert(missing.server.basePort == 8787);
     assert(missing.server.apps.empty());
+    assert(!missing.recording.enabled);
+    assert(missing.recording.retentionDays == 14);
 
     ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
     assert(defaults.server.host == "0.0.0.0");
@@ -73,6 +84,7 @@ void TestAppConfigServerRoundTrip() {
     config.server.basePort = 8790;
     config.server.authToken = "test-token";
     config.server.allowedOrigins = {"https://mcp.example.com", "http://127.0.0.1:3000"};
+    config.recording.enabled = true;
 
     ComputerCpp::ServerAppConfig linkedin;
     linkedin.name = "linkedin";
@@ -85,6 +97,9 @@ void TestAppConfigServerRoundTrip() {
     assert(toml.find("[server]") != std::string::npos);
     assert(toml.find("[server.apps.linkedin]") != std::string::npos);
     assert(toml.find("auth_token = \"test-token\"") != std::string::npos);
+    assert(toml.find("[recording]") != std::string::npos);
+    assert(toml.find("enabled = true") != std::string::npos);
+    assert(toml.find("retention_days = 14") != std::string::npos);
 
     std::string error;
     assert(ComputerCpp::SaveAppConfig(config, &error));
@@ -98,11 +113,16 @@ void TestAppConfigServerRoundTrip() {
     assert(loaded.server.apps["linkedin"].displayName == "LinkedIn Recruiter");
     assert(loaded.server.apps["linkedin"].path == "/tmp/linkedin-recruiter.lua");
     assert(loaded.server.apps["linkedin"].port == 8788);
+    assert(loaded.recording.enabled);
+    assert(loaded.recording.retentionDays == 14);
 
     auto redacted = ComputerCpp::AppConfigToJson(loaded);
     assert(redacted["server"]["authToken"] == "<redacted>");
     auto visible = ComputerCpp::AppConfigToJson(loaded, false);
     assert(visible["server"]["authToken"] == "test-token");
+    assert(visible["recording"]["enabled"] == true);
+    assert(visible["recording"]["retentionDays"] == 14);
+    assert(visible["recording"]["directory"] == ComputerCpp::RecordingDir().string());
 
     ComputerCpp::AppConfig tokenConfig = ComputerCpp::DefaultAppConfig();
     assert(ComputerCpp::EnsureServerAuthToken(tokenConfig));
@@ -110,6 +130,342 @@ void TestAppConfigServerRoundTrip() {
     std::string generated = tokenConfig.server.authToken;
     assert(!ComputerCpp::EnsureServerAuthToken(tokenConfig));
     assert(tokenConfig.server.authToken == generated);
+
+    loaded.recording.enabled = false;
+    assert(ComputerCpp::SaveAppConfig(loaded, &error));
+}
+
+class FakeScreenRecordingSession final : public ComputerCpp::Platform::ScreenRecordingSession {
+public:
+    explicit FakeScreenRecordingSession(bool stopSucceeds)
+        : stopSucceeds_(stopSucceeds) {}
+
+    bool Stop(int, std::string* error) override {
+        if (!stopSucceeds_ && error) {
+            *error = "fake finalization failure";
+        }
+        return stopSucceeds_;
+    }
+
+private:
+    bool stopSucceeds_;
+};
+
+ComputerCpp::ScreenRecordingFactory FakeRecordingFactory(bool startSucceeds, bool stopSucceeds) {
+    return [startSucceeds, stopSucceeds](
+        const ComputerCpp::Platform::ScreenRecordingOptions& options,
+        int startTimeoutMs,
+        std::string* error
+    ) -> std::unique_ptr<ComputerCpp::Platform::ScreenRecordingSession> {
+        assert(startTimeoutMs == 5000);
+        assert(options.framesPerSecond == 15);
+        assert(options.maxDimension == 1920);
+        assert(options.includeCursor);
+        if (!startSucceeds) {
+            if (error) {
+                *error = "fake startup failure";
+            }
+            return nullptr;
+        }
+        fs::create_directories(options.outputPath.parent_path());
+        std::ofstream file(options.outputPath, std::ios::binary);
+        file << "fake-mp4";
+        file.close();
+        return std::make_unique<FakeScreenRecordingSession>(stopSucceeds);
+    };
+}
+
+void TestCommandRecordingLifecycle() {
+    ComputerCpp::ResetRecordingCleanupForTesting();
+    ComputerCpp::CommandRecordingOptions disabledOptions;
+    disabledOptions.enabled = false;
+    disabledOptions.factory = [](const auto&, int, std::string*) {
+        assert(false && "disabled recording must not start a backend");
+        return std::unique_ptr<ComputerCpp::Platform::ScreenRecordingSession>();
+    };
+    ComputerCpp::CommandRecording disabled(std::move(disabledOptions));
+    assert(!disabled.enabled());
+    assert(disabled.metadata().empty());
+
+    const fs::path cleanupDir = ComputerCpp::RecordingDir() / "cleanup-test";
+    fs::create_directories(cleanupDir);
+    const fs::path expiredVideo = cleanupDir / "expired.mp4";
+    const fs::path expiredSidecar = cleanupDir / "expired.json";
+    const fs::path abandonedPartial = cleanupDir / "abandoned.partial.mp4";
+    const fs::path activePartial = cleanupDir / "active.partial.mp4";
+    for (const auto& path : {expiredVideo, expiredSidecar, abandonedPartial, activePartial}) {
+        std::ofstream file(path);
+        file << "old";
+    }
+    fs::last_write_time(
+        expiredVideo,
+        fs::file_time_type::clock::now() - std::chrono::hours(24 * 15));
+    fs::last_write_time(
+        expiredSidecar,
+        fs::file_time_type::clock::now() - std::chrono::hours(24 * 15));
+    fs::last_write_time(
+        abandonedPartial,
+        fs::file_time_type::clock::now() - std::chrono::hours(25));
+    fs::last_write_time(
+        activePartial,
+        fs::file_time_type::clock::now() - std::chrono::hours(25));
+    const fs::path liveMarker =
+        ComputerCpp::RecordingDir() / ".active" / "rec_cleanup_live.json";
+    fs::create_directories(liveMarker.parent_path());
+    {
+        std::ofstream file(liveMarker);
+#if defined(_WIN32)
+        const long long processId = static_cast<long long>(GetCurrentProcessId());
+#else
+        const long long processId = static_cast<long long>(getpid());
+#endif
+        file << json({
+            {"recordingId", "rec_cleanup_live"},
+            {"pid", processId},
+            {"partialPath", activePartial.string()},
+        }).dump(2);
+    }
+
+    ComputerCpp::CommandRecordingOptions successOptions;
+    successOptions.enabled = true;
+    successOptions.appId = "test app";
+    successOptions.command = "open private record";
+    successOptions.surface = "cli";
+    successOptions.recordingId = "rec_test_success";
+    successOptions.factory = FakeRecordingFactory(true, true);
+    ComputerCpp::CommandRecording success(std::move(successOptions));
+    assert(!fs::exists(expiredVideo));
+    assert(!fs::exists(expiredSidecar));
+    assert(!fs::exists(abandonedPartial));
+    assert(fs::exists(activePartial));
+    fs::remove(liveMarker);
+    fs::remove(activePartial);
+    assert(success.metadata()["status"] == "recording");
+    assert(success.metadata()["recordingId"] == "rec_test_success");
+    success.Finish("succeeded");
+    const json successMetadata = success.metadata();
+    assert(successMetadata["status"] == "recorded");
+    assert(successMetadata["commandStatus"] == "succeeded");
+    assert(successMetadata["appId"] == "test app");
+    assert(successMetadata["command"] == "open private record");
+    assert(successMetadata["surface"] == "cli");
+    assert(successMetadata["error"].is_null());
+    const fs::path finalPath = successMetadata["path"].get<std::string>();
+    assert(fs::exists(finalPath));
+    assert(finalPath.extension() == ".mp4");
+    assert(finalPath.string().find("test-app") != std::string::npos);
+    fs::path sidecarPath = finalPath;
+    sidecarPath.replace_extension(".json");
+    assert(fs::exists(sidecarPath));
+    {
+        std::ifstream sidecarFile(sidecarPath);
+        json sidecar = json::parse(sidecarFile);
+        assert(sidecar["status"] == "recorded");
+        assert(!sidecar.contains("startedAtMs"));
+        assert(!sidecar.contains("arguments"));
+    }
+
+#if defined(__unix__) || defined(__APPLE__)
+    const auto permissions = fs::status(ComputerCpp::RecordingDir()).permissions();
+    assert((permissions & fs::perms::group_all) == fs::perms::none);
+    assert((permissions & fs::perms::others_all) == fs::perms::none);
+#endif
+
+    ComputerCpp::CommandRecordingOptions startFailureOptions;
+    startFailureOptions.enabled = true;
+    startFailureOptions.appId = "test";
+    startFailureOptions.command = "failure";
+    startFailureOptions.surface = "mcp";
+    startFailureOptions.factory = FakeRecordingFactory(false, true);
+    ComputerCpp::CommandRecording startFailure(std::move(startFailureOptions));
+    assert(startFailure.metadata()["status"] == "failed");
+    assert(startFailure.metadata()["error"] == "fake startup failure");
+
+    ComputerCpp::CommandRecordingOptions stopFailureOptions;
+    stopFailureOptions.enabled = true;
+    stopFailureOptions.appId = "test";
+    stopFailureOptions.command = "failure";
+    stopFailureOptions.surface = "http";
+    stopFailureOptions.factory = FakeRecordingFactory(true, false);
+    ComputerCpp::CommandRecording stopFailure(std::move(stopFailureOptions));
+    stopFailure.Finish("failed");
+    assert(stopFailure.metadata()["status"] == "failed");
+    assert(stopFailure.metadata()["commandStatus"] == "failed");
+    assert(stopFailure.metadata()["error"] == "fake finalization failure");
+
+    ComputerCpp::CommandRecordingOptions commandErrorOptions;
+    commandErrorOptions.enabled = true;
+    commandErrorOptions.appId = "test";
+    commandErrorOptions.command = "command-error";
+    commandErrorOptions.surface = "cli";
+    commandErrorOptions.factory = FakeRecordingFactory(true, true);
+    ComputerCpp::CommandRecording commandError(std::move(commandErrorOptions));
+    commandError.Finish("failed");
+    assert(commandError.metadata()["status"] == "recorded");
+    assert(commandError.metadata()["commandStatus"] == "failed");
+
+    ComputerCpp::CommandRecordingOptions cancelledOptions;
+    cancelledOptions.enabled = true;
+    cancelledOptions.appId = "test";
+    cancelledOptions.command = "cancelled";
+    cancelledOptions.surface = "http";
+    cancelledOptions.factory = FakeRecordingFactory(true, true);
+    ComputerCpp::CommandRecording cancelled(std::move(cancelledOptions));
+    cancelled.Finish("cancelled");
+    assert(cancelled.metadata()["status"] == "recorded");
+    assert(cancelled.metadata()["commandStatus"] == "cancelled");
+
+    const fs::path interruptedMirror =
+        ComputerCpp::RecordingDir() / "interrupted-mirror.json";
+    {
+        ComputerCpp::CommandRecordingOptions interruptedOptions;
+        interruptedOptions.enabled = true;
+        interruptedOptions.appId = "test";
+        interruptedOptions.command = "interrupted";
+        interruptedOptions.surface = "async";
+        interruptedOptions.statusMirrorPath = interruptedMirror;
+        interruptedOptions.factory = FakeRecordingFactory(true, true);
+        ComputerCpp::CommandRecording interrupted(std::move(interruptedOptions));
+        assert(interrupted.metadata()["status"] == "recording");
+    }
+    {
+        std::ifstream file(interruptedMirror);
+        json interrupted = json::parse(file);
+        assert(interrupted["status"] == "interrupted");
+        assert(interrupted["commandStatus"] == "interrupted");
+    }
+
+    const fs::path staleSidecar = ComputerCpp::RecordingDir() / "stale.json";
+    const fs::path staleMarker = ComputerCpp::RecordingDir() / ".active" / "stale.json";
+    fs::create_directories(staleMarker.parent_path());
+    {
+        std::ofstream file(staleSidecar);
+        file << json({
+            {"recordingId", "rec_stale"},
+            {"status", "recording"},
+            {"startedAt", "2026-01-01T00:00:00Z"},
+            {"finishedAt", nullptr},
+            {"durationMs", nullptr},
+            {"error", nullptr},
+            {"commandStatus", "running"},
+        }).dump(2);
+    }
+    {
+        std::ofstream file(staleMarker);
+        file << json({
+            {"recordingId", "rec_stale"},
+            {"pid", 999999999},
+            {"sidecarPath", staleSidecar.string()},
+        }).dump(2);
+    }
+    ComputerCpp::ResetRecordingCleanupForTesting();
+    ComputerCpp::CleanupExpiredRecordings(14);
+    assert(!fs::exists(staleMarker));
+    {
+        std::ifstream file(staleSidecar);
+        json recovered = json::parse(file);
+        assert(recovered["status"] == "interrupted");
+        assert(recovered["commandStatus"] == "interrupted");
+    }
+
+    const fs::path reusedPidSidecar =
+        ComputerCpp::RecordingDir() / "reused-pid.json";
+    const fs::path reusedPidMarker =
+        ComputerCpp::RecordingDir() / ".active" / "reused-pid.json";
+    {
+        std::ofstream file(reusedPidSidecar);
+        file << json({
+            {"recordingId", "rec_reused_pid"},
+            {"status", "recording"},
+            {"startedAt", "2026-01-01T00:00:00Z"},
+            {"finishedAt", nullptr},
+            {"durationMs", nullptr},
+            {"error", nullptr},
+            {"commandStatus", "running"},
+        }).dump(2);
+    }
+    {
+#if defined(_WIN32)
+        const long long processId = static_cast<long long>(GetCurrentProcessId());
+#else
+        const long long processId = static_cast<long long>(getpid());
+#endif
+        const int64_t oldStart = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch() -
+            std::chrono::hours(25)).count();
+        std::ofstream file(reusedPidMarker);
+        file << json({
+            {"recordingId", "rec_reused_pid"},
+            {"pid", processId},
+            {"sidecarPath", reusedPidSidecar.string()},
+            {"startedAtMs", oldStart},
+        }).dump(2);
+    }
+    assert(ComputerCpp::ActiveRecordingCount() == 0);
+    ComputerCpp::ResetRecordingCleanupForTesting();
+    ComputerCpp::CleanupExpiredRecordings(14);
+    assert(!fs::exists(reusedPidMarker));
+    {
+        std::ifstream file(reusedPidSidecar);
+        const json recovered = json::parse(file);
+        assert(recovered["status"] == "interrupted");
+    }
+}
+
+void TestNativeCommandRecordingSmoke() {
+    const char* enabled = std::getenv("COMPUTER_CPP_NATIVE_RECORDING_SMOKE");
+    const std::string mode = enabled ? enabled : "";
+    if (mode != "1" && mode != "required") {
+        std::cout << "[skip] native recording smoke "
+                     "(set COMPUTER_CPP_NATIVE_RECORDING_SMOKE=1 or required)"
+                  << std::endl;
+        return;
+    }
+    ComputerCpp::CommandRecordingOptions options;
+    options.enabled = true;
+    options.appId = "native-smoke";
+    options.command = "record";
+    options.surface = "test";
+    ComputerCpp::CommandRecording recording(std::move(options));
+    if (recording.metadata().value("status", "") != "recording") {
+        std::cout << "[native-recording-unavailable] " << recording.metadata().dump()
+                  << std::endl;
+        assert(mode != "required");
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    recording.Finish("succeeded");
+    assert(recording.metadata()["status"] == "recorded");
+    const fs::path path = recording.metadata()["path"].get<std::string>();
+    assert(fs::exists(path));
+    assert(fs::file_size(path) > 0);
+    std::cout << "[native-recording] " << path.string() << std::endl;
+
+#if defined(_WIN32)
+    const fs::path unicodeDirectory =
+        ComputerCpp::RecordingDir() / fs::path(L"unicode-\u5F55\u5236");
+    ComputerCpp::EnsureDirectory(unicodeDirectory);
+    const fs::path unicodePath = unicodeDirectory / L"native-recording.mp4";
+    ComputerCpp::Platform::ScreenRecordingOptions unicodeOptions;
+    unicodeOptions.outputPath = unicodePath;
+    std::string unicodeError;
+    auto unicodeRecording = ComputerCpp::Platform::StartScreenRecording(
+        unicodeOptions,
+        5000,
+        &unicodeError);
+    if (!unicodeRecording) {
+        std::cout << "[native-recording-unicode-path-unavailable] "
+                  << unicodeError << std::endl;
+        assert(mode != "required");
+        return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    assert(unicodeRecording->Stop(10000, &unicodeError));
+    assert(fs::exists(unicodePath));
+    assert(fs::file_size(unicodePath) > 0);
+    std::cout << "[native-recording-unicode-path] "
+              << fs::file_size(unicodePath) << " bytes" << std::endl;
+#endif
 }
 
 void TestTrayServerState() {
@@ -594,6 +950,8 @@ int main() {
 
     RunTest("StringUtils", TestStringUtils);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
+    RunTest("CommandRecordingLifecycle", TestCommandRecordingLifecycle);
+    RunTest("NativeCommandRecordingSmoke", TestNativeCommandRecordingSmoke);
     RunTest("TrayServerState", TestTrayServerState);
     RunTest("RefStore", TestRefStore);
     RunTest("NativeDependencies", TestNativeDependencies);

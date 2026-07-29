@@ -1,13 +1,16 @@
 #include "TestSupport.h"
 
 #include "CliCommands.h"
+#include "CliApp.h"
 #include "CliConfig.h"
 #include "CliOptions.h"
+#include "CliRecordingMetadata.h"
 #include "CliRunCommand.h"
 #include "CliSession.h"
 #include "CliSessionParsing.h"
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/LuaRunner.h"
 
 #include <nlohmann/json.hpp>
@@ -19,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -2169,6 +2173,231 @@ void TestConfigCliCanonicalFile() {
     assert(path.stdoutText.find(ComputerCpp::ConfigPath().string()) != std::string::npos);
 }
 
+class CliFakeRecordingSession final : public ComputerCpp::Platform::ScreenRecordingSession {
+public:
+    bool Stop(int, std::string*) override {
+        return true;
+    }
+};
+
+void TestRecordingSurfaceMetadata() {
+    const std::filesystem::path recordingPath =
+        ComputerCpp::RecordingDir() / "test-app" / "2026-07-29" /
+        "command with space.mp4";
+    const nlohmann::json recording = {
+        {"recordingId", "rec 123"},
+        {"status", "recorded"},
+        {"path", recordingPath.string()},
+    };
+    nlohmann::json externalRecording = recording;
+    externalRecording["path"] =
+        "test-app/2026-07-29/command with space.mp4";
+    const auto headers = ComputerCpp::Cli::RecordingHttpHeaders(recording);
+    assert(headers.at("X-ComputerCpp-Recording-Id") == "rec%20123");
+    assert(headers.at("X-ComputerCpp-Recording-Status") == "recorded");
+    assert(headers.at("X-ComputerCpp-Recording-Path") ==
+        "test-app%2F2026-07-29%2Fcommand%20with%20space.mp4");
+
+    nlohmann::json success = {{"content", nlohmann::json::array()}};
+    ComputerCpp::Cli::AttachMcpRecordingMetadata(success, recording);
+    assert(success["_meta"]["org.computercpp/recording"] == externalRecording);
+
+    nlohmann::json toolError = {{"isError", true}};
+    ComputerCpp::Cli::AttachMcpRecordingMetadata(toolError, recording);
+    assert(toolError["_meta"]["org.computercpp/recording"] == externalRecording);
+
+    const nlohmann::json rpcErrorData =
+        ComputerCpp::Cli::McpRecordingErrorData(recording);
+    assert(rpcErrorData["_meta"]["org.computercpp/recording"] == externalRecording);
+    assert(ComputerCpp::Cli::RecordingErrorText({
+        {"status", "starting"},
+        {"error", nullptr},
+    }).empty());
+    const nlohmann::json outsideRecording = {
+        {"recordingId", "rec-outside"},
+        {"status", "recorded"},
+        {"path", (ComputerCpp::RecordingDir().parent_path() / "private.mp4").string()},
+    };
+    const auto outsideHeaders =
+        ComputerCpp::Cli::RecordingHttpHeaders(outsideRecording);
+    assert(outsideHeaders.at("X-ComputerCpp-Recording-Path").empty());
+    assert(ComputerCpp::Cli::RecordingHttpHeaders(nlohmann::json::object()).empty());
+    assert(ComputerCpp::Cli::McpRecordingErrorData(nlohmann::json::object()).is_null());
+}
+
+void TestCliCommandRecordingMetadata() {
+    if (SkipLuaTestIfUnavailable("TestCliCommandRecordingMetadata")) {
+        return;
+    }
+
+    std::string error;
+    ComputerCpp::AppConfig originalConfig = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    ComputerCpp::AppConfig config = originalConfig;
+    config.recording.enabled = true;
+    assert(ComputerCpp::SaveAppConfig(config, &error));
+
+    ComputerCpp::SetScreenRecordingFactoryForTesting(
+        [](const ComputerCpp::Platform::ScreenRecordingOptions& options, int, std::string*) {
+            std::filesystem::create_directories(options.outputPath.parent_path());
+            std::ofstream file(options.outputPath, std::ios::binary);
+            file << "fake-mp4";
+            return std::make_unique<CliFakeRecordingSession>();
+        });
+
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    std::ostringstream stdoutCapture;
+    std::ostringstream stderrCapture;
+    auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int successCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        {
+            "app",
+            "run",
+            (RepoRoot() / "tests/lua/app-basic.lua").string(),
+            "echo",
+            "--message",
+            "hello",
+        },
+        "");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    assert(successCode == 0);
+    const nlohmann::json success = nlohmann::json::parse(stdoutCapture.str());
+    assert(success["ok"] == true);
+    assert(success["data"]["recording"]["status"] == "recorded");
+    assert(success["data"]["recording"]["surface"] == "cli");
+    assert(success["data"]["recording"]["command"] == "echo");
+    assert(success["data"]["recording"]["commandStatus"] == "succeeded");
+    assert(std::filesystem::exists(success["data"]["recording"]["path"].get<std::string>()));
+    assert(stderrCapture.str().empty());
+
+    options.jsonOutput = false;
+    stdoutCapture.str("");
+    stdoutCapture.clear();
+    stderrCapture.str("");
+    stderrCapture.clear();
+    oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int textCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        {
+            "app",
+            "run",
+            (RepoRoot() / "tests/lua/app-basic.lua").string(),
+            "echo",
+            "--message",
+            "text",
+        },
+        "");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    assert(textCode == 0);
+    assert(stdoutCapture.str().find("\"message\": \"text\"") != std::string::npos);
+    assert(stdoutCapture.str().find("\"recording\"") == std::string::npos);
+    assert(stderrCapture.str().find("Recording: ") != std::string::npos);
+    assert(stderrCapture.str().find(".mp4") != std::string::npos);
+
+#if defined(__unix__) || defined(__APPLE__)
+    options.jsonOutput = true;
+    stdoutCapture.str("");
+    stdoutCapture.clear();
+    stderrCapture.str("");
+    stderrCapture.clear();
+    oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int asyncCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        {
+            "app",
+            "run",
+            (RepoRoot() / "tests/lua/app-basic.lua").string(),
+            "slow",
+            "--delay",
+            "1",
+            "--async",
+        },
+        "");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    assert(asyncCode == 0);
+    const nlohmann::json accepted = nlohmann::json::parse(stdoutCapture.str());
+    assert(accepted["data"]["recording"]["status"] == "starting");
+    assert(accepted["data"]["recording"]["surface"] == "cli");
+    const std::string operationId = accepted["data"]["operation"].get<std::string>();
+    config.recording.enabled = false;
+    assert(ComputerCpp::SaveAppConfig(config, &error));
+
+    stdoutCapture.str("");
+    stdoutCapture.clear();
+    stderrCapture.str("");
+    stderrCapture.clear();
+    oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int resultCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        {
+            "app",
+            "operation",
+            "result",
+            (RepoRoot() / "tests/lua/app-basic.lua").string(),
+            operationId,
+            "--wait",
+            "10",
+        },
+        "");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    assert(resultCode == 0);
+    const nlohmann::json asyncResult = nlohmann::json::parse(stdoutCapture.str());
+    assert(asyncResult["data"]["status"] == "succeeded");
+    assert(asyncResult["data"]["recording"]["status"] == "recorded");
+    assert(asyncResult["data"]["recording"]["surface"] == "cli");
+    assert(asyncResult["data"]["recording"]["commandStatus"] == "succeeded");
+#endif
+
+    config.recording.enabled = true;
+    assert(ComputerCpp::SaveAppConfig(config, &error));
+    ComputerCpp::SetScreenRecordingFactoryForTesting(
+        [](const ComputerCpp::Platform::ScreenRecordingOptions&, int, std::string* startError) {
+            if (startError) {
+                *startError = "fake unavailable encoder";
+            }
+            return std::unique_ptr<ComputerCpp::Platform::ScreenRecordingSession>();
+        });
+    options.jsonOutput = true;
+    stdoutCapture.str("");
+    stdoutCapture.clear();
+    stderrCapture.str("");
+    stderrCapture.clear();
+    oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int failureCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        {
+            "app",
+            "run",
+            (RepoRoot() / "tests/lua/app-basic.lua").string(),
+            "echo",
+            "--message",
+            "still succeeds",
+        },
+        "");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    assert(failureCode == 0);
+    const nlohmann::json failure = nlohmann::json::parse(stdoutCapture.str());
+    assert(failure["ok"] == true);
+    assert(failure["data"]["recording"]["status"] == "failed");
+    assert(failure["data"]["recording"]["error"] == "fake unavailable encoder");
+    assert(failure["data"]["recording"]["commandStatus"] == "succeeded");
+
+    ComputerCpp::SetScreenRecordingFactoryForTesting({});
+    assert(ComputerCpp::SaveAppConfig(originalConfig, &error));
+}
+
 void TestMicroAgentLuaDryRun() {
     if (SkipLuaTestIfUnavailable("TestMicroAgentLuaDryRun")) {
         return;
@@ -2446,6 +2675,8 @@ void RunCliTests() {
     TestSessionChildCommandParsing();
     TestLuaRunCommandParsing();
     TestConfigCliCanonicalFile();
+    TestRecordingSurfaceMetadata();
+    TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestLuaAppErrorsAreUserFacing();

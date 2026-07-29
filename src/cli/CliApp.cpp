@@ -1,6 +1,9 @@
 #include "CliApp.h"
+#include "CliRecordingMetadata.h"
 
+#include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/TrayServerState.h"
@@ -22,6 +25,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -55,6 +59,60 @@ namespace {
 
 constexpr std::string_view kMcpEndpointPath = "/mcp";
 constexpr std::string_view kMcpLatestProtocolVersion = "2025-11-25";
+
+AppConfig LoadAppConfigForCommand(std::string* error) {
+    struct Cache {
+        std::mutex mutex;
+        bool initialized = false;
+        fs::path path;
+        bool exists = false;
+        fs::file_time_type modified;
+        uintmax_t size = 0;
+        AppConfig config;
+        std::string error;
+    };
+    static Cache cache;
+
+    const fs::path path = ConfigPath();
+    std::error_code statError;
+    const bool exists = fs::exists(path, statError);
+    fs::file_time_type modified{};
+    uintmax_t size = 0;
+    if (!statError && exists) {
+        modified = fs::last_write_time(path, statError);
+        if (!statError) {
+            size = fs::file_size(path, statError);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (!statError &&
+        cache.initialized &&
+        cache.path == path &&
+        cache.exists == exists &&
+        (!exists || (cache.modified == modified && cache.size == size))) {
+        if (error) {
+            *error = cache.error;
+        }
+        return cache.config;
+    }
+
+    std::string loadError;
+    AppConfig config = LoadAppConfig(&loadError);
+    if (!statError) {
+        cache.initialized = true;
+        cache.path = path;
+        cache.exists = exists;
+        cache.modified = modified;
+        cache.size = size;
+        cache.config = config;
+        cache.error = loadError;
+    }
+    if (error) {
+        *error = loadError;
+    }
+    return config;
+}
 
 #if defined(_WIN32)
 using AppSocket = SOCKET;
@@ -119,6 +177,8 @@ struct AppRunArgs {
     std::optional<fs::path> traceDir;
     json input = json::object();
 };
+
+void PrintRecordingStatusToStderr(const json& recording);
 
 json ErrorPayload(std::string code, std::string message) {
     return {
@@ -270,6 +330,7 @@ struct OperationPaths {
     fs::path errorJson;
     fs::path traceJsonl;
     fs::path progressJson;
+    fs::path recordingJson;
     fs::path artifactsDir;
 };
 
@@ -283,6 +344,7 @@ OperationPaths PathsForOperation(const std::string& appId, const std::string& op
         dir / "error.json",
         dir / "trace.jsonl",
         dir / "progress.json",
+        dir / "recording.json",
         dir / "artifacts",
     };
 }
@@ -361,6 +423,8 @@ bool WriteTraceJsonl(const fs::path& path, const json& trace, std::string& error
 
 json PublicOperationRecord(json record) {
     record.erase("input");
+    record.erase("recording_requested");
+    record.erase("recording_surface");
     return record;
 }
 
@@ -694,8 +758,53 @@ std::optional<json> RunAppCommand(
     const std::string& commandName,
     const json& input,
     const std::optional<fs::path>& operationDir,
+    const std::string& appId,
+    const std::string& surface,
+    const std::optional<bool>& recordingEnabledOverride,
+    const std::optional<std::string>& recordingIdOverride,
+    json* recordingOut,
     std::string& error
 ) {
+    std::string configError;
+    const AppConfig appConfig = LoadAppConfigForCommand(&configError);
+    const bool recordingEnabled = recordingEnabledOverride.value_or(
+        configError.empty() && appConfig.recording.enabled);
+    const int retentionDays = configError.empty()
+        ? appConfig.recording.retentionDays
+        : 14;
+
+    std::unique_ptr<CommandRecording> recording;
+    json recordingMetadata = json::object();
+    if (recordingEnabled) {
+        try {
+            CommandRecordingOptions recordingOptions;
+            recordingOptions.enabled = true;
+            recordingOptions.retentionDays = retentionDays;
+            recordingOptions.appId = appId;
+            recordingOptions.command = commandName;
+            recordingOptions.surface = surface;
+            recordingOptions.recordingId = recordingIdOverride.value_or("");
+            if (operationDir.has_value()) {
+                recordingOptions.statusMirrorPath = *operationDir / "recording.json";
+            }
+            recording = std::make_unique<CommandRecording>(std::move(recordingOptions));
+        } catch (const std::exception& ex) {
+            recordingMetadata = {
+                {"recordingId", recordingIdOverride.value_or(NewCommandRecordingId())},
+                {"status", "failed"},
+                {"path", nullptr},
+                {"startedAt", NowIsoUtc()},
+                {"finishedAt", NowIsoUtc()},
+                {"durationMs", 0},
+                {"error", std::string("could not prepare recording: ") + ex.what()},
+                {"appId", appId},
+                {"command", commandName},
+                {"surface", surface},
+                {"commandStatus", "running"},
+            };
+        }
+    }
+
     LuaRunOptions lua = BaseLuaOptions(options, executablePath, appPath, "run");
     lua.vars["__ac_app_command"] = commandName;
     lua.vars["__ac_app_input_json"] = input.dump();
@@ -704,8 +813,31 @@ std::optional<json> RunAppCommand(
     }
     LuaRunResult result = RunLuaScriptCapture(lua, true);
     auto parsed = ParseJsonOutput(result, error);
+    std::string commandStatus = "failed";
+    if (parsed) {
+        if (parsed->value("ok", false)) {
+            commandStatus = "succeeded";
+        } else if (parsed->value("code", "") == "operation_cancelled") {
+            commandStatus = "cancelled";
+        }
+    }
+    if (recording) {
+        recording->Finish(commandStatus);
+        recordingMetadata = recording->metadata();
+    } else if (!recordingMetadata.empty()) {
+        recordingMetadata["commandStatus"] = commandStatus;
+    }
+    if (recordingOut) {
+        *recordingOut = recordingMetadata;
+    }
     if (!parsed) {
         return std::nullopt;
+    }
+    if (!recordingMetadata.empty()) {
+        if (!parsed->contains("data") || !(*parsed)["data"].is_object()) {
+            (*parsed)["data"] = json::object();
+        }
+        (*parsed)["data"]["recording"] = recordingMetadata;
     }
     return *parsed;
 }
@@ -715,10 +847,12 @@ json MakeInitialOperationRecord(
     const json& schema,
     const std::string& appId,
     const std::string& operationId,
-    const std::string& commandName
+    const std::string& commandName,
+    bool recordingRequested,
+    const std::string& surface
 ) {
     const std::string now = NowIsoUtc();
-    return {
+    json record = {
         {"operation", operationId},
         {"status", "pending"},
         {"command", commandName},
@@ -739,7 +873,26 @@ json MakeInitialOperationRecord(
         {"result_url", "/operations/" + operationId + "/result"},
         {"error", nullptr},
         {"cancel_requested", false},
+        {"recording_requested", recordingRequested},
+        {"recording_surface", surface},
     };
+    if (recordingRequested) {
+        const std::string recordingId = NewCommandRecordingId();
+        record["recording"] = {
+            {"recordingId", recordingId},
+            {"status", "starting"},
+            {"path", nullptr},
+            {"startedAt", nullptr},
+            {"finishedAt", nullptr},
+            {"durationMs", nullptr},
+            {"error", nullptr},
+            {"appId", appId},
+            {"command", commandName},
+            {"surface", surface},
+            {"commandStatus", "pending"},
+        };
+    }
+    return record;
 }
 
 std::optional<json> ReadOperationRecord(const OperationPaths& paths, std::string& error) {
@@ -751,6 +904,11 @@ std::optional<json> ReadOperationRecord(const OperationPaths& paths, std::string
     auto progress = ReadJsonFile(paths.progressJson, progressError);
     if (progress) {
         (*record)["progress"] = *progress;
+    }
+    std::string recordingError;
+    auto recording = ReadJsonFile(paths.recordingJson, recordingError);
+    if (recording) {
+        (*record)["recording"] = *recording;
     }
     return record;
 }
@@ -806,6 +964,15 @@ int RunStoredOperation(
         record["updated_at"] = now;
         record["finished_at"] = now;
         record["error"] = {{"code", "operation_cancelled"}, {"message", "operation cancelled"}};
+        if (record.value("recording_requested", false) &&
+            record.contains("recording") &&
+            record["recording"].is_object()) {
+            record["recording"]["status"] = "failed";
+            record["recording"]["finishedAt"] = now;
+            record["recording"]["durationMs"] = 0;
+            record["recording"]["error"] = "operation cancelled before recording started";
+            record["recording"]["commandStatus"] = "cancelled";
+        }
         WriteJsonFile(paths.errorJson, record["error"], error);
         WriteOperationRecord(paths, record, error);
         return 1;
@@ -819,7 +986,28 @@ int RunStoredOperation(
         return 1;
     }
 
-    auto payload = RunAppCommand(options, executablePath, appPath, commandName, *inputOpt, paths.dir, error);
+    json recordingMetadata;
+    const bool recordingRequested = record.value("recording_requested", false);
+    std::optional<std::string> recordingId;
+    if (recordingRequested && record.contains("recording") && record["recording"].is_object()) {
+        const std::string value = record["recording"].value("recordingId", "");
+        if (!value.empty()) {
+            recordingId = value;
+        }
+    }
+    auto payload = RunAppCommand(
+        options,
+        executablePath,
+        appPath,
+        commandName,
+        *inputOpt,
+        paths.dir,
+        appId,
+        record.value("recording_surface", "async"),
+        recordingRequested,
+        recordingId,
+        &recordingMetadata,
+        error);
     auto latest = ReadOperationRecord(paths, error).value_or(record);
     if (latest.value("cancel_requested", false) || latest.value("status", "") == "cancelled") {
         const std::string now = NowIsoUtc();
@@ -948,6 +1136,7 @@ std::optional<json> CreateAsyncOperation(
     const json& schema,
     const std::string& commandName,
     const json& input,
+    const std::string& surface,
     std::string& error
 ) {
     const std::string appId = AppIdFor(appPath, schema);
@@ -956,7 +1145,17 @@ std::optional<json> CreateAsyncOperation(
     EnsureDirectory(paths.dir);
     EnsureDirectory(paths.artifactsDir);
 
-    json record = MakeInitialOperationRecord(appPath, schema, appId, operationId, commandName);
+    std::string configError;
+    const AppConfig config = LoadAppConfig(&configError);
+    const bool recordingRequested = configError.empty() && config.recording.enabled;
+    json record = MakeInitialOperationRecord(
+        appPath,
+        schema,
+        appId,
+        operationId,
+        commandName,
+        recordingRequested,
+        surface);
     if (!WriteJsonFile(paths.inputJson, input, error)) {
         return std::nullopt;
     }
@@ -966,6 +1165,13 @@ std::optional<json> CreateAsyncOperation(
     if (!StartOperationProcess(options, executablePath, appPath, appId, operationId, error)) {
         record["status"] = "failed";
         record["error"] = {{"code", "internal_error"}, {"message", error}};
+        if (recordingRequested && record.contains("recording")) {
+            record["recording"]["status"] = "failed";
+            record["recording"]["finishedAt"] = NowIsoUtc();
+            record["recording"]["durationMs"] = 0;
+            record["recording"]["error"] = "operation process could not start";
+            record["recording"]["commandStatus"] = "failed";
+        }
         WriteOperationRecord(paths, record, error);
         return std::nullopt;
     }
@@ -998,6 +1204,27 @@ json ShapeRunPayloadForCli(json payload, const AppRunArgs& args, const std::stri
         payload["data"].erase("trace");
     }
     return payload;
+}
+
+void PrintRecordingStatusToStderr(const json& recording) {
+    if (!recording.is_object() || recording.empty()) {
+        return;
+    }
+    const std::string status = recording.value("status", "");
+    const std::string path =
+        recording.contains("path") && recording["path"].is_string()
+        ? recording["path"].get<std::string>()
+        : "";
+    if (status == "recorded" && !path.empty()) {
+        std::cerr << "Recording: " << path << "\n";
+        return;
+    }
+    std::cerr << "Recording: " << (status.empty() ? "failed" : status);
+    const std::string recordingError = RecordingErrorText(recording);
+    if (!recordingError.empty()) {
+        std::cerr << " (" << recordingError << ")";
+    }
+    std::cerr << "\n";
 }
 
 std::optional<OperationPaths> OperationPathsForCli(
@@ -1116,19 +1343,35 @@ int HandleOperationResult(
     }
 
     const std::string status = record->value("status", "");
+    const json recording = record->value("recording", json::object());
     if (status == "succeeded") {
         auto result = ReadJsonFile(paths->resultJson, error);
         if (!result) {
             return ErrorExit(options, error, 1, "internal_error");
         }
-        return PrintData(options, {{"status", status}, {"result", *result}});
+        json data = {{"status", status}, {"result", *result}};
+        if (options.jsonOutput && !recording.empty()) {
+            data["recording"] = recording;
+        }
+        const int code = PrintData(options, data);
+        if (!options.jsonOutput) {
+            PrintRecordingStatusToStderr(recording);
+        }
+        return code;
     }
     if (status == "pending" || status == "running") {
-        return PrintData(options, {{"status", status}, {"operation", operationId}, {"result", nullptr}});
+        json data = {{"status", status}, {"operation", operationId}, {"result", nullptr}};
+        if (options.jsonOutput && !recording.empty()) {
+            data["recording"] = recording;
+        }
+        return PrintData(options, data);
     }
 
     json errorData = record->value("error", json::object());
     json data = {{"status", status}, {"operation", operationId}, {"result", nullptr}, {"error", errorData}};
+    if (options.jsonOutput && !recording.empty()) {
+        data["recording"] = recording;
+    }
     if (options.jsonOutput) {
         json payload = ErrorPayload(
             errorData.value("code", status == "cancelled" ? "operation_cancelled" : "operation_failed"),
@@ -1138,6 +1381,7 @@ int HandleOperationResult(
         std::cout << payload.dump(2) << "\n";
     } else {
         std::cout << data.dump(2) << "\n";
+        PrintRecordingStatusToStderr(recording);
     }
     return 1;
 }
@@ -1156,6 +1400,16 @@ std::optional<json> CancelOperationRecord(const OperationPaths& paths, const std
         (*record)["updated_at"] = now;
         (*record)["finished_at"] = now;
         (*record)["error"] = {{"code", "operation_cancelled"}, {"message", "operation cancelled"}};
+        if (status == "pending" &&
+            record->value("recording_requested", false) &&
+            record->contains("recording") &&
+            (*record)["recording"].is_object()) {
+            (*record)["recording"]["status"] = "failed";
+            (*record)["recording"]["finishedAt"] = now;
+            (*record)["recording"]["durationMs"] = 0;
+            (*record)["recording"]["error"] = "operation cancelled before recording started";
+            (*record)["recording"]["commandStatus"] = "cancelled";
+        }
         if (!WriteJsonFile(paths.errorJson, (*record)["error"], error) || !WriteOperationRecord(paths, *record, error)) {
             return std::nullopt;
         }
@@ -1413,6 +1667,10 @@ std::string ReasonPhrase(int status) {
         case 504: return "Gateway Timeout";
         default: return "OK";
     }
+}
+
+std::map<std::string, std::string> RecordingHeaders(const json& recording) {
+    return RecordingHttpHeaders(recording);
 }
 
 bool SendJsonResponse(
@@ -1724,7 +1982,7 @@ json McpTextContent(std::string text) {
     };
 }
 
-json McpToolSuccessResult(const json& result) {
+json McpToolSuccessResult(const json& result, const json& recording = json::object()) {
     json out = {
         {"content", json::array({McpTextContent(result.is_string() ? result.get<std::string>() : result.dump(2))})},
         {"isError", false}
@@ -1732,14 +1990,21 @@ json McpToolSuccessResult(const json& result) {
     if (result.is_object()) {
         out["structuredContent"] = result;
     }
+    AttachMcpRecordingMetadata(out, recording);
     return out;
 }
 
-json McpToolErrorResult(const std::string& code, const std::string& message) {
-    return {
+json McpToolErrorResult(
+    const std::string& code,
+    const std::string& message,
+    const json& recording = json::object()
+) {
+    json out = {
         {"content", json::array({McpTextContent(code + ": " + message)})},
         {"isError", true}
     };
+    AttachMcpRecordingMetadata(out, recording);
+    return out;
 }
 
 bool HandleMcpJsonRpcRequest(
@@ -1785,22 +2050,42 @@ bool HandleMcpJsonRpcRequest(
 
         AppendRuntimeLog("server", "mcp_tool_start", {{"tool", toolName}});
         std::string error;
-        auto payload = RunAppCommand(options, executablePath, serveOptions.appPath, toolName, arguments, std::nullopt, error);
+        json recording;
+        auto payload = RunAppCommand(
+            options,
+            executablePath,
+            serveOptions.appPath,
+            toolName,
+            arguments,
+            std::nullopt,
+            AppIdFor(serveOptions.appPath, schema),
+            "mcp",
+            std::nullopt,
+            std::nullopt,
+            &recording,
+            error);
         if (!payload) {
             AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"error", error.empty() ? "tool execution failed" : error}});
-            return SendJsonRpcError(fd, 500, id, -32603, error.empty() ? "tool execution failed" : error);
+            json errorData = McpRecordingErrorData(recording);
+            return SendJsonRpcError(
+                fd,
+                500,
+                id,
+                -32603,
+                error.empty() ? "tool execution failed" : error,
+                std::move(errorData));
         }
         if (!payload->value("ok", false)) {
             const std::string code = payload->value("code", "operation_failed");
             const std::string messageText = payload->value("error", "operation failed");
             AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"code", code}, {"error", messageText}});
-            return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolErrorResult(code, messageText)));
+            return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolErrorResult(code, messageText, recording)));
         }
 
         const json data = payload->value("data", json::object());
         const json result = data.value("result", json::object());
         AppendRuntimeLog("server", "mcp_tool_done", {{"tool", toolName}});
-        return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolSuccessResult(result)));
+        return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolSuccessResult(result, recording)));
     }
 
     return SendJsonRpcError(fd, 404, id, -32601, "Method not found: " + method);
@@ -1893,7 +2178,15 @@ bool HandleHttpCommand(
 
     if (QueryFlagTrue(request.query, "async")) {
         AppendRuntimeLog("server", "command_async_start", {{"command", commandName}});
-        auto operation = CreateAsyncOperation(options, executablePath, serveOptions.appPath, schema, commandName, input, error);
+        auto operation = CreateAsyncOperation(
+            options,
+            executablePath,
+            serveOptions.appPath,
+            schema,
+            commandName,
+            input,
+            "http",
+            error);
         if (!operation) {
             AppendRuntimeLog("server", "command_async_failed", {{"command", commandName}, {"error", error}});
             return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
@@ -1902,18 +2195,34 @@ bool HandleHttpCommand(
             {"command", commandName},
             {"operation", operation->value("operation", "")}
         });
+        auto headers = RecordingHeaders(operation->value("recording", json::object()));
+        headers["Location"] = (*operation)["result_url"].get<std::string>();
+        headers["Retry-After"] = "2";
         return SendJsonResponse(
             fd,
             202,
             *operation,
-            {{"Location", (*operation)["result_url"].get<std::string>()}, {"Retry-After", "2"}});
+            headers);
     }
 
     AppendRuntimeLog("server", "command_start", {{"command", commandName}});
-    auto payload = RunAppCommand(options, executablePath, serveOptions.appPath, commandName, input, std::nullopt, error);
+    json recording;
+    auto payload = RunAppCommand(
+        options,
+        executablePath,
+        serveOptions.appPath,
+        commandName,
+        input,
+        std::nullopt,
+        AppIdFor(serveOptions.appPath, schema),
+        "http",
+        std::nullopt,
+        std::nullopt,
+        &recording,
+        error);
     if (!payload) {
         AppendRuntimeLog("server", "command_failed", {{"command", commandName}, {"code", "internal_error"}, {"error", error}});
-        return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
+        return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error), RecordingHeaders(recording));
     }
     if (!payload->value("ok", false)) {
         const std::string code = payload->value("code", "operation_failed");
@@ -1923,10 +2232,11 @@ bool HandleHttpCommand(
         return SendJsonResponse(
             fd,
             HttpStatusForErrorCode(code),
-            HttpErrorBody(code, payload->value("error", "operation failed"), details));
+            HttpErrorBody(code, payload->value("error", "operation failed"), details),
+            RecordingHeaders(recording));
     }
     AppendRuntimeLog("server", "command_done", {{"command", commandName}});
-    return SendJsonResponse(fd, 200, (*payload)["data"]["result"]);
+    return SendJsonResponse(fd, 200, (*payload)["data"]["result"], RecordingHeaders(recording));
 }
 
 bool HandleHttpOperationResult(
@@ -1945,19 +2255,27 @@ bool HandleHttpOperationResult(
         return SendJsonResponse(fd, 404, HttpErrorBody("unknown_operation", error));
     }
     const std::string status = record->value("status", "");
+    const auto recordingHeaders = RecordingHeaders(record->value("recording", json::object()));
     if (status == "succeeded") {
         auto result = ReadJsonFile(paths.resultJson, error);
         if (!result) {
-            return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
+            return SendJsonResponse(
+                fd,
+                500,
+                HttpErrorBody("internal_error", error),
+                recordingHeaders);
         }
-        return SendJsonResponse(fd, 200, {{"status", status}, {"result", *result}});
+        return SendJsonResponse(fd, 200, {{"status", status}, {"result", *result}}, recordingHeaders);
     }
     if (status == "pending" || status == "running") {
+        auto headers = recordingHeaders;
+        headers["Location"] = "/operations/" + operationId + "/result";
+        headers["Retry-After"] = "2";
         return SendJsonResponse(
             fd,
             202,
             {{"status", status}, {"operation", operationId}, {"result", nullptr}},
-            {{"Location", "/operations/" + operationId + "/result"}, {"Retry-After", "2"}});
+            headers);
     }
 
     json errorData = record->value("error", json::object());
@@ -1967,7 +2285,8 @@ bool HandleHttpOperationResult(
         HttpErrorBody(
             errorData.value("code", status == "cancelled" ? "operation_cancelled" : "operation_failed"),
             errorData.value("message", status == "cancelled" ? "operation cancelled" : "operation failed"),
-            {{"operation", operationId}, {"status", status}}));
+            {{"operation", operationId}, {"status", status}}),
+        recordingHeaders);
 }
 
 bool HandleHttpOperation(
@@ -1989,7 +2308,12 @@ bool HandleHttpOperation(
         if (!cancelled) {
             return SendJsonResponse(fd, fs::exists(paths.operationJson) ? 500 : 404, HttpErrorBody(fs::exists(paths.operationJson) ? "internal_error" : "unknown_operation", error));
         }
-        return SendJsonResponse(fd, 200, *cancelled);
+        const json updatedRecord = ReadOperationRecord(paths, error).value_or(json::object());
+        return SendJsonResponse(
+            fd,
+            200,
+            *cancelled,
+            RecordingHeaders(updatedRecord.value("recording", json::object())));
     }
 
     const std::string resultSuffix = "/result";
@@ -2007,7 +2331,11 @@ bool HandleHttpOperation(
         if (!record) {
             return SendJsonResponse(fd, 404, HttpErrorBody("unknown_operation", error));
         }
-        return SendJsonResponse(fd, 200, PublicOperationRecord(*record));
+        return SendJsonResponse(
+            fd,
+            200,
+            PublicOperationRecord(*record),
+            RecordingHeaders(record->value("recording", json::object())));
     }
 
     return SendJsonResponse(fd, 404, HttpErrorBody("unknown_operation", "unknown operation route"));
@@ -2346,7 +2674,15 @@ int HandleAppRun(
         return ErrorExit(options, error, 2, "invalid_input");
     }
     if (parsedArgs->async) {
-        auto operation = CreateAsyncOperation(options, executablePath, appPath, *schema, commandName, parsedArgs->input, error);
+        auto operation = CreateAsyncOperation(
+            options,
+            executablePath,
+            appPath,
+            *schema,
+            commandName,
+            parsedArgs->input,
+            "cli",
+            error);
         if (!operation) {
             return ErrorExit(options, error, 1, "internal_error");
         }
@@ -2358,9 +2694,32 @@ int HandleAppRun(
         return 0;
     }
 
-    auto payload = RunAppCommand(options, executablePath, appPath, commandName, parsedArgs->input, std::nullopt, error);
+    json recording;
+    auto payload = RunAppCommand(
+        options,
+        executablePath,
+        appPath,
+        commandName,
+        parsedArgs->input,
+        std::nullopt,
+        AppIdFor(appPath, *schema),
+        "cli",
+        std::nullopt,
+        std::nullopt,
+        &recording,
+        error);
     if (!payload) {
-        return ErrorExit(options, error, 1, "operation_failed");
+        if (options.jsonOutput) {
+            json output = ErrorPayload("operation_failed", error);
+            if (!recording.empty()) {
+                output["data"]["recording"] = recording;
+            }
+            std::cout << output.dump(2) << "\n";
+        } else {
+            std::cerr << "Error: " << error << "\n";
+            PrintRecordingStatusToStderr(recording);
+        }
+        return 1;
     }
     *payload = ShapeRunPayloadForCli(std::move(*payload), *parsedArgs, commandName);
     if (!payload->value("ok", false)) {
@@ -2370,6 +2729,7 @@ int HandleAppRun(
             std::cout << payload->dump(2) << "\n";
         } else {
             std::cerr << "Error: " << message << "\n";
+            PrintRecordingStatusToStderr(recording);
         }
         if (code == "invalid_input" || code == "unknown_command") return 2;
         if (code == "operation_cancelled") return 1;
@@ -2380,6 +2740,7 @@ int HandleAppRun(
         std::cout << payload->dump(2) << "\n";
     } else {
         std::cout << (*payload)["data"]["result"].dump(2) << "\n";
+        PrintRecordingStatusToStderr(recording);
     }
     return 0;
 }

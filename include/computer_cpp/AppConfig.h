@@ -44,12 +44,18 @@ struct ServerConfig {
     std::map<std::string, ServerAppConfig> apps;
 };
 
+struct RecordingConfig {
+    bool enabled = false;
+    int retentionDays = 14;
+};
+
 struct AppConfig {
     int version = 1;
     std::string defaultProfile = "main";
     std::map<std::string, LlmProviderConfig> providers;
     std::map<std::string, LlmProfileConfig> profiles;
     ServerConfig server;
+    RecordingConfig recording;
 };
 
 AppConfig DefaultAppConfig();
