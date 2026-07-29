@@ -892,6 +892,7 @@ standard tools like:
 screenshot
 click_box
 click_target
+action_sequence
 drag_box
 scroll
 scroll_down

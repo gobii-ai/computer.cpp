@@ -2451,6 +2451,21 @@ function ac.tools.type_text(spec)
   end)
 end
 
+local function interactive_snapshot(spec)
+  local snapshot = ac.request("snapshot", {
+    interactive = true,
+    bounds = true,
+    maxDepth = option_value(spec, "snapshotMaxDepth", "snapshot_max_depth", 8),
+    maxNodes = option_value(spec, "snapshotMaxNodes", "snapshot_max_nodes", 250),
+  }, { allow_error = true })
+  if snapshot and snapshot.ok then return snapshot.data or {} end
+  return {
+    available = false,
+    code = snapshot and snapshot.code or "snapshot_unavailable",
+    error = snapshot and snapshot.error or "accessibility snapshot unavailable",
+  }
+end
+
 function ac.tools.observe_desktop(spec)
   spec = spec or {}
   return standard_tool("observe_desktop", {
@@ -2476,21 +2491,7 @@ function ac.tools.observe_desktop(spec)
       }),
     }
     if args.includeAccessibility == true then
-      local snapshot = ac.request("snapshot", {
-        interactive = true,
-        bounds = true,
-        maxDepth = option_value(spec, "snapshotMaxDepth", "snapshot_max_depth", 8),
-        maxNodes = option_value(spec, "snapshotMaxNodes", "snapshot_max_nodes", 250),
-      }, { allow_error = true })
-      if snapshot and snapshot.ok then
-        result.accessibility = snapshot.data or {}
-      else
-        result.accessibility = {
-          available = false,
-          code = snapshot and snapshot.code or "snapshot_unavailable",
-          error = snapshot and snapshot.error or "accessibility snapshot unavailable",
-        }
-      end
+      result.accessibility = interactive_snapshot(spec)
     end
     return ac.tool_result.ok(result)
   end)
@@ -2510,10 +2511,14 @@ function ac.tools.activate_app(spec)
       pollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
       allowError = true,
     })
-    return action_tool_result(spec, store, {
+    local result = action_tool_result(spec, store, {
       app = args.app,
       focused = response_data(focused),
     })
+    if result.ok and option_value(spec, "includeAccessibility", "include_accessibility", false) == true then
+      result.result.accessibility = interactive_snapshot(spec)
+    end
+    return result
   end)
 end
 
@@ -2605,6 +2610,71 @@ function ac.tools.click_target(spec)
   end)
 end
 
+function ac.tools.action_sequence(spec)
+  spec = spec or {}
+  local store = spec.store
+  return standard_tool("action_sequence", {
+    description = "Run 1-12 deterministic native clicks, key presses, or text inputs in order, stopping on the first failure, then observe once. Use only when no intermediate screenshot is needed.",
+    input = {
+      type = "object",
+      properties = {
+        actions = {
+          type = "array",
+          minItems = 1,
+          maxItems = 12,
+          items = {
+            type = "object",
+            properties = {
+              kind = { type = "string", enum = { "click_target", "press_key", "type_text" } },
+              target = { type = "string" },
+              button = { type = "string", enum = { "left", "right", "middle" } },
+              clickCount = { type = "integer", minimum = 1, maximum = 5 },
+              keys = { type = "string" },
+              holdMs = { type = "integer", minimum = 1, maximum = 5000 },
+              text = { type = "string" },
+              paste = { type = "boolean" },
+            },
+            required = { "kind" },
+            additionalProperties = false,
+          },
+        },
+      },
+      required = { "actions" },
+      additionalProperties = false,
+    },
+  }, function(_, args)
+    local actions = args.actions or {}
+    if #actions < 1 or #actions > 12 then
+      return ac.tool_result.invalid("action_sequence requires 1-12 actions")
+    end
+    local steps = {}
+    for index, action in ipairs(actions) do
+      local kind = action.kind
+      local params
+      if kind == "click_target" and ac.text.present(action.target) then
+        params = {
+          target = action.target,
+          button = action.button or "left",
+          clickCount = action.clickCount or 1,
+        }
+      elseif kind == "press_key" and ac.text.present(action.keys) then
+        params = { keys = action.keys, holdMs = action.holdMs }
+      elseif kind == "type_text" and type(action.text) == "string" then
+        params = { text = action.text, paste = action.paste ~= false }
+      else
+        return ac.tool_result.invalid("action_sequence action " .. tostring(index) .. " is missing fields for " .. tostring(kind))
+      end
+      steps[#steps + 1] = {
+        id = "action-" .. tostring(index),
+        method = kind == "click_target" and "click" or (kind == "press_key" and "press" or "type"),
+        params = params,
+      }
+    end
+    local sequence = ac.batch(steps, { allow_error = true })
+    return action_tool_result(spec, store, { sequence = response_data(sequence) })
+  end)
+end
+
 function ac.tools.desktop_agent(opts)
   opts = opts or {}
   local store = opts.store or {}
@@ -2627,6 +2697,7 @@ function ac.tools.desktop_agent(opts)
     ac.tools.wait_stable(),
     ac.tools.request_approval(opts),
     ac.tools.click_target(action_opts),
+    ac.tools.action_sequence(action_opts),
     ac.tools.done(),
     ac.tools.blocked(),
   }

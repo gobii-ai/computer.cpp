@@ -17,6 +17,7 @@ local tools = ac.tools.desktop_agent({
   coordinateSpace = "model_1000",
   maxDimension = 640,
   frontmostWindowOnly = true,
+  includeAccessibility = true,
 })
 
 local names = {}
@@ -64,6 +65,15 @@ end
 
 local click_params = latest_params("click")
 local drag_params = latest_params("mouse_drag")
+local sequence_schema = tools[13].model_tool["function"].parameters
+local sequence = tools[13].handler({}, {
+  actions = {
+    { kind = "click_target", target = "@e1" },
+    { kind = "press_key", keys = "Escape" },
+    { kind = "type_text", text = "unit" },
+  },
+})
+local sequence_result = sequence.result and sequence.result.action and sequence.result.action.sequence or {}
 
 return {
   tool_count = #tools,
@@ -72,6 +82,11 @@ return {
   scroll_direction_has_nested_required = scroll_schema.properties.direction.required ~= nil,
   activate_ok = activated.ok,
   activate_allow_error = activate_allow_error,
+  activate_has_accessibility = activated.result and activated.result.accessibility ~= nil,
+  sequence_schema_max_items = sequence_schema.properties.actions.maxItems,
+  sequence_ok = sequence.ok,
+  sequence_executed = sequence_result.executed,
+  sequence_stopped_on_error = sequence_result.stoppedOnError,
   click_ok = click.ok,
   click_image = click.result and click.result.image or "",
   click_button = click_params.button,
