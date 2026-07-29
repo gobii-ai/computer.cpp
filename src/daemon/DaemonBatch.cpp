@@ -5,6 +5,7 @@
 #include "DaemonParsing.h"
 #include "DaemonProtocol.h"
 
+#include <chrono>
 #include <utility>
 
 namespace ComputerCpp {
@@ -152,12 +153,15 @@ nlohmann::json RunBatchCommand(
         }
     }
 
+    const auto monotonicMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     return Ok({
         {"results", results},
         {"requested", steps.size()},
         {"executed", results.size()},
         {"failed", failedCount},
-        {"stoppedOnError", stoppedOnError}
+        {"stoppedOnError", stoppedOnError},
+        {"monotonicMs", monotonicMs}
     });
 }
 

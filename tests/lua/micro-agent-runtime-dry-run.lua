@@ -1,16 +1,16 @@
 local ac = require("computer_cpp")
 
-local real_time = os.time
+local real_monotonic_ms = ac.monotonic_ms
 local function timed(values)
   local index = 0
-  os.time = function()
+  ac.monotonic_ms = function()
     index = index + 1
     return values[index] or values[#values]
   end
 end
 
 local timeout_requests = 0
-timed({ 100, 100, 102 })
+timed({ 100000, 100000, 100000, 102000 })
 ac.llm.chat = function()
   timeout_requests = timeout_requests + 1
   return { message = { role = "assistant", content = "still thinking" } }
@@ -29,7 +29,7 @@ local timeout_result = timeout_agent:run_loop({
 })
 
 local paused_requests = 0
-timed({ 200, 202, 202 })
+timed({ 200000, 200000, 202000, 202000 })
 ac.llm.chat = function()
   paused_requests = paused_requests + 1
   return {
@@ -63,7 +63,7 @@ local paused_result = paused_agent:run_loop({
   goal = "finish after paused time",
 })
 
-os.time = real_time
+ac.monotonic_ms = real_monotonic_ms
 
 return {
   timeout_ok = timeout_result.ok,

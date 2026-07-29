@@ -833,8 +833,8 @@ duplicate, and mismatched responses are rejected. Desktop control is released
 while approval is pending and reacquired before the command continues.
 
 The MCP server also exposes reserved `computer_cpp_operation_start`,
-`computer_cpp_operation_get`, `computer_cpp_operation_result`,
-`computer_cpp_operation_respond`, and `computer_cpp_operation_cancel` tools for
+`computer_cpp_operation_status`, `computer_cpp_operation_respond`, and
+`computer_cpp_operation_cancel` tools for
 starting, observing, approving or denying, and cancelling asynchronous app
 commands. App-defined commands cannot use the reserved `computer_cpp_` prefix.
 

@@ -825,6 +825,8 @@ void TestDaemonDispatch() {
     assert(batch["data"]["executed"] == 2);
     assert(batch["data"]["failed"] == 0);
     assert(batch["data"]["stoppedOnError"] == false);
+    assert(batch["data"]["monotonicMs"].is_number_integer());
+    assert(batch["data"]["monotonicMs"].get<int64_t>() > 0);
     assert(batch["data"]["results"].size() == 2);
     assert(batch["data"]["results"][0]["ok"] == true);
     assert(batch["data"]["results"][0]["id"] == "step-1");

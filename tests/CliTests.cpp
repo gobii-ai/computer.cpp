@@ -12,7 +12,10 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/ControlSession.h"
+#include "computer_cpp/Daemon.h"
 #include "computer_cpp/LuaRunner.h"
+#include "computer_cpp/RuntimeProvenance.h"
+#include "computer_cpp/Transport.h"
 
 #include <nlohmann/json.hpp>
 
@@ -110,6 +113,22 @@ CapturedConfigCommand RunSemanticAppCommand(std::initializer_list<std::string> a
         options,
         std::vector<std::string>(args),
         "computer.cpp");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    return {exitCode, stdoutCapture.str(), stderrCapture.str()};
+}
+
+CapturedConfigCommand RunAppCommand(
+    const ComputerCpp::Cli::CliOptions& options,
+    const std::vector<std::string>& args,
+    const std::string& executablePath
+) {
+    std::ostringstream stdoutCapture;
+    std::ostringstream stderrCapture;
+    auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int exitCode =
+        ComputerCpp::Cli::HandleSemanticAppCommand(options, args, executablePath);
     std::cout.rdbuf(oldOut);
     std::cerr.rdbuf(oldErr);
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
@@ -2599,6 +2618,124 @@ void TestLuaApprovalContextDryRun() {
     assert(resumed);
 }
 
+void TestCliApprovalLifecycle() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (SkipLuaTestIfUnavailable("TestCliApprovalLifecycle")) return;
+
+    const std::filesystem::path executable =
+        std::filesystem::path(ComputerCpp::CurrentExecutablePath()).parent_path() / "computer.cpp";
+    assert(std::filesystem::exists(executable));
+    const std::string app = (RepoRoot() / "tests/lua/app-approval.lua").string();
+    const std::string session = "approval-cli-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    ScopedEnvVar allowDaemonMismatch("COMPUTER_CPP_ALLOW_DAEMON_MISMATCH");
+    allowDaemonMismatch.Set("1");
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    options.session = session;
+    std::thread daemon([&]() {
+        ComputerCpp::RunDaemon({session, true});
+    });
+    for (int attempt = 0; attempt < 100 && !ComputerCpp::IsDaemonReady(session); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(ComputerCpp::IsDaemonReady(session));
+
+    const auto waitForApproval = [&](const std::string& operation) {
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            auto get = RunAppCommand(
+                options,
+                {"app", "operation", "get", app, operation},
+                executable.string());
+            if (get.exitCode == 0) {
+                auto payload = nlohmann::json::parse(get.stdoutText);
+                if (payload["data"].value("status", "") == "waiting_for_approval") {
+                    return payload["data"]["approval"]["id"].get<std::string>();
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        assert(false && "approval request did not become pending");
+        return std::string();
+    };
+    const auto start = [&](const std::string& message) {
+        auto accepted = RunAppCommand(
+            options,
+            {
+                "app", "run", app, "needs-approval",
+                "--message", message,
+                "--timeoutMs", "15000",
+                "--async",
+            },
+            executable.string());
+        assert(accepted.exitCode == 0);
+        return nlohmann::json::parse(accepted.stdoutText)["data"]["operation"].get<std::string>();
+    };
+
+    const std::string approvedOperation = start("approve from CLI");
+    const std::string approvedId = waitForApproval(approvedOperation);
+    auto approved = RunAppCommand(
+        options,
+        {
+            "app", "operation", "approve", app, approvedOperation, approvedId,
+            "--note", "approved by test",
+        },
+        executable.string());
+    assert(approved.exitCode == 0);
+    auto approvedResult = RunAppCommand(
+        options,
+        {"app", "operation", "result", app, approvedOperation, "--wait", "10"},
+        executable.string());
+    assert(approvedResult.exitCode == 0);
+    auto approvedPayload = nlohmann::json::parse(approvedResult.stdoutText);
+    assert(approvedPayload["data"]["status"] == "succeeded");
+    assert(approvedPayload["data"]["result"]["note"] == "approved by test");
+
+    auto duplicate = RunAppCommand(
+        options,
+        {"app", "operation", "approve", app, approvedOperation, approvedId},
+        executable.string());
+    assert(duplicate.exitCode != 0);
+    assert(nlohmann::json::parse(duplicate.stdoutText)["code"] == "approval_conflict");
+
+    const std::string deniedOperation = start("deny from CLI");
+    const std::string deniedId = waitForApproval(deniedOperation);
+    auto denied = RunAppCommand(
+        options,
+        {"app", "operation", "deny", app, deniedOperation, deniedId, "--note", "denied by test"},
+        executable.string());
+    assert(denied.exitCode == 0);
+    auto deniedResult = RunAppCommand(
+        options,
+        {"app", "operation", "result", app, deniedOperation, "--wait", "10"},
+        executable.string());
+    assert(deniedResult.exitCode != 0);
+    auto deniedPayload = nlohmann::json::parse(deniedResult.stdoutText);
+    assert(deniedPayload["code"] == "approval_denied");
+    assert(deniedPayload["data"]["status"] == "failed");
+
+    assert(ComputerCpp::StopDaemon(session));
+    daemon.join();
+#endif
+}
+
+void TestReservedAppCommandRejected() {
+    if (SkipLuaTestIfUnavailable("TestReservedAppCommandRejected")) return;
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    auto result = RunAppCommand(
+        options,
+        {
+            "app", "run",
+            (RepoRoot() / "tests/lua/app-reserved-command.lua").string(),
+        },
+        "");
+    assert(result.exitCode != 0);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["code"] == "invalid_app");
+    assert(payload["error"].get<std::string>().find("reserved computer_cpp_ prefix") != std::string::npos);
+}
+
 void TestLuaAppErrorsAreUserFacing() {
     if (SkipLuaTestIfUnavailable("TestLuaAppErrorsAreUserFacing")) {
         return;
@@ -2886,6 +3023,8 @@ void RunCliTests() {
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();
+    TestCliApprovalLifecycle();
+    TestReservedAppCommandRejected();
     TestLuaAppErrorsAreUserFacing();
     TestLuaManagedControlSessionSerializesConcurrentApps();
     TestLuaRuntimeWritesConfiguredLogFile();
