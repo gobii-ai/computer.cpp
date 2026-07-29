@@ -22,6 +22,7 @@ local tools = ac.tools.desktop_agent({
 local names = {}
 for _, tool in ipairs(tools) do names[#names + 1] = tool.name end
 
+local scroll_schema = tools[7].model_tool["function"].parameters
 local click = tools[5].handler({}, {
   rect = { left = 250, top = 250, right = 500, bottom = 500 },
   button = "right",
@@ -42,6 +43,15 @@ local observed = tools[1].handler({}, {
   maxDimension = 640,
 })
 
+local original_focus_app = ac.desktop.focus_app
+local activate_allow_error = false
+ac.desktop.focus_app = function(_, opts)
+  activate_allow_error = opts.allowError == true
+  return { ok = true, data = { focused = true } }
+end
+local activated = tools[2].handler({}, { app = "Calculator" })
+ac.desktop.focus_app = original_focus_app
+
 local function latest_params(method)
   local found = nil
   for _, batch in ipairs(ac.trace) do
@@ -58,6 +68,10 @@ local drag_params = latest_params("mouse_drag")
 return {
   tool_count = #tools,
   tool_names = table.concat(names, ","),
+  scroll_direction_required = scroll_schema.required[1] == "direction",
+  scroll_direction_has_nested_required = scroll_schema.properties.direction.required ~= nil,
+  activate_ok = activated.ok,
+  activate_allow_error = activate_allow_error,
   click_ok = click.ok,
   click_image = click.result and click.result.image or "",
   click_button = click_params.button,

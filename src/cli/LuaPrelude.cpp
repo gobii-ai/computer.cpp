@@ -669,13 +669,16 @@ local function dry_run_batch(steps)
       data.path = data.params.path or "/tmp/computer.cpp-dry-run-screenshot.png"
       data.width = tonumber(data.params.maxDimension) or 1000
       data.height = math.floor(data.width * 0.75)
-      data.frontmostWindowBounds = {
+      data.captureBounds = {
         available = true,
         x = 0,
         y = 0,
         width = data.width,
         height = data.height,
       }
+      if data.params.frontmostWindowOnly == true then
+        data.frontmostWindowBounds = data.captureBounds
+      end
     elseif step.method == "wait" then
       monotonic_ms = monotonic_ms + math.max(0, tonumber(data.params.delayMs) or 0)
     end
@@ -1687,7 +1690,7 @@ function ac.desktop.remember_screenshot(store, data)
     end
   end
   if type(store) == "table" then
-    store.last_screenshot_bounds = data.frontmostWindowBounds
+    store.last_screenshot_bounds = data.captureBounds or data.frontmostWindowBounds or data.region
     store.last_screenshot_image_width = data.width
     store.last_screenshot_image_height = data.height
   end
@@ -2362,7 +2365,7 @@ local function scroll_tool(name, spec, fixed_direction)
   }
   local required = nil
   if fixed_direction == nil then
-    properties.direction = { type = "string", required = true, enum = { "up", "down", "left", "right" } }
+    properties.direction = { type = "string", enum = { "up", "down", "left", "right" } }
     properties.anchorRect = ac.schemas.rect_like()
     required = { "direction" }
   end
@@ -2497,7 +2500,7 @@ function ac.tools.activate_app(spec)
   spec = spec or {}
   local store = spec.store
   return standard_tool("activate_app", {
-    description = "Launch or activate an application by name, wait until it is frontmost, then observe it.",
+    description = "Launch or activate an application by name, bundle id, or path, then observe the result. If name lookup fails, retry with a bundle id or path.",
     input = {
       app = { type = "string", required = true },
     },
@@ -2505,7 +2508,7 @@ function ac.tools.activate_app(spec)
     local focused = ac.desktop.focus_app(args.app, {
       timeoutMs = option_value(spec, "focusTimeoutMs", "focus_timeout_ms", 10000),
       pollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
-      allowError = false,
+      allowError = true,
     })
     return action_tool_result(spec, store, {
       app = args.app,
@@ -2582,6 +2585,26 @@ function ac.tools.request_approval(spec)
   end)
 end
 
+function ac.tools.click_target(spec)
+  spec = spec or {}
+  local store = spec.store
+  return standard_tool("click_target", {
+    description = "Click an exact accessibility target such as @ref from the latest observe_desktop snapshot. Prefer this over click_box when a matching ref exists.",
+    input = {
+      target = { type = "string", required = true },
+      button = { type = "string", default = "left", enum = { "left", "right", "middle" } },
+      clickCount = { type = "integer", default = 1, minimum = 1, maximum = 5 },
+    },
+  }, function(_, args)
+    local clicked = response_data(ac.request("click", {
+      target = args.target,
+      button = args.button or "left",
+      clickCount = args.clickCount or 1,
+    }))
+    return action_tool_result(spec, store, clicked)
+  end)
+end
+
 function ac.tools.desktop_agent(opts)
   opts = opts or {}
   local store = opts.store or {}
@@ -2603,6 +2626,7 @@ function ac.tools.desktop_agent(opts)
     ac.tools.type_text(action_opts),
     ac.tools.wait_stable(),
     ac.tools.request_approval(opts),
+    ac.tools.click_target(action_opts),
     ac.tools.done(),
     ac.tools.blocked(),
   }

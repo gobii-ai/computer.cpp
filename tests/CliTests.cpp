@@ -2986,9 +2986,14 @@ void TestLuaDesktopAgentTools() {
     auto payload = nlohmann::json::parse(result.stdoutText);
     assert(payload["ok"] == true);
     const auto& data = payload["data"]["result"];
-    assert(data["tool_count"] == 13);
+    assert(data["tool_count"] == 14);
     assert(data["tool_names"].get<std::string>().find("observe_desktop") != std::string::npos);
     assert(data["tool_names"].get<std::string>().find("request_approval") != std::string::npos);
+    assert(data["tool_names"].get<std::string>().find("click_target") != std::string::npos);
+    assert(data["scroll_direction_required"] == true);
+    assert(data["scroll_direction_has_nested_required"] == false);
+    assert(data["activate_ok"] == true);
+    assert(data["activate_allow_error"] == true);
     assert(data["click_ok"] == true);
     assert(data["click_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
     assert(data["click_button"] == "right");

@@ -88,6 +88,15 @@ json RunScreenshotCommand(const json& params) {
         }
         region = *parsedRegion;
     }
+    Platform::Bounds captureBounds = region;
+    if (!hasRegion && frontmostWindowOnly) {
+        captureBounds = Platform::GetFrontmostWindowBounds();
+    } else if (!hasRegion) {
+        int width = 0;
+        int height = 0;
+        Platform::GetScreenSize(width, height);
+        captureBounds = {true, 0, 0, static_cast<double>(width), static_cast<double>(height)};
+    }
 
     bool ok = false;
     if (hasRegion && maxDimension > 0) {
@@ -96,11 +105,11 @@ json RunScreenshotCommand(const json& params) {
         ok = Platform::SaveScreenshotRegion(path, region);
     } else if (maxDimension > 0) {
         ok = frontmostWindowOnly
-            ? Platform::SaveScreenshotRegionScaled(path, Platform::GetFrontmostWindowBounds(), maxDimension)
+            ? Platform::SaveScreenshotRegionScaled(path, captureBounds, maxDimension)
             : Platform::SaveScreenshotScaled(path, maxDimension);
     } else {
         ok = frontmostWindowOnly
-            ? Platform::SaveScreenshotRegion(path, Platform::GetFrontmostWindowBounds())
+            ? Platform::SaveScreenshotRegion(path, captureBounds)
             : Platform::SaveScreenshot(path);
     }
 
@@ -112,8 +121,9 @@ json RunScreenshotCommand(const json& params) {
     if (maxDimension > 0) {
         data["maxDimension"] = maxDimension;
     }
+    data["captureBounds"] = BoundsToJson(captureBounds);
     if (frontmostWindowOnly) {
-        data["frontmostWindowBounds"] = BoundsToJson(Platform::GetFrontmostWindowBounds());
+        data["frontmostWindowBounds"] = BoundsToJson(captureBounds);
     }
     if (hasRegion) {
         data["region"] = BoundsToJson(region);
