@@ -828,7 +828,8 @@ std::optional<json> RunAppCommand(
     if (lua.controlSessionToken.empty() &&
         (!operationDir.has_value() || !executablePath.empty())) {
         lua.acquireControlSession = true;
-        lua.leaseOwner = "lua-app:" + appId + ":" + surface;
+        lua.leaseOwner = "lua-app:" + appId + ":" + surface +
+            (operationDir.has_value() ? ":" + operationDir->filename().string() : "");
         lua.leasePurpose = "run " + commandName;
         lua.leaseTtlMs = kAppCommandLeaseTtlMs;
         lua.leaseWaitMs = kAppCommandQueueWaitMs;

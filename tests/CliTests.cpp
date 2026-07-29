@@ -2690,6 +2690,7 @@ void TestCliApprovalLifecycle() {
     auto approvedPayload = nlohmann::json::parse(approvedResult.stdoutText);
     assert(approvedPayload["data"]["status"] == "succeeded");
     assert(approvedPayload["data"]["result"]["note"] == "approved by test");
+    assert(!ComputerCpp::HasActiveControlSession(options.controlScope));
 
     auto duplicate = RunAppCommand(
         options,
