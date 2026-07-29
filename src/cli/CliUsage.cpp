@@ -24,6 +24,8 @@ Daemon:
                                       Run a semantic Lua app command
   app operation get|result|cancel <app.lua> <operation-id>
                                       Inspect async semantic app operations
+  app operation approve|deny <app.lua> <operation-id> <approval-id> [--note text]
+                                      Respond to a pending async approval request
 	  app serve <app.lua> [--listen 0.0.0.0:8787] [--auth-token-env ENV]
 	          [--allowed-origin https://host]
 	                                      Serve a semantic Lua app over HTTP and MCP at /mcp

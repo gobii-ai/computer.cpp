@@ -12,7 +12,10 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/ControlSession.h"
+#include "computer_cpp/Daemon.h"
 #include "computer_cpp/LuaRunner.h"
+#include "computer_cpp/RuntimeProvenance.h"
+#include "computer_cpp/Transport.h"
 
 #include <nlohmann/json.hpp>
 
@@ -110,6 +113,22 @@ CapturedConfigCommand RunSemanticAppCommand(std::initializer_list<std::string> a
         options,
         std::vector<std::string>(args),
         "computer.cpp");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    return {exitCode, stdoutCapture.str(), stderrCapture.str()};
+}
+
+CapturedConfigCommand RunAppCommand(
+    const ComputerCpp::Cli::CliOptions& options,
+    const std::vector<std::string>& args,
+    const std::string& executablePath
+) {
+    std::ostringstream stdoutCapture;
+    std::ostringstream stderrCapture;
+    auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    const int exitCode =
+        ComputerCpp::Cli::HandleSemanticAppCommand(options, args, executablePath);
     std::cout.rdbuf(oldOut);
     std::cerr.rdbuf(oldErr);
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
@@ -2503,6 +2522,221 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
     assert(data["invalid_args"]["reported"] == false);
 }
 
+void TestMicroAgentRuntimeLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentRuntimeLuaDryRun")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/micro-agent-runtime-dry-run.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    const auto& data = payload["data"]["result"];
+    assert(data["timeout_ok"] == false);
+    assert(data["timeout_code"] == "runtime_timeout");
+    assert(data["timeout_requests"] == 1);
+    assert(data["paused_ok"] == true);
+    assert(data["paused_requests"] == 1);
+}
+
+void TestLuaApprovalContextDryRun() {
+    if (SkipLuaTestIfUnavailable("TestLuaApprovalContextDryRun")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions syncOptions;
+    syncOptions.scriptPath = RepoRoot() / "tests/lua/app-approval.lua";
+    syncOptions.dryRun = true;
+    syncOptions.jsonOutput = true;
+    syncOptions.vars["__ac_app_mode"] = "run";
+    syncOptions.vars["__ac_app_command"] = "needs-approval";
+    syncOptions.vars["__ac_app_input_json"] =
+        R"({"message":"sync action","timeoutMs":5000})";
+    auto syncResult = ComputerCpp::RunLuaScriptCapture(syncOptions);
+    assert(!syncResult.stdoutText.empty());
+    auto syncPayload = nlohmann::json::parse(syncResult.stdoutText);
+    assert(syncPayload["ok"] == false);
+    assert(syncPayload["code"] == "approval_requires_async");
+
+    const auto root = std::filesystem::temp_directory_path() /
+        ("computer-cpp-approval-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root);
+    {
+        std::ofstream operation(root / "operation.json");
+        operation << R"({"status":"running","cancel_requested":false})";
+    }
+
+    std::thread approver([&]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::ifstream input(root / "approval.json");
+            nlohmann::json approval = nlohmann::json::parse(input, nullptr, false);
+            if (approval.is_object() && approval.value("status", "") == "pending") {
+                approval["status"] = "approved";
+                approval["note"] = "unit approved";
+                std::ofstream output(root / "approval.json", std::ios::trunc);
+                output << approval.dump();
+                return;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-approval.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+    options.controlSessionToken = "unit-control-token";
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "needs-approval";
+    options.vars["__ac_app_input_json"] =
+        R"({"message":"dry-run action","timeoutMs":5000})";
+    options.vars["__ac_operation_dir"] = root.string();
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    approver.join();
+    std::filesystem::remove_all(root);
+    AssertLuaRunSucceeded(result);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["ok"] == true);
+    assert(payload["data"]["result"]["approved"] == true);
+    assert(payload["data"]["result"]["note"] == "unit approved");
+    bool released = false;
+    bool resumed = false;
+    for (const auto& entry : payload["data"]["trace"]) {
+        for (const auto& step : entry.value("steps", nlohmann::json::array())) {
+            released = released || step.value("method", "") == "control_session_release";
+            resumed = resumed || step.value("method", "") == "control_session_resume";
+        }
+    }
+    assert(released);
+    assert(resumed);
+}
+
+void TestCliApprovalLifecycle() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (SkipLuaTestIfUnavailable("TestCliApprovalLifecycle")) return;
+
+    const std::filesystem::path executable =
+        std::filesystem::path(ComputerCpp::CurrentExecutablePath()).parent_path() / "computer.cpp";
+    assert(std::filesystem::exists(executable));
+    const std::string app = (RepoRoot() / "tests/lua/app-approval.lua").string();
+    const std::string session = "approval-cli-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    ScopedEnvVar allowDaemonMismatch("COMPUTER_CPP_ALLOW_DAEMON_MISMATCH");
+    allowDaemonMismatch.Set("1");
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    options.session = session;
+    std::thread daemon([&]() {
+        ComputerCpp::RunDaemon({session, true});
+    });
+    for (int attempt = 0; attempt < 100 && !ComputerCpp::IsDaemonReady(session); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(ComputerCpp::IsDaemonReady(session));
+
+    const auto waitForApproval = [&](const std::string& operation) {
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            auto get = RunAppCommand(
+                options,
+                {"app", "operation", "get", app, operation},
+                executable.string());
+            if (get.exitCode == 0) {
+                auto payload = nlohmann::json::parse(get.stdoutText);
+                if (payload["data"].value("status", "") == "waiting_for_approval") {
+                    return payload["data"]["approval"]["id"].get<std::string>();
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        assert(false && "approval request did not become pending");
+        return std::string();
+    };
+    const auto start = [&](const std::string& message) {
+        auto accepted = RunAppCommand(
+            options,
+            {
+                "app", "run", app, "needs-approval",
+                "--message", message,
+                "--timeoutMs", "15000",
+                "--async",
+            },
+            executable.string());
+        assert(accepted.exitCode == 0);
+        return nlohmann::json::parse(accepted.stdoutText)["data"]["operation"].get<std::string>();
+    };
+
+    const std::string approvedOperation = start("approve from CLI");
+    const std::string approvedId = waitForApproval(approvedOperation);
+    auto approved = RunAppCommand(
+        options,
+        {
+            "app", "operation", "approve", app, approvedOperation, approvedId,
+            "--note", "approved by test",
+        },
+        executable.string());
+    assert(approved.exitCode == 0);
+    auto approvedResult = RunAppCommand(
+        options,
+        {"app", "operation", "result", app, approvedOperation, "--wait", "10"},
+        executable.string());
+    assert(approvedResult.exitCode == 0);
+    auto approvedPayload = nlohmann::json::parse(approvedResult.stdoutText);
+    assert(approvedPayload["data"]["status"] == "succeeded");
+    assert(approvedPayload["data"]["result"]["note"] == "approved by test");
+    assert(!ComputerCpp::HasActiveControlSession(options.controlScope));
+
+    auto duplicate = RunAppCommand(
+        options,
+        {"app", "operation", "approve", app, approvedOperation, approvedId},
+        executable.string());
+    assert(duplicate.exitCode != 0);
+    assert(nlohmann::json::parse(duplicate.stdoutText)["code"] == "approval_conflict");
+
+    const std::string deniedOperation = start("deny from CLI");
+    const std::string deniedId = waitForApproval(deniedOperation);
+    auto denied = RunAppCommand(
+        options,
+        {"app", "operation", "deny", app, deniedOperation, deniedId, "--note", "denied by test"},
+        executable.string());
+    assert(denied.exitCode == 0);
+    auto deniedResult = RunAppCommand(
+        options,
+        {"app", "operation", "result", app, deniedOperation, "--wait", "10"},
+        executable.string());
+    assert(deniedResult.exitCode != 0);
+    auto deniedPayload = nlohmann::json::parse(deniedResult.stdoutText);
+    assert(deniedPayload["code"] == "approval_denied");
+    assert(deniedPayload["data"]["status"] == "failed");
+
+    assert(ComputerCpp::StopDaemon(session));
+    daemon.join();
+#endif
+}
+
+void TestReservedAppCommandRejected() {
+    if (SkipLuaTestIfUnavailable("TestReservedAppCommandRejected")) return;
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    auto result = RunAppCommand(
+        options,
+        {
+            "app", "run",
+            (RepoRoot() / "tests/lua/app-reserved-command.lua").string(),
+        },
+        "");
+    assert(result.exitCode != 0);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["code"] == "invalid_app");
+    assert(payload["error"].get<std::string>().find("reserved computer_cpp_ prefix") != std::string::npos);
+}
+
 void TestLuaAppErrorsAreUserFacing() {
     if (SkipLuaTestIfUnavailable("TestLuaAppErrorsAreUserFacing")) {
         return;
@@ -2737,6 +2971,52 @@ void TestLuaDesktopToolPixelRects() {
     assert(data["vision_content_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
 }
 
+void TestLuaDesktopAgentTools() {
+    if (SkipLuaTestIfUnavailable("TestLuaDesktopAgentTools")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/desktop-agent-tools-dry-run.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["ok"] == true);
+    const auto& data = payload["data"]["result"];
+    assert(data["tool_count"] == 15);
+    assert(data["tool_names"].get<std::string>().find("observe_desktop") != std::string::npos);
+    assert(data["tool_names"].get<std::string>().find("request_approval") != std::string::npos);
+    assert(data["tool_names"].get<std::string>().find("click_target") != std::string::npos);
+    assert(data["tool_names"].get<std::string>().find("action_sequence") != std::string::npos);
+    assert(data["scroll_direction_required"] == true);
+    assert(data["scroll_direction_has_nested_required"] == false);
+    assert(data["activate_ok"] == true);
+    assert(data["activate_allow_error"] == true);
+    assert(data["activate_has_accessibility"] == true);
+    assert(data["sequence_schema_max_items"] == 12);
+    assert(data["sequence_ok"] == true);
+    assert(data["sequence_executed"] == 3);
+    assert(data["sequence_stopped_on_error"] == false);
+    assert(data["click_ok"] == true);
+    assert(data["click_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["click_button"] == "right");
+    assert(data["click_count"] == 2);
+    assert(data["click_left"] == 150);
+    assert(data["drag_ok"] == true);
+    assert(data["drag_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["drag_from"] == "point:80,60");
+    assert(data["drag_to"] == "point:560,420");
+    assert(data["drag_duration"] == 450);
+    assert(data["observe_ok"] == true);
+    assert(data["observe_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["observe_has_coordinate"] == true);
+    assert(data["observe_has_accessibility"] == true);
+}
+
 } // namespace
 
 namespace ComputerCpp::Tests {
@@ -2753,12 +3033,17 @@ void RunCliTests() {
     TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
+    TestMicroAgentRuntimeLuaDryRun();
+    TestLuaApprovalContextDryRun();
+    TestCliApprovalLifecycle();
+    TestReservedAppCommandRejected();
     TestLuaAppErrorsAreUserFacing();
     TestLuaManagedControlSessionSerializesConcurrentApps();
     TestLuaRuntimeWritesConfiguredLogFile();
     TestLuaRuntimeLogFileHonorsQuietFlag();
     TestLuaPortableTempCapture();
     TestLuaDesktopToolPixelRects();
+    TestLuaDesktopAgentTools();
 }
 
 }

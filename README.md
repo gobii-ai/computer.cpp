@@ -799,6 +799,8 @@ Inspect async operations from the CLI:
 computer.cpp app operation get ./app.lua op_01jabc
 computer.cpp app operation result ./app.lua op_01jabc --wait 30
 computer.cpp app operation cancel ./app.lua op_01jabc
+computer.cpp app operation approve ./app.lua op_01jabc apr_01jdef --note "Approved"
+computer.cpp app operation deny ./app.lua op_01jabc apr_01jdef --note "Do not send"
 ```
 
 HTTP follows the same model:
@@ -809,6 +811,8 @@ POST /commands/summarize-visible-items?async=true
 GET  /operations/op_01jabc
 GET  /operations/op_01jabc/result?wait=30
 POST /operations/op_01jabc:cancel
+POST /operations/op_01jabc:approve
+POST /operations/op_01jabc:deny
 ```
 
 Statuses are:
@@ -816,10 +820,23 @@ Statuses are:
 ```text
 pending
 running
+waiting_for_approval
 succeeded
 failed
 cancelled
 ```
+
+Lua commands can call `ctx:request_approval(...)` only while running
+asynchronously. The current request is included in the operation record.
+Approval responses must include the exact current `approval_id`; stale,
+duplicate, and mismatched responses are rejected. Desktop control is released
+while approval is pending and reacquired before the command continues.
+
+The MCP server also exposes reserved `computer_cpp_operation_start`,
+`computer_cpp_operation_status`, `computer_cpp_operation_respond`, and
+`computer_cpp_operation_cancel` tools for
+starting, observing, approving or denying, and cancelling asynchronous app
+commands. App-defined commands cannot use the reserved `computer_cpp_` prefix.
 
 Long-running desktop work should be inspectable, cancellable, traceable, and
 easy to call.
@@ -874,6 +891,10 @@ standard tools like:
 ```text
 screenshot
 click_box
+click_target
+action_sequence
+drag_box
+scroll
 scroll_down
 scroll_up
 press_key
@@ -883,6 +904,15 @@ wait_stable
 done
 blocked
 ```
+
+For a general desktop loop, opt in to `ac.tools.desktop_agent()`. Its bundle
+adds unified observation, app and window activation, rich pointer actions,
+directional scrolling, action screenshots, and approval requests. Existing
+tool constructors keep their previous defaults.
+
+`ac.micro_agent(...)` also accepts `maxRuntimeMs` for a wall-clock budget in
+addition to its existing step and token bounds. Time spent waiting for a
+first-class approval request is excluded from that budget.
 
 They can also report semantic app-specific data through tools like:
 
@@ -1074,6 +1104,11 @@ ac.snapshot({ interactive = true, bounds = true })
 ac.click("role:button[name=\"Save\"]")
 ac.wait_frontmost("Finder", { timeoutMs = 5000 })
 ac.screenshot("/tmp/screen.png", { maxDimension = 1200 })
+
+local tools = ac.tools.desktop_agent({
+  coordinateSpace = "model_1000",
+  maxDimension = 1200,
+})
 ```
 
 Run scripts with:

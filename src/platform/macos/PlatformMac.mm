@@ -284,7 +284,25 @@ NSURL* ResolveApplicationUrl(const std::string& query) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     NSString* path = [[NSWorkspace sharedWorkspace] fullPathForApplication:nsQuery];
 #pragma clang diagnostic pop
-    return path ? [NSURL fileURLWithPath:path] : nil;
+    if (path) {
+        return [NSURL fileURLWithPath:path];
+    }
+
+    NSString* appName = nsQuery.pathExtension.length == 0
+        ? [nsQuery stringByAppendingPathExtension:@"app"]
+        : nsQuery;
+    for (NSString* root in @[
+        @"/Applications",
+        @"/System/Applications",
+        @"/System/Applications/Utilities",
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Applications"]
+    ]) {
+        NSString* candidate = [root stringByAppendingPathComponent:appName];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:candidate]) {
+            return [NSURL fileURLWithPath:candidate];
+        }
+    }
+    return nil;
 }
 
 std::string NormalizeKeyName(std::string keyName) {

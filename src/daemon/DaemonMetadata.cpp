@@ -148,7 +148,7 @@ json SchemaJson() {
             {"frontmostWindowOnly", "boolean; capture frontmost window bounds instead of full screen"},
             {"maxDimension", "integer 0..8192; 0 disables scaling"},
             {"region", "optional x/y/width/height numbers; width and height must be positive"},
-            {"response", "path plus optional maxDimension, frontmostWindowBounds, and region"}
+            {"response", "path plus captureBounds and optional maxDimension, frontmostWindowBounds, and region"}
         }},
         {"image", {
             {"info", "params: path; response: path, width, height"},

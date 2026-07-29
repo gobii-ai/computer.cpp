@@ -70,6 +70,10 @@ public:
         }
 
         token_ = result.record.token;
+        scope_ = result.record.scope;
+        daemonSession_ = result.record.daemonSession;
+        owner_ = result.record.owner;
+        purpose_ = result.record.purpose;
         ttlMs_ = result.record.expiresAtMs - result.record.renewedAtMs;
         if (ttlMs_ <= 0) {
             ttlMs_ = ClampControlSessionTtlMs(options.leaseTtlMs);
@@ -86,10 +90,30 @@ public:
     }
 
     bool RenewIfDue() {
-        if (token_.empty() ||
-            !renewalError_.empty() ||
+        if (!renewalError_.empty() ||
             std::chrono::steady_clock::now() < nextRenewal_) {
             return renewalError_.empty();
+        }
+        try {
+            const auto active = GetControlSessionStatus(scope_);
+            if (!active.ok) {
+                renewalError_ = active.error.empty()
+                    ? "could not inspect managed control session"
+                    : active.error;
+                return false;
+            }
+            if (active.record.state != "active" ||
+                active.record.daemonSession != daemonSession_ ||
+                active.record.owner != owner_ ||
+                active.record.purpose != purpose_) {
+                nextRenewal_ = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(250);
+                return true;
+            }
+            token_ = active.record.token;
+        } catch (const std::exception& ex) {
+            renewalError_ = ex.what();
+            return false;
         }
         ControlSessionResult renewed;
         try {
@@ -114,19 +138,31 @@ public:
     }
 
     void StopAndRelease() {
-        if (!token_.empty()) {
-            try {
-                ReleaseControlSession(token_);
-            } catch (const std::exception&) {
-                // The lease will expire by TTL even if storage is unavailable
-                // during best-effort cleanup.
+        try {
+            const auto active = GetControlSessionStatus(scope_);
+            if (active.ok &&
+                active.record.state == "active" &&
+                active.record.daemonSession == daemonSession_ &&
+                active.record.owner == owner_ &&
+                active.record.purpose == purpose_) {
+                token_ = active.record.token;
             }
-            token_.clear();
+            if (!token_.empty()) {
+                ReleaseControlSession(token_);
+            }
+        } catch (const std::exception&) {
+            // The lease will expire by TTL even if storage is unavailable
+            // during best-effort cleanup.
         }
+        token_.clear();
     }
 
 private:
     std::string token_;
+    std::string scope_;
+    std::string daemonSession_;
+    std::string owner_;
+    std::string purpose_;
     int64_t ttlMs_ = 0;
     int64_t renewIntervalMs_ = 0;
     std::chrono::steady_clock::time_point nextRenewal_;
