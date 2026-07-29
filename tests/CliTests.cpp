@@ -96,6 +96,22 @@ CapturedConfigCommand RunConfigCommand(std::initializer_list<std::string> args, 
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
 }
 
+CapturedConfigCommand RunSemanticAppCommand(std::initializer_list<std::string> args) {
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    std::ostringstream stdoutCapture;
+    std::ostringstream stderrCapture;
+    auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    int exitCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        std::vector<std::string>(args),
+        "computer.cpp");
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    return {exitCode, stdoutCapture.str(), stderrCapture.str()};
+}
+
 bool SkipLuaTestIfUnavailable(const char* testName) {
     if (!ComputerCpp::FindLuaInterpreter().empty()) {
         return false;
@@ -2029,6 +2045,17 @@ void TestLuaRunCommandParsing() {
     assert(error.find("--var requires a value") != std::string::npos);
 }
 
+void TestTrayServeConfigNameValidation() {
+    const auto missingValue = RunSemanticAppCommand({
+        "app",
+        "serve",
+        (RepoRoot() / "tests" / "lua" / "app-basic.lua").string(),
+        "--tray-config-name",
+    });
+    assert(missingValue.exitCode == 2);
+    assert(missingValue.stdoutText.find("--tray-config-name requires a value") != std::string::npos);
+}
+
 void TestConfigCliCanonicalFile() {
     auto init = RunConfigCommand({"config", "init", "--force"});
     assert(init.exitCode == 0);
@@ -2674,6 +2701,7 @@ void RunCliTests() {
     TestCliDurationParsing();
     TestSessionChildCommandParsing();
     TestLuaRunCommandParsing();
+    TestTrayServeConfigNameValidation();
     TestConfigCliCanonicalFile();
     TestRecordingSurfaceMetadata();
     TestCliCommandRecordingMetadata();

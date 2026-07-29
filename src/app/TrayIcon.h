@@ -4,14 +4,20 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 #include <wx/taskbar.h>
 
 class wxDialog;
 class wxProcess;
 class wxProcessEvent;
+class wxTimer;
+class wxTimerEvent;
 
 namespace ComputerCpp {
 struct ServerAppConfig;
@@ -29,6 +35,38 @@ public:
     void SetUpPermissionsIfNeeded(bool notifyWhenGranted = true);
 
 private:
+    enum class ServerStatus {
+        Stopped,
+        Starting,
+        Running,
+        Stopping,
+        Failed,
+    };
+
+    struct ManagedServer {
+        std::string configName;
+        std::string displayName;
+        std::string appPath;
+        std::string host;
+        std::string url;
+        std::filesystem::path statePath;
+        int port = 0;
+        long pid = 0;
+        wxProcess* process = nullptr;
+        ServerStatus status = ServerStatus::Stopped;
+        std::chrono::steady_clock::time_point deadline;
+        int shutdownStage = 0;
+        bool configured = false;
+        bool batchMember = false;
+        std::string failure;
+    };
+
+    enum class ServerBatchAction {
+        None,
+        Start,
+        Stop,
+    };
+
     void OnPermissions(wxCommandEvent& event);
     void OnSettings(wxCommandEvent& event);
     void OnRecordingToggle(wxCommandEvent& event);
@@ -37,17 +75,27 @@ private:
     void OnStartServer(wxCommandEvent& event);
     void OnStopServer(wxCommandEvent& event);
     void OnServerProcessEnded(wxProcessEvent& event);
+    void OnServerTimer(wxTimerEvent& event);
     void OnState(wxCommandEvent& event);
     void OnTestScreenshot(wxCommandEvent& event);
     void OnTestMouse(wxCommandEvent& event);
     void OnTaskbarRightUp(wxTaskBarIconEvent& event);
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
-    bool TryAdoptExistingServer(bool removeInvalidState);
-    bool TryAdoptConfiguredServer(const ComputerCpp::ServerConfig& server, const ComputerCpp::ServerAppConfig& app);
-    bool VerifyAdoptedServerBeforeStop(long pid, bool notifyOnFailure);
-    bool StopServerProcess(bool notifyOnFailure = false);
-    void ClearServerProcessState(bool deleteProcess);
+    void RefreshConfiguredServers();
+    void AdoptExistingServers(bool removeInvalidState);
+    void ToggleServer(const std::string& configName);
+    void StartOneServer(
+        const ComputerCpp::ServerConfig& server,
+        const ComputerCpp::ServerAppConfig& app,
+        int port,
+        bool batchMember);
+    void StopOneServer(const std::string& configName, bool batchMember);
+    void PollServers();
+    void CompleteServerAction(const std::string& configName, bool success, const std::string& error = {});
+    void FinishBatchIfReady();
+    void ReleaseServerProcess(ManagedServer& server);
+    void StopAllServersBlocking();
 
     bool daemonStarted_ = false;
 #ifdef __APPLE__
@@ -56,10 +104,12 @@ private:
     wxDialog* permissionDialog_ = nullptr;
     wxDialog* settingsDialog_ = nullptr;
     std::unique_ptr<TrayUpdateFlow> updateFlow_;
-    wxProcess* serverProcess_ = nullptr;
-    long serverPid_ = 0;
-    std::string serverUrl_;
-    std::string serverAppDisplayName_;
+    std::unique_ptr<wxTimer> serverTimer_;
+    std::map<std::string, ManagedServer> servers_;
+    std::string serverAuthToken_;
+    ServerBatchAction serverBatchAction_ = ServerBatchAction::None;
+    std::set<std::string> serverBatchPending_;
+    std::vector<std::string> serverBatchFailures_;
     std::thread daemonThread_;
     size_t cachedActiveRecordingCount_ = 0;
     std::chrono::steady_clock::time_point activeRecordingCountRefreshedAt_;

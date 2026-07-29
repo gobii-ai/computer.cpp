@@ -4,9 +4,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <signal.h>
@@ -23,7 +28,44 @@ std::filesystem::path TrayAppServerStatePath() {
     return AppDataDir() / "tray-app-server.json";
 }
 
+std::filesystem::path TrayAppServerStateDirectory() {
+    return AppDataDir() / "tray-app-servers";
+}
+
 namespace {
+
+uint64_t Fnv1a64(const std::string& value) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char ch : value) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+std::string SafeStateName(const std::string& configName) {
+    std::string prefix;
+    prefix.reserve(std::min<size_t>(configName.size(), 48));
+    for (unsigned char ch : configName) {
+        if (prefix.size() >= 48) {
+            break;
+        }
+        if ((ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_') {
+            prefix.push_back(static_cast<char>(ch));
+        } else if (ch == '.' || ch == ' ') {
+            prefix.push_back('-');
+        }
+    }
+    if (prefix.empty()) {
+        prefix = "app";
+    }
+    std::ostringstream suffix;
+    suffix << std::hex << std::nouppercase << Fnv1a64(configName);
+    return prefix + "-" + suffix.str() + ".json";
+}
 
 json TrayStateToJson(const TrayAppServerState& state) {
     return {
@@ -33,6 +75,7 @@ json TrayStateToJson(const TrayAppServerState& state) {
         {"url", state.url},
         {"appPath", state.appPath},
         {"appId", state.appId},
+        {"configName", state.configName},
         {"displayName", state.displayName},
         {"startedAt", state.startedAt},
     };
@@ -49,6 +92,7 @@ std::optional<TrayAppServerState> TrayStateFromJson(const json& value) {
     state.url = value.value("url", "");
     state.appPath = value.value("appPath", "");
     state.appId = value.value("appId", "");
+    state.configName = value.value("configName", "");
     state.displayName = value.value("displayName", "");
     state.startedAt = value.value("startedAt", "");
     if (state.pid <= 0 || state.host.empty() || state.port <= 0 || state.url.empty() || state.appPath.empty()) {
@@ -58,6 +102,36 @@ std::optional<TrayAppServerState> TrayStateFromJson(const json& value) {
 }
 
 } // namespace
+
+std::filesystem::path TrayAppServerStatePath(const std::string& configName) {
+    return TrayAppServerStateDirectory() / SafeStateName(configName);
+}
+
+std::vector<fs::path> ListTrayAppServerStatePaths(std::string* error) {
+    std::vector<fs::path> paths;
+    std::error_code ec;
+    const fs::path directory = TrayAppServerStateDirectory();
+    if (!fs::exists(directory, ec)) {
+        if (ec && error) {
+            *error = "could not inspect tray server state directory: " + ec.message();
+        }
+        return paths;
+    }
+    fs::directory_iterator end;
+    for (fs::directory_iterator it(directory, ec); !ec && it != end; it.increment(ec)) {
+        if (it->is_regular_file(ec) && !ec && it->path().extension() == ".json") {
+            paths.push_back(it->path());
+        }
+    }
+    if (ec) {
+        if (error) {
+            *error = "could not list tray server state directory: " + ec.message();
+        }
+        return {};
+    }
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
 
 bool SaveTrayAppServerState(const TrayAppServerState& state, const fs::path& path, std::string* error) {
     std::error_code ec;

@@ -1469,6 +1469,7 @@ struct AppServeOptions {
     std::string authToken;
     std::set<std::string> allowedOrigins;
     std::optional<fs::path> trayStateFile;
+    std::string trayConfigName;
     std::string trayDisplayName;
 };
 
@@ -2450,6 +2451,12 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
                 return std::nullopt;
             }
             serve.trayStateFile = args[++i];
+        } else if (args[i] == "--tray-config-name") {
+            if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
+                error = "app serve --tray-config-name requires a value";
+                return std::nullopt;
+            }
+            serve.trayConfigName = args[++i];
         } else if (args[i] == "--tray-display-name") {
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --tray-display-name requires a value";
@@ -2560,6 +2567,7 @@ int RunHttpServer(
         state.url = "http://" + bindHost + ":" + std::to_string(serveOptions.port);
         state.appPath = fs::absolute(serveOptions.appPath).string();
         state.appId = appId;
+        state.configName = serveOptions.trayConfigName;
         state.displayName = serveOptions.trayDisplayName;
         state.startedAt = NowIsoUtc();
         std::string stateError;

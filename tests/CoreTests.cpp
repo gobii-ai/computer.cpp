@@ -22,6 +22,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <thread>
@@ -135,6 +136,64 @@ void TestAppConfigServerRoundTrip() {
 
     loaded.recording.enabled = false;
     assert(ComputerCpp::SaveAppConfig(loaded, &error));
+}
+
+void TestServerPortPlanning() {
+    ComputerCpp::ServerConfig server;
+    server.basePort = 8787;
+
+    ComputerCpp::ServerAppConfig fixedA;
+    fixedA.name = "fixed-a";
+    fixedA.port = 8787;
+    server.apps[fixedA.name] = fixedA;
+
+    ComputerCpp::ServerAppConfig automatic;
+    automatic.name = "automatic";
+    server.apps[automatic.name] = automatic;
+
+    ComputerCpp::ServerAppConfig fixedB;
+    fixedB.name = "fixed-b";
+    fixedB.port = 8789;
+    server.apps[fixedB.name] = fixedB;
+
+    const std::set<std::string> allNames = {"fixed-a", "automatic", "fixed-b"};
+    auto available = [](int) { return true; };
+    auto plan = ComputerCpp::PlanServerPorts(server, allNames, {}, available);
+    assert(plan.errors.empty());
+    assert(plan.ports["fixed-a"] == 8787);
+    assert(plan.ports["automatic"] == 8788);
+    assert(plan.ports["fixed-b"] == 8789);
+
+    auto occupiedPlan = ComputerCpp::PlanServerPorts(server, allNames, {8788}, available);
+    assert(occupiedPlan.errors.empty());
+    assert(occupiedPlan.ports["automatic"] == 8790);
+
+    auto unavailableFixed = ComputerCpp::PlanServerPorts(
+        server,
+        allNames,
+        {},
+        [](int port) { return port != 8787; });
+    assert(unavailableFixed.errors.contains("fixed-a"));
+    assert(unavailableFixed.ports["automatic"] == 8788);
+    assert(unavailableFixed.ports["fixed-b"] == 8789);
+
+    server.apps["fixed-b"].port = 8787;
+    auto duplicate = ComputerCpp::PlanServerPorts(server, allNames, {}, available);
+    assert(duplicate.errors.contains("fixed-a"));
+    assert(duplicate.errors.contains("fixed-b"));
+    assert(duplicate.ports["automatic"] == 8788);
+
+    ComputerCpp::ServerConfig exhausted;
+    exhausted.basePort = 65535;
+    ComputerCpp::ServerAppConfig exhaustedApp;
+    exhaustedApp.name = "exhausted";
+    exhausted.apps[exhaustedApp.name] = exhaustedApp;
+    auto noPorts = ComputerCpp::PlanServerPorts(
+        exhausted,
+        {"exhausted"},
+        {65535},
+        available);
+    assert(noPorts.errors.contains("exhausted"));
 }
 
 class FakeScreenRecordingSession final : public ComputerCpp::Platform::ScreenRecordingSession {
@@ -479,6 +538,7 @@ void TestTrayServerState() {
     state.url = "http://127.0.0.1:8787";
     state.appPath = "/tmp/app.lua";
     state.appId = "app-id";
+    state.configName = "configured-app";
     state.displayName = "Test App";
     state.startedAt = "2026-06-22T00:00:00Z";
 
@@ -492,6 +552,7 @@ void TestTrayServerState() {
     assert(loaded->url == state.url);
     assert(loaded->appPath == state.appPath);
     assert(loaded->appId == state.appId);
+    assert(loaded->configName == state.configName);
     assert(loaded->displayName == state.displayName);
     assert(loaded->startedAt == state.startedAt);
 
@@ -508,6 +569,28 @@ void TestTrayServerState() {
     assert(!invalid.has_value());
     assert(ComputerCpp::RemoveTrayAppServerState(path, &error));
     assert(!ComputerCpp::IsProcessAlive(-1));
+
+    ComputerCpp::TrayAppServerState first = state;
+    first.pid = 111;
+    first.configName = "first/app";
+    ComputerCpp::TrayAppServerState second = state;
+    second.pid = 222;
+    second.configName = "../second app";
+    const fs::path firstPath = ComputerCpp::TrayAppServerStatePath(first.configName);
+    const fs::path secondPath = ComputerCpp::TrayAppServerStatePath(second.configName);
+    assert(firstPath.parent_path() == ComputerCpp::TrayAppServerStateDirectory());
+    assert(secondPath.parent_path() == ComputerCpp::TrayAppServerStateDirectory());
+    assert(firstPath != secondPath);
+    assert(firstPath == ComputerCpp::TrayAppServerStatePath(first.configName));
+    assert(firstPath.filename().string().find('/') == std::string::npos);
+    assert(secondPath.filename().string().find("..") == std::string::npos);
+    assert(ComputerCpp::SaveTrayAppServerState(first, firstPath, &error));
+    assert(ComputerCpp::SaveTrayAppServerState(second, secondPath, &error));
+    const auto paths = ComputerCpp::ListTrayAppServerStatePaths(&error);
+    assert(paths.size() == 2);
+    assert(paths[0] != paths[1]);
+    assert(ComputerCpp::RemoveTrayAppServerState(firstPath, &error));
+    assert(ComputerCpp::RemoveTrayAppServerState(secondPath, &error));
 }
 
 void TestRefStore() {
@@ -952,6 +1035,7 @@ int main() {
 
     RunTest("StringUtils", TestStringUtils);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
+    RunTest("ServerPortPlanning", TestServerPortPlanning);
     RunTest("CommandRecordingLifecycle", TestCommandRecordingLifecycle);
     RunTest("NativeCommandRecordingSmoke", TestNativeCommandRecordingSmoke);
     RunTest("TrayServerState", TestTrayServerState);

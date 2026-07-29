@@ -325,6 +325,67 @@ bool EnsureServerAuthToken(AppConfig& config) {
     return true;
 }
 
+ServerPortPlan PlanServerPorts(
+    const ServerConfig& server,
+    const std::set<std::string>& appNames,
+    const std::set<int>& occupiedPorts,
+    const std::function<bool(int)>& portAvailable
+) {
+    ServerPortPlan plan;
+    std::map<int, size_t> fixedPortCounts;
+    std::set<int> reservedFixedPorts;
+    for (const auto& [_, app] : server.apps) {
+        if (app.port.has_value()) {
+            ++fixedPortCounts[*app.port];
+            reservedFixedPorts.insert(*app.port);
+        }
+    }
+
+    std::set<int> allocatedPorts;
+    const int start = server.basePort > 0 && server.basePort <= 65535
+        ? server.basePort
+        : 8787;
+    for (const auto& name : appNames) {
+        auto appIt = server.apps.find(name);
+        if (appIt == server.apps.end()) {
+            plan.errors[name] = "app is not configured";
+            continue;
+        }
+        const ServerAppConfig& app = appIt->second;
+        if (app.port.has_value()) {
+            const int port = *app.port;
+            if (fixedPortCounts[port] > 1) {
+                plan.errors[name] = "configured port " + std::to_string(port) + " is also used by another app";
+            } else if (occupiedPorts.contains(port) || !portAvailable(port)) {
+                plan.errors[name] = "configured port " + std::to_string(port) + " is not available";
+            } else {
+                plan.ports[name] = port;
+                allocatedPorts.insert(port);
+            }
+            continue;
+        }
+
+        std::optional<int> selected;
+        for (int port = start; port <= 65535 && port < start + 100; ++port) {
+            if (reservedFixedPorts.contains(port) ||
+                occupiedPorts.contains(port) ||
+                allocatedPorts.contains(port) ||
+                !portAvailable(port)) {
+                continue;
+            }
+            selected = port;
+            break;
+        }
+        if (!selected.has_value()) {
+            plan.errors[name] = "no available port was found starting at " + std::to_string(start);
+            continue;
+        }
+        plan.ports[name] = *selected;
+        allocatedPorts.insert(*selected);
+    }
+    return plan;
+}
+
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error) {
     std::string provider = Lowercase(Trim(value));
     if (provider.empty() || provider == "auto") {
