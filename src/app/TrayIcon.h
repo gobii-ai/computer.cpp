@@ -29,6 +29,7 @@ public:
 private:
     void OnPermissions(wxCommandEvent& event);
     void OnSettings(wxCommandEvent& event);
+    void OnRecordingToggle(wxCommandEvent& event);
     void OnShowLogs(wxCommandEvent& event);
     void OnCheckForUpdates(wxCommandEvent& event);
     void OnStartServer(wxCommandEvent& event);

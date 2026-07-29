@@ -110,6 +110,7 @@ add_library(computer_cpp_core
     src/core/ControlSessionResources.cpp
     src/core/ControlSessionStore.cpp
     src/core/ControlSessionValidation.cpp
+    src/core/CommandRecording.cpp
     src/core/InferenceConfig.cpp
     src/core/InferenceContent.cpp
     src/core/InferenceClient.cpp
@@ -180,12 +181,15 @@ if(APPLE)
     target_sources(computer_cpp_core
         PRIVATE
             src/platform/macos/PlatformMac.mm
+            src/platform/macos/ScreenRecordingMac.mm
     )
 
     find_library(APPKIT_LIBRARY AppKit REQUIRED)
     find_library(APPLICATIONSERVICES_LIBRARY ApplicationServices REQUIRED)
+    find_library(AVFOUNDATION_LIBRARY AVFoundation REQUIRED)
     find_library(CARBON_LIBRARY Carbon REQUIRED)
     find_library(COREGRAPHICS_LIBRARY CoreGraphics REQUIRED)
+    find_library(COREMEDIA_LIBRARY CoreMedia REQUIRED)
     find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
     find_library(IMAGEIO_LIBRARY ImageIO REQUIRED)
     find_library(IOKIT_LIBRARY IOKit REQUIRED)
@@ -195,8 +199,10 @@ if(APPLE)
         PUBLIC
             ${APPKIT_LIBRARY}
             ${APPLICATIONSERVICES_LIBRARY}
+            ${AVFOUNDATION_LIBRARY}
             ${CARBON_LIBRARY}
             ${COREGRAPHICS_LIBRARY}
+            ${COREMEDIA_LIBRARY}
             ${FOUNDATION_LIBRARY}
             ${IMAGEIO_LIBRARY}
             ${IOKIT_LIBRARY}
@@ -205,11 +211,16 @@ if(APPLE)
 elseif(WIN32)
     target_sources(computer_cpp_core PRIVATE
         src/platform/windows/PlatformWindows.cpp
+        src/platform/windows/ScreenRecordingWindows.cpp
     )
     target_link_libraries(computer_cpp_core
         PUBLIC
             comctl32
             gdi32
+            mf
+            mfplat
+            mfreadwrite
+            mfuuid
             ole32
             oleaut32
             psapi
@@ -222,6 +233,7 @@ elseif(UNIX)
     target_sources(computer_cpp_core PRIVATE
         src/platform/linux/LinuxPng.cpp
         src/platform/linux/PlatformLinux.cpp
+        src/platform/linux/ScreenRecordingLinux.cpp
     )
     find_package(X11 REQUIRED COMPONENTS Xtst)
     target_link_libraries(computer_cpp_core PUBLIC ${X11_LIBRARIES} ${X11_Xtst_LIB})

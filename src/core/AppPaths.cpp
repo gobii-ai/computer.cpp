@@ -105,6 +105,12 @@ fs::path ConfigPath() {
     return ConfigDir() / "config.toml";
 }
 
+fs::path RecordingDir() {
+    fs::path path = ConfigDir() / "recordings";
+    EnsurePrivateDirectory(path);
+    return path;
+}
+
 fs::path SessionDir(const std::string& session) {
     fs::path path = AppDataDir() / "sessions" / session;
     EnsureDirectory(path);

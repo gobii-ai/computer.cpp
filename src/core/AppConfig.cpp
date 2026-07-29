@@ -406,6 +406,7 @@ AppConfig LoadAppConfig(std::string* error) {
     config.providers.clear();
     config.profiles.clear();
     config.server = ServerConfig{};
+    config.recording = RecordingConfig{};
     config.version = static_cast<int>(parsed["version"].value_or<int64_t>(1));
     config.defaultProfile = parsed["default_profile"].value_or("main");
 
@@ -497,6 +498,15 @@ AppConfig LoadAppConfig(std::string* error) {
         }
     }
 
+    if (auto recording = parsed["recording"].as_table()) {
+        config.recording.enabled = (*recording)["enabled"].value_or(false);
+        if (auto value = (*recording)["retention_days"].value<int64_t>()) {
+            if (*value >= 0 && *value <= 36500) {
+                config.recording.retentionDays = static_cast<int>(*value);
+            }
+        }
+    }
+
     if (config.providers.empty()) {
         config.providers = DefaultAppConfig().providers;
     }
@@ -570,6 +580,17 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
         {"authToken", redactSecrets && !config.server.authToken.empty() ? "<redacted>" : config.server.authToken},
         {"allowedOrigins", config.server.allowedOrigins},
         {"apps", json::object()},
+    };
+    out["recording"] = {
+        {"enabled", config.recording.enabled},
+        {"retentionDays", config.recording.retentionDays},
+        {"directory", RecordingDir().string()},
+        {"format", "mp4"},
+        {"codec", "h264"},
+        {"framesPerSecond", 15},
+        {"maxDimension", 1920},
+        {"includesCursor", true},
+        {"includesAudio", false},
     };
     for (const auto& [name, app] : config.server.apps) {
         json item = {
@@ -647,6 +668,10 @@ std::string AppConfigToToml(const AppConfig& config) {
         out << "auth_token = " << TomlStringLiteral(config.server.authToken) << "\n";
     }
     out << "allowed_origins = " << JsonToTomlValue(config.server.allowedOrigins) << "\n\n";
+
+    out << TomlTablePath({"recording"}) << "\n";
+    out << "enabled = " << (config.recording.enabled ? "true" : "false") << "\n";
+    out << "retention_days = " << config.recording.retentionDays << "\n\n";
 
     for (const auto& [name, app] : config.server.apps) {
         out << TomlTablePath({"server", "apps", name}) << "\n";

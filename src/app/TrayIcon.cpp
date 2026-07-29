@@ -2,6 +2,7 @@
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/InferenceClient.h"
 #include "computer_cpp/Platform.h"
@@ -62,6 +63,7 @@ namespace ComputerCpp::App {
 enum {
     ID_PERMISSIONS = 1001,
     ID_SETTINGS,
+    ID_RECORDING_TOGGLE,
     ID_SHOW_LOGS,
     ID_CHECK_UPDATES,
     ID_START_SERVER,
@@ -944,6 +946,7 @@ public:
         BuildProfilesPage();
         BuildProvidersPage();
         BuildServerPage();
+        BuildRecordingPage();
         BuildConfigPage();
         root->Add(notebook_, 1, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 18);
 
@@ -1340,6 +1343,49 @@ private:
         page->SetSizer(root);
     }
 
+    void BuildRecordingPage() {
+        auto* page = AddNotebookPage("Recording");
+        auto* root = new wxBoxSizer(wxVERTICAL);
+
+        auto* box = new wxStaticBoxSizer(wxVERTICAL, page, "Per-command video recording");
+        recordingEnabled_ = new wxCheckBox(
+            page,
+            wxID_ANY,
+            "Record the desktop while each top-level app command runs");
+        box->Add(recordingEnabled_, 0, wxALL | wxEXPAND, 12);
+
+        auto* warning = new wxStaticText(
+            page,
+            wxID_ANY,
+            "Privacy notice: recordings can contain anything visible on the desktop, "
+            "including other apps and notifications. Audio is never recorded.");
+        warning->Wrap(720);
+        box->Add(warning, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+
+        auto* pathGrid = new wxFlexGridSizer(2, 8, 10);
+        pathGrid->AddGrowableCol(1, 1);
+        recordingPath_ = AddTextField(page, pathGrid, "Recording Folder");
+        recordingPath_->SetEditable(false);
+        box->Add(pathGrid, 0, wxLEFT | wxRIGHT | wxEXPAND, 12);
+
+        openRecordings_ = new wxButton(page, wxID_ANY, "Open Folder");
+        box->Add(openRecordings_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+
+        auto* details = new wxStaticText(
+            page,
+            wxID_ANY,
+            "Fixed format: H.264 MP4, 15 fps, up to 1920 pixels, cursor included, "
+            "no audio. Completed recordings are retained for 14 days by default.");
+        details->Wrap(720);
+        box->Add(details, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+
+        root->Add(box, 0, wxALL | wxEXPAND, 14);
+        page->SetSizer(root);
+
+        BindDirty(recordingEnabled_);
+        openRecordings_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnOpenRecordings, this);
+    }
+
     void SetStatus(const std::string& message) {
         (void)message;
     }
@@ -1416,6 +1462,12 @@ private:
         }
         if (configPath_) {
             configPath_->ChangeValue(ConfigPath().string());
+        }
+        if (recordingEnabled_) {
+            recordingEnabled_->SetValue(config_.recording.enabled);
+        }
+        if (recordingPath_) {
+            recordingPath_->ChangeValue(RecordingDir().string());
         }
         PopulateProviderLists(FirstProviderName());
         PopulateProviderChoices();
@@ -1825,6 +1877,9 @@ private:
     }
 
     bool FlushAllFields() {
+        if (recordingEnabled_) {
+            config_.recording.enabled = recordingEnabled_->GetValue();
+        }
         return FlushProviderFields() && FlushProfileFields() && FlushServerFields();
     }
 
@@ -2176,6 +2231,21 @@ private:
         wxLaunchDefaultApplication(ConfigPath().string());
     }
 
+    void OnOpenRecordings(wxCommandEvent&) {
+        try {
+            EnsureDirectory(RecordingDir());
+        } catch (const std::exception& ex) {
+            ShowResultDialog("Recording Folder", ex.what(), wxICON_ERROR);
+            return;
+        }
+        if (!wxLaunchDefaultApplication(RecordingDir().string())) {
+            ShowResultDialog(
+                "Recording Folder",
+                "Could not open:\n" + RecordingDir().string(),
+                wxICON_ERROR);
+        }
+    }
+
     void OnCloseWindow(wxCloseEvent& event) {
         if (dirty_) {
             int answer = wxMessageBox(
@@ -2241,6 +2311,9 @@ private:
     wxButton* regenerateServerToken_ = nullptr;
 
     wxTextCtrl* configPath_ = nullptr;
+    wxCheckBox* recordingEnabled_ = nullptr;
+    wxTextCtrl* recordingPath_ = nullptr;
+    wxButton* openRecordings_ = nullptr;
     wxStaticText* dirtyBadge_ = nullptr;
     wxButton* save_ = nullptr;
     wxButton* reload_ = nullptr;
@@ -2578,6 +2651,7 @@ private:
 wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_PERMISSIONS, TrayIcon::OnPermissions)
     EVT_MENU(ID_SETTINGS, TrayIcon::OnSettings)
+    EVT_MENU(ID_RECORDING_TOGGLE, TrayIcon::OnRecordingToggle)
     EVT_MENU(ID_SHOW_LOGS, TrayIcon::OnShowLogs)
     EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
     EVT_MENU(ID_START_SERVER, TrayIcon::OnStartServer)
@@ -2673,6 +2747,17 @@ wxMenu* TrayIcon::CreatePopupMenu() {
 
     menu->Append(ID_PERMISSIONS, "Permissions");
     menu->Append(ID_SETTINGS, "Settings...");
+    std::string configError;
+    const AppConfig config = LoadAppConfig(&configError);
+    wxMenuItem* recordingToggle = menu->AppendCheckItem(
+        ID_RECORDING_TOGGLE,
+        "Record app commands");
+    recordingToggle->Check(configError.empty() && config.recording.enabled);
+    const size_t activeRecordings = ActiveRecordingCount();
+    wxMenuItem* recordingStatus = menu->Append(
+        wxID_ANY,
+        "Active recordings: " + std::to_string(activeRecordings));
+    recordingStatus->Enable(false);
 
     wxMenu* advanced = new wxMenu;
     advanced->Append(ID_STATE, "Show State");
@@ -2701,6 +2786,33 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
         settingsDialog_ = nullptr;
     });
     PresentSettingsDialog(settingsDialog_);
+}
+
+void TrayIcon::OnRecordingToggle(wxCommandEvent& event) {
+    std::string error;
+    AppConfig config = LoadAppConfig(&error);
+    if (!error.empty()) {
+        wxMessageBox(error, "ComputerCpp Recording", wxOK | wxICON_ERROR);
+        return;
+    }
+    config.recording.enabled = event.IsChecked();
+    if (!SaveAppConfig(config, &error)) {
+        wxMessageBox(
+            "Could not save recording setting:\n" + error,
+            "ComputerCpp Recording",
+            wxOK | wxICON_ERROR);
+        return;
+    }
+    if (config.recording.enabled && !Platform::CheckPermissions(false).screenCapture) {
+        Platform::RequestScreenCapturePermission();
+        if (!Platform::CheckPermissions(false).screenCapture) {
+            wxMessageBox(
+                "Recording is enabled, but Screen Recording permission is missing. "
+                "Commands will continue normally and recording attempts will be reported as failed.",
+                "ComputerCpp Recording",
+                wxOK | wxICON_WARNING);
+        }
+    }
 }
 
 void TrayIcon::OnShowLogs(wxCommandEvent&) {
