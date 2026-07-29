@@ -212,6 +212,11 @@ std::string NowIsoUtc() {
     return out.str();
 }
 
+int64_t NowEpochSeconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 bool RuntimeLoggingEnabled() {
     const char* raw = std::getenv("COMPUTER_CPP_LOG");
     if (raw == nullptr || *raw == '\0') {
@@ -332,6 +337,7 @@ struct OperationPaths {
     fs::path traceJsonl;
     fs::path progressJson;
     fs::path recordingJson;
+    fs::path approvalJson;
     fs::path artifactsDir;
 };
 
@@ -346,6 +352,7 @@ OperationPaths PathsForOperation(const std::string& appId, const std::string& op
         dir / "trace.jsonl",
         dir / "progress.json",
         dir / "recording.json",
+        dir / "approval.json",
         dir / "artifacts",
     };
 }
@@ -886,6 +893,7 @@ json MakeInitialOperationRecord(
         {"progress", nullptr},
         {"result_url", "/operations/" + operationId + "/result"},
         {"error", nullptr},
+        {"approval", nullptr},
         {"cancel_requested", false},
         {"recording_requested", recordingRequested},
         {"recording_surface", surface},
@@ -923,6 +931,18 @@ std::optional<json> ReadOperationRecord(const OperationPaths& paths, std::string
     auto recording = ReadJsonFile(paths.recordingJson, recordingError);
     if (recording) {
         (*record)["recording"] = *recording;
+    }
+    if (fs::exists(paths.approvalJson)) {
+        std::string approvalError;
+        auto approval = ReadJsonFile(paths.approvalJson, approvalError);
+        if (approval && approval->is_object()) {
+            (*record)["approval"] = *approval;
+            const std::string status = record->value("status", "");
+            if ((status == "pending" || status == "running") &&
+                approval->value("status", "") == "pending") {
+                (*record)["status"] = "waiting_for_approval";
+            }
+        }
     }
     return record;
 }
@@ -1418,8 +1438,9 @@ int HandleOperationResult(
         }
         return code;
     }
-    if (status == "pending" || status == "running") {
+    if (status == "pending" || status == "running" || status == "waiting_for_approval") {
         json data = {{"status", status}, {"operation", operationId}, {"result", nullptr}};
+        if (record->contains("approval")) data["approval"] = (*record)["approval"];
         if (options.jsonOutput && !recording.empty()) {
             data["recording"] = recording;
         }
@@ -1452,7 +1473,7 @@ std::optional<json> CancelOperationRecord(const OperationPaths& paths, const std
     }
 
     const std::string status = record->value("status", "");
-    if (status == "pending" || status == "running") {
+    if (status == "pending" || status == "running" || status == "waiting_for_approval") {
         const std::string now = NowIsoUtc();
         (*record)["status"] = "cancelled";
         (*record)["cancel_requested"] = true;
@@ -1474,6 +1495,92 @@ std::optional<json> CancelOperationRecord(const OperationPaths& paths, const std
         }
     }
     return json({{"operation", operationId}, {"status", (*record)["status"]}});
+}
+
+std::optional<json> RespondApprovalRecord(
+    const OperationPaths& paths,
+    const std::string& operationId,
+    const std::string& approvalId,
+    bool approved,
+    const std::string& note,
+    std::string& error
+) {
+    auto record = ReadKnownOperation(paths, operationId, error);
+    if (!record) return std::nullopt;
+    if (IsFinalStatus(record->value("status", ""))) {
+        error = "operation is already complete";
+        return std::nullopt;
+    }
+    if (!fs::exists(paths.approvalJson)) {
+        error = "operation has no approval request";
+        return std::nullopt;
+    }
+    auto approval = ReadJsonFile(paths.approvalJson, error);
+    if (!approval || !approval->is_object()) return std::nullopt;
+    if (approval->value("id", "") != approvalId) {
+        error = "approval id does not match the current request";
+        return std::nullopt;
+    }
+    if (approval->value("status", "") != "pending") {
+        error = "approval request has already been answered";
+        return std::nullopt;
+    }
+    if (approval->contains("expires_at") && (*approval)["expires_at"].is_number_integer() &&
+        (*approval)["expires_at"].get<int64_t>() <= NowEpochSeconds()) {
+        (*approval)["status"] = "expired";
+        (*approval)["responded_at"] = NowIsoUtc();
+        std::string writeError;
+        if (!WriteJsonFile(paths.approvalJson, *approval, writeError)) {
+            error = writeError;
+            return std::nullopt;
+        }
+        error = "approval request has expired";
+        return std::nullopt;
+    }
+    (*approval)["status"] = approved ? "approved" : "denied";
+    (*approval)["responded_at"] = NowIsoUtc();
+    if (!note.empty()) (*approval)["note"] = note;
+    if (!WriteJsonFile(paths.approvalJson, *approval, error)) return std::nullopt;
+    return json({
+        {"operation", operationId},
+        {"status", "running"},
+        {"approval", *approval},
+    });
+}
+
+int HandleOperationApproval(
+    const CliOptions& options,
+    const std::vector<std::string>& args,
+    const std::string& executablePath,
+    bool approved
+) {
+    if (args.size() < 6) {
+        return ErrorExit(
+            options,
+            std::string("app operation ") + (approved ? "approve" : "deny") +
+                " requires <app.lua> <operation-id> <approval-id>",
+            2,
+            "invalid_input");
+    }
+    std::string note;
+    for (size_t i = 6; i < args.size(); ++i) {
+        if (args[i] != "--note" || i + 1 >= args.size()) {
+            return ErrorExit(options, "approval response accepts only --note <text>", 2, "invalid_input");
+        }
+        note = args[++i];
+    }
+    std::string error;
+    auto paths = OperationPathsForCli(options, executablePath, args[3], args[4], error);
+    if (!paths) return ErrorExit(options, error, 1, "invalid_app");
+    auto response = RespondApprovalRecord(*paths, args[4], args[5], approved, note, error);
+    if (!response) {
+        return ErrorExit(
+            options,
+            error,
+            fs::exists(paths->operationJson) ? 1 : 2,
+            fs::exists(paths->operationJson) ? "approval_conflict" : "unknown_operation");
+    }
+    return PrintData(options, *response);
 }
 
 int HandleOperationCancel(
@@ -1504,7 +1611,7 @@ int HandleAppOperation(
     const std::string& executablePath
 ) {
     if (args.size() < 3) {
-        return ErrorExit(options, "app operation requires get, result, or cancel", 2, "invalid_input");
+        return ErrorExit(options, "app operation requires get, result, approve, deny, or cancel", 2, "invalid_input");
     }
     if (args[2] == "get") {
         return HandleOperationGet(options, args, executablePath);
@@ -1514,6 +1621,12 @@ int HandleAppOperation(
     }
     if (args[2] == "cancel") {
         return HandleOperationCancel(options, args, executablePath);
+    }
+    if (args[2] == "approve") {
+        return HandleOperationApproval(options, args, executablePath, true);
+    }
+    if (args[2] == "deny") {
+        return HandleOperationApproval(options, args, executablePath, false);
     }
     if (args[2] == "__run-stored" && args.size() == 6) {
         return RunStoredOperation(options, executablePath, args[3], args[4], args[5]);
@@ -1783,9 +1896,10 @@ json HttpErrorBody(std::string code, std::string message, json details = json::o
 int HttpStatusForErrorCode(const std::string& code) {
     if (code == "invalid_input" || code == "invalid_app") return 400;
     if (code == "unknown_command" || code == "unknown_operation") return 404;
-    if (code == "operation_cancelled") return 409;
+    if (code == "operation_cancelled" || code == "approval_conflict" ||
+        code == "approval_denied" || code == "approval_requires_async") return 409;
     if (code == "permission_denied") return 403;
-    if (code == "timeout") return 504;
+    if (code == "timeout" || code == "runtime_timeout" || code == "approval_timeout") return 504;
     return 500;
 }
 
@@ -2021,6 +2135,7 @@ json MakeMcpToolsList(const json& schema) {
     json tools = json::array();
     const json commands = schema.value("commands", json::object());
     for (auto it = commands.begin(); it != commands.end(); ++it) {
+        if (it.key().rfind("computer_cpp_", 0) == 0) continue;
         const json command = it.value().is_object() ? it.value() : json::object();
         json tool = {
             {"name", it.key()},
@@ -2032,6 +2147,72 @@ json MakeMcpToolsList(const json& schema) {
         }
         tools.push_back(std::move(tool));
     }
+    const json emptyObject = {
+        {"type", "object"},
+        {"properties", json::object()},
+        {"additionalProperties", true},
+    };
+    tools.push_back({
+        {"name", "computer_cpp_operation_start"},
+        {"description", "Start one app command asynchronously so it can pause for approval."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"command", {{"type", "string"}}},
+                {"arguments", emptyObject},
+            }},
+            {"required", {"command"}},
+            {"additionalProperties", false},
+        }},
+    });
+    tools.push_back({
+        {"name", "computer_cpp_operation_get"},
+        {"description", "Inspect an asynchronous app operation and any current approval request."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {{"operation", {{"type", "string"}}}}},
+            {"required", {"operation"}},
+            {"additionalProperties", false},
+        }},
+    });
+    tools.push_back({
+        {"name", "computer_cpp_operation_result"},
+        {"description", "Get or briefly wait for the result of an asynchronous app operation."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"operation", {{"type", "string"}}},
+                {"waitSeconds", {{"type", "integer"}, {"minimum", 0}, {"maximum", 30}, {"default", 0}}},
+            }},
+            {"required", {"operation"}},
+            {"additionalProperties", false},
+        }},
+    });
+    tools.push_back({
+        {"name", "computer_cpp_operation_respond"},
+        {"description", "Approve or deny the exact current approval request for an asynchronous operation."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {
+                {"operation", {{"type", "string"}}},
+                {"approvalId", {{"type", "string"}}},
+                {"decision", {{"type", "string"}, {"enum", {"approve", "deny"}}}},
+                {"note", {{"type", "string"}}},
+            }},
+            {"required", {"operation", "approvalId", "decision"}},
+            {"additionalProperties", false},
+        }},
+    });
+    tools.push_back({
+        {"name", "computer_cpp_operation_cancel"},
+        {"description", "Cancel an asynchronous app operation."},
+        {"inputSchema", {
+            {"type", "object"},
+            {"properties", {{"operation", {{"type", "string"}}}}},
+            {"required", {"operation"}},
+            {"additionalProperties", false},
+        }},
+    });
     return {{"tools", std::move(tools)}};
 }
 
@@ -2104,6 +2285,141 @@ bool HandleMcpJsonRpcRequest(
             arguments = params["arguments"];
         }
         const json commands = schema.value("commands", json::object());
+        const std::string appId = AppIdFor(serveOptions.appPath, schema);
+        const auto sendOperationSuccess = [&](const json& result) {
+            return SendJsonResponse(
+                fd,
+                200,
+                JsonRpcResult(id, McpToolSuccessResult(result)));
+        };
+        const auto sendOperationError = [&](const std::string& code, const std::string& error) {
+            return SendJsonResponse(
+                fd,
+                200,
+                JsonRpcResult(id, McpToolErrorResult(code, error)));
+        };
+        if (toolName == "computer_cpp_operation_start") {
+            if (!arguments.contains("command") || !arguments["command"].is_string() ||
+                (arguments.contains("arguments") && !arguments["arguments"].is_object())) {
+                return sendOperationError(
+                    "invalid_input",
+                    "command must be a string and arguments must be an object");
+            }
+            const std::string command = arguments["command"].get<std::string>();
+            const json commandArguments =
+                arguments.contains("arguments") ? arguments["arguments"] : json::object();
+            if (command.empty() || !commands.contains(command) ||
+                command.rfind("computer_cpp_", 0) == 0) {
+                return sendOperationError("unknown_command", "unknown command: " + command);
+            }
+            std::string error;
+            auto operation = CreateAsyncOperation(
+                options,
+                executablePath,
+                serveOptions.appPath,
+                schema,
+                command,
+                commandArguments,
+                "mcp",
+                error);
+            if (!operation) return sendOperationError("internal_error", error);
+            return sendOperationSuccess(*operation);
+        }
+        if (toolName == "computer_cpp_operation_get") {
+            if (!arguments.contains("operation") || !arguments["operation"].is_string()) {
+                return sendOperationError("invalid_input", "operation must be a string");
+            }
+            const std::string operationId = arguments["operation"].get<std::string>();
+            if (operationId.empty()) {
+                return sendOperationError("invalid_input", "operation is required");
+            }
+            std::string error;
+            OperationPaths paths = PathsForOperation(appId, operationId);
+            auto record = ReadKnownOperation(paths, operationId, error);
+            if (!record) return sendOperationError("unknown_operation", error);
+            return sendOperationSuccess(PublicOperationRecord(*record));
+        }
+        if (toolName == "computer_cpp_operation_result") {
+            if (!arguments.contains("operation") || !arguments["operation"].is_string() ||
+                (arguments.contains("waitSeconds") && !arguments["waitSeconds"].is_number_integer())) {
+                return sendOperationError(
+                    "invalid_input",
+                    "operation must be a string and waitSeconds must be an integer");
+            }
+            const std::string operationId = arguments["operation"].get<std::string>();
+            const int waitSeconds =
+                arguments.contains("waitSeconds") ? arguments["waitSeconds"].get<int>() : 0;
+            if (operationId.empty() || waitSeconds < 0 || waitSeconds > 30) {
+                return sendOperationError(
+                    "invalid_input",
+                    "operation is required and waitSeconds must be between 0 and 30");
+            }
+            std::string error;
+            OperationPaths paths = PathsForOperation(appId, operationId);
+            auto record = WaitForOperationResult(paths, operationId, waitSeconds, error);
+            if (!record) return sendOperationError("unknown_operation", error);
+            json result = {
+                {"operation", operationId},
+                {"status", record->value("status", "")},
+                {"result", nullptr},
+            };
+            if (record->contains("approval")) result["approval"] = (*record)["approval"];
+            if (record->value("status", "") == "succeeded") {
+                auto commandResult = ReadJsonFile(paths.resultJson, error);
+                if (!commandResult) return sendOperationError("internal_error", error);
+                result["result"] = *commandResult;
+            } else if (record->contains("error")) {
+                result["error"] = (*record)["error"];
+            }
+            return sendOperationSuccess(result);
+        }
+        if (toolName == "computer_cpp_operation_respond") {
+            if (!arguments.contains("operation") || !arguments["operation"].is_string() ||
+                !arguments.contains("approvalId") || !arguments["approvalId"].is_string() ||
+                !arguments.contains("decision") || !arguments["decision"].is_string() ||
+                (arguments.contains("note") && !arguments["note"].is_string())) {
+                return sendOperationError(
+                    "invalid_input",
+                    "operation, approvalId, decision, and note must be strings");
+            }
+            const std::string operationId = arguments["operation"].get<std::string>();
+            const std::string approvalId = arguments["approvalId"].get<std::string>();
+            const std::string decision = arguments["decision"].get<std::string>();
+            if (operationId.empty() || approvalId.empty() ||
+                (decision != "approve" && decision != "deny")) {
+                return sendOperationError(
+                    "invalid_input",
+                    "operation, approvalId, and an approve or deny decision are required");
+            }
+            std::string error;
+            OperationPaths paths = PathsForOperation(appId, operationId);
+            auto response = RespondApprovalRecord(
+                paths,
+                operationId,
+                approvalId,
+                decision == "approve",
+                arguments.contains("note") ? arguments["note"].get<std::string>() : "",
+                error);
+            if (!response) return sendOperationError("approval_conflict", error);
+            return sendOperationSuccess(*response);
+        }
+        if (toolName == "computer_cpp_operation_cancel") {
+            if (!arguments.contains("operation") || !arguments["operation"].is_string()) {
+                return sendOperationError("invalid_input", "operation must be a string");
+            }
+            const std::string operationId = arguments["operation"].get<std::string>();
+            if (operationId.empty()) {
+                return sendOperationError("invalid_input", "operation is required");
+            }
+            std::string error;
+            OperationPaths paths = PathsForOperation(appId, operationId);
+            auto cancelled = CancelOperationRecord(paths, operationId, error);
+            if (!cancelled) return sendOperationError("unknown_operation", error);
+            return sendOperationSuccess(*cancelled);
+        }
+        if (toolName.rfind("computer_cpp_", 0) == 0) {
+            return SendJsonRpcError(fd, 400, id, -32602, "Unknown tool: " + toolName);
+        }
         if (!commands.contains(toolName)) {
             return SendJsonRpcError(fd, 400, id, -32602, "Unknown tool: " + toolName);
         }
@@ -2118,7 +2434,7 @@ bool HandleMcpJsonRpcRequest(
             toolName,
             arguments,
             std::nullopt,
-            AppIdFor(serveOptions.appPath, schema),
+            appId,
             "mcp",
             std::nullopt,
             std::nullopt,
@@ -2327,14 +2643,16 @@ bool HandleHttpOperationResult(
         }
         return SendJsonResponse(fd, 200, {{"status", status}, {"result", *result}}, recordingHeaders);
     }
-    if (status == "pending" || status == "running") {
+    if (status == "pending" || status == "running" || status == "waiting_for_approval") {
         auto headers = recordingHeaders;
         headers["Location"] = "/operations/" + operationId + "/result";
         headers["Retry-After"] = "2";
+        json body = {{"status", status}, {"operation", operationId}, {"result", nullptr}};
+        if (record->contains("approval")) body["approval"] = (*record)["approval"];
         return SendJsonResponse(
             fd,
             202,
-            {{"status", status}, {"operation", operationId}, {"result", nullptr}},
+            body,
             headers);
     }
 
@@ -2359,6 +2677,56 @@ bool HandleHttpOperation(
     if (rest.empty()) {
         return SendJsonResponse(fd, 404, HttpErrorBody("unknown_operation", "unknown operation"));
     }
+
+    const auto handleApproval = [&](const std::string& suffix, bool approved) -> std::optional<bool> {
+        if (request.method != "POST" || rest.size() <= suffix.size() ||
+            rest.substr(rest.size() - suffix.size()) != suffix) {
+            return std::nullopt;
+        }
+        const std::string operationId = rest.substr(0, rest.size() - suffix.size());
+        json input;
+        std::string error;
+        if (!ParseJsonObjectBody(request, input, error)) {
+            return SendJsonResponse(fd, 400, HttpErrorBody("invalid_input", error));
+        }
+        if (!input.contains("approval_id") || !input["approval_id"].is_string() ||
+            (input.contains("note") && !input["note"].is_string())) {
+            return SendJsonResponse(
+                fd,
+                400,
+                HttpErrorBody(
+                    "invalid_input",
+                    "approval_id must be a string and note, when provided, must be a string"));
+        }
+        const std::string approvalId = input["approval_id"].get<std::string>();
+        const std::string note =
+            input.contains("note") ? input["note"].get<std::string>() : "";
+        if (approvalId.empty()) {
+            return SendJsonResponse(
+                fd,
+                400,
+                HttpErrorBody("invalid_input", "approval_id is required"));
+        }
+        OperationPaths paths = PathsForOperation(appId, operationId);
+        auto response = RespondApprovalRecord(
+            paths,
+            operationId,
+            approvalId,
+            approved,
+            note,
+            error);
+        if (!response) {
+            return SendJsonResponse(
+                fd,
+                fs::exists(paths.operationJson) ? 409 : 404,
+                HttpErrorBody(
+                    fs::exists(paths.operationJson) ? "approval_conflict" : "unknown_operation",
+                    error));
+        }
+        return SendJsonResponse(fd, 200, *response);
+    };
+    if (auto response = handleApproval(":approve", true)) return *response;
+    if (auto response = handleApproval(":deny", false)) return *response;
 
     if (request.method == "POST" && rest.size() > 7 && rest.substr(rest.size() - 7) == ":cancel") {
         const std::string operationId = rest.substr(0, rest.size() - 7);

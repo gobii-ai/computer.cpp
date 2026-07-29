@@ -960,6 +960,8 @@ end
 	    waitMs = 0,
 	    maxRuntimeMs = 0,
 	  }, opts or {})
+	  local previous_control_opts = context.active_control_opts
+	  context.active_control_opts = opts
 
 	  local acquired = false
 	  if context.control_session == nil or context.control_session == "" then
@@ -979,6 +981,7 @@ end
 	  if acquired then
 	    ac.session.release()
 	  end
+	  context.active_control_opts = previous_control_opts
 	  if not ok then
 	    error(result, 0)
 	  end
@@ -1210,6 +1213,8 @@ local function read_json_file(path)
   return decoded
 end
 
+)LUA";
+    out << R"LUA(
 local function make_app_context(command_name, input)
   local operation_dir = context.vars and context.vars.__ac_operation_dir or nil
   local ctx = {
@@ -1243,6 +1248,137 @@ local function make_app_context(command_name, input)
     if not operation_dir or operation_dir == "" then return false end
     local operation = read_json_file(operation_dir .. "/operation.json")
     return operation and operation.cancel_requested == true
+  end
+  function ctx:request_approval(spec)
+    spec = spec or {}
+    if not operation_dir or operation_dir == "" then
+      return nil, {
+        code = "approval_requires_async",
+        message = "approval requests require an asynchronous app operation",
+      }
+    end
+    local title = ac.text.trim(ac.value.string(spec.title))
+    local reason = ac.text.trim(ac.value.string(spec.reason))
+    local action = ac.text.trim(ac.value.string(spec.action))
+    local risk = ac.text.trim(ac.value.string(spec.risk))
+    if title == "" or reason == "" or action == "" then
+      return nil, {
+        code = "invalid_input",
+        message = "approval title, reason, and action are required",
+      }
+    end
+    if risk == "" then risk = "other" end
+    local allowed_risks = {
+      communication = true,
+      destructive = true,
+      external_side_effect = true,
+      financial = true,
+      security = true,
+      other = true,
+    }
+    if not allowed_risks[risk] then
+      return nil, {
+        code = "invalid_input",
+        message = "approval risk must be communication, destructive, external_side_effect, financial, security, or other",
+      }
+    end
+    local timeout_ms = tonumber(spec.timeoutMs or spec.timeout_ms) or 600000
+    timeout_ms = math.max(1000, math.min(3600000, math.floor(timeout_ms)))
+    local approval_id = "apr_" .. tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+    local approval_path = operation_dir .. "/approval.json"
+    local requested_at = os.time()
+    local request = {
+      id = approval_id,
+      status = "pending",
+      title = title,
+      reason = reason,
+      action = action,
+      risk = risk,
+      requested_at = requested_at,
+      expires_at = requested_at + math.ceil(timeout_ms / 1000),
+    }
+    if type(spec.details) == "table" then request.details = spec.details end
+    local wrote, write_error = pcall(write_json_file, approval_path, request)
+    if not wrote then
+      return nil, {
+        code = "approval_write_failed",
+        message = tostring(write_error or "could not persist approval request"),
+      }
+    end
+    self:progress({
+      step = "waiting-for-approval",
+      approval = request,
+    })
+
+    local control_opts = context.active_control_opts
+    local had_control = type(context.control_session) == "string" and context.control_session ~= ""
+    if had_control then
+      local released = ac.session.release()
+      if not released or not released.ok then
+        return nil, {
+          code = "approval_release_failed",
+          message = tostring(released and (released.error or released.code) or "could not release desktop control"),
+        }
+      end
+    end
+    local function restore_control()
+      if not had_control then return true end
+      local resumed = ac.session.resume(type(control_opts) == "table" and control_opts or {})
+      if not resumed or not resumed.ok then
+        return nil, {
+          code = "approval_resume_failed",
+          message = tostring(resumed and (resumed.error or resumed.code) or "could not reacquire desktop control"),
+        }
+      end
+      return true
+    end
+
+    local wait_started = os.time()
+    local deadline = wait_started + math.ceil(timeout_ms / 1000)
+    local response = nil
+    repeat
+      if self:cancelled() then
+        self._ac_paused_ms = (tonumber(self._ac_paused_ms) or 0) + (os.time() - wait_started) * 1000
+        return nil, { code = "operation_cancelled", message = "operation cancelled while awaiting approval" }
+      end
+      local current = read_json_file(approval_path)
+      if type(current) == "table" and current.id == approval_id and current.status ~= "pending" then
+        response = current
+        break
+      end
+      ac.sleep(250)
+    until os.time() >= deadline
+    self._ac_paused_ms = (tonumber(self._ac_paused_ms) or 0) + (os.time() - wait_started) * 1000
+
+    if not response then
+      local current = read_json_file(approval_path)
+      if type(current) == "table" and current.id == approval_id and current.status ~= "pending" then
+        response = current
+      end
+    end
+    if not response then
+      request.status = "expired"
+      request.responded_at = os.time()
+      pcall(write_json_file, approval_path, request)
+      local restored, restore_error = restore_control()
+      if not restored then return nil, restore_error end
+      return nil, { code = "approval_timeout", message = "approval request timed out" }
+    end
+    local restored, restore_error = restore_control()
+    if not restored then return nil, restore_error end
+    if response.status ~= "approved" then
+      return nil, {
+        code = "approval_denied",
+        message = ac.text.present(response.note) and response.note or "approval request was denied",
+      }
+    end
+
+    self:progress({ step = "approval-granted", approvalId = approval_id })
+    return {
+      approved = true,
+      approvalId = approval_id,
+      note = ac.value.string(response.note),
+    }
   end
   function ctx:deadline()
     return context.vars and context.vars.__ac_deadline or nil
@@ -1331,6 +1467,8 @@ local function handle_app_mode(app)
   end, debug.traceback)
   if not run_ok then
     local message = app_error_message(result)
+    local failure_code = type(result) == "table" and tostring(result.code or "") or ""
+    if failure_code == "" then failure_code = "operation_failed" end
     log_line("app", "failed", {
       command = command_name,
       elapsed_ms = math.floor((os.clock() - started_at) * 1000),
@@ -1338,7 +1476,7 @@ local function handle_app_mode(app)
     })
     return {
       ok = false,
-      code = "operation_failed",
+      code = failure_code,
       error = message,
       data = { trace = trace, progress = ctx.progress_history, error = { message = message, raw = tostring(result) } },
     }
@@ -1800,6 +1938,8 @@ function ac.desktop.click_rect(rect, opts)
   end
   local params = {
     rect = screen_rect,
+    button = option_value(opts, "button", nil, "left"),
+    clickCount = option_value(opts, "clickCount", "click_count", 1),
     rectClickXFraction = option_value(opts, "rectClickXFraction", "rect_click_x_fraction", 0.5),
     rectClickYFraction = option_value(opts, "rectClickYFraction", "rect_click_y_fraction", 0.5),
   }
@@ -1821,6 +1961,8 @@ function ac.desktop.click_rect_and_screenshot(store, rect, opts)
     focusTimeoutMs = option_value(opts, "focusTimeoutMs", "focus_timeout_ms", 10000),
     focusPollMs = option_value(opts, "focusPollMs", "focus_poll_ms", 200),
     focusAllowError = option_value(opts, "focusAllowError", "focus_allow_error", false),
+    button = option_value(opts, "button", nil, "left"),
+    clickCount = option_value(opts, "clickCount", "click_count", 1),
     rectClickXFraction = option_value(opts, "rectClickXFraction", "rect_click_x_fraction", 0.5),
     rectClickYFraction = option_value(opts, "rectClickYFraction", "rect_click_y_fraction", 0.5),
   })
@@ -1839,6 +1981,42 @@ function ac.desktop.click_rect_and_screenshot(store, rect, opts)
     image = screenshot.__ac_image_path,
     __ac_image_path = screenshot.__ac_image_path,
   })
+end
+
+function ac.desktop.drag_rects(from_rect, to_rect, opts)
+  opts = opts or {}
+  local from_screen, from_err = ac.desktop.rect_to_screen(
+    opts.store,
+    from_rect,
+    option_value(opts, "normalized", nil, nil),
+    opts)
+  if not from_screen then return nil, from_err end
+  local to_screen, to_err = ac.desktop.rect_to_screen(
+    opts.store,
+    to_rect,
+    option_value(opts, "normalized", nil, nil),
+    opts)
+  if not to_screen then return nil, to_err end
+
+  local from_x = math.floor((from_screen.left + from_screen.right) / 2)
+  local from_y = math.floor((from_screen.top + from_screen.bottom) / 2)
+  local to_x = math.floor((to_screen.left + to_screen.right) / 2)
+  local to_y = math.floor((to_screen.top + to_screen.bottom) / 2)
+  local name = focus_app_name(nil, opts)
+  if type(name) == "string" and name ~= "" then
+    ac.desktop.focus_app(name, {
+      timeoutMs = option_value(opts, "focusTimeoutMs", "focus_timeout_ms", 10000),
+      pollMs = option_value(opts, "focusPollMs", "focus_poll_ms", 200),
+      allowError = option_value(opts, "focusAllowError", "focus_allow_error", false),
+    })
+  end
+  return response_data(ac.request("mouse_drag", {
+    from = "point:" .. tostring(from_x) .. "," .. tostring(from_y),
+    to = "point:" .. tostring(to_x) .. "," .. tostring(to_y),
+    button = option_value(opts, "button", nil, "left"),
+    durationMs = option_value(opts, "durationMs", "duration_ms", 0),
+    steps = option_value(opts, "steps", nil, 0),
+  }))
 end
 
 function ac.desktop.type_and_screenshot(text, store, opts)
@@ -2050,6 +2228,8 @@ local function standard_tool(name, spec, handler)
   return tool
 end
 
+)LUA";
+    out << R"LUA(
 ac.tools = {}
 function ac.tools.screenshot(spec)
   spec = spec or {}
@@ -2085,12 +2265,34 @@ function ac.tools.screenshot(spec)
     return ac.tool_result.ok(ac.desktop.remember_screenshot(store, response_data(result)))
   end)
 end
-local function rect_tool_schema()
+
+local function action_tool_result(spec, store, action)
+  if option_value(spec, "observeAfterAction", "observe_after_action", false) ~= true then
+    return ac.tool_result.ok(action or {})
+  end
+  ac.wait_stable_screen(
+    option_value(spec, "stableMs", "stable_ms", 300),
+    { timeoutMs = option_value(spec, "stableTimeoutMs", "stable_timeout_ms", 5000) })
+  local screenshot = ac.desktop.capture_required_screenshot(nil, store, {
+    maxDimension = option_value(spec, "maxDimension", "max_dimension", 1200),
+    frontmostWindowOnly = option_value(spec, "frontmostWindowOnly", "frontmost_window_only", false),
+  })
+  return ac.tool_result.ok({
+    action = action or {},
+    screenshot = screenshot,
+    image = screenshot.__ac_image_path,
+    __ac_image_path = screenshot.__ac_image_path,
+  })
+end
+
+local function rect_tool_schema(extra)
+  local properties = {
+    rect = ac.schemas.rect_like(),
+  }
+  for name, value in pairs(extra or {}) do properties[name] = value end
   return {
     type = "object",
-    properties = {
-      rect = ac.schemas.rect_like(),
-    },
+    properties = properties,
     required = { "rect" },
     additionalProperties = false,
   }
@@ -2101,8 +2303,11 @@ function ac.tools.click_box(spec)
   local focus_app = focus_app_name(nil, spec)
   local store = spec.store
   return standard_tool("click_box", {
-    description = "Click the center of a visible rectangle. Requires rect, never x/y points. Rect values are pixels in the latest screenshot image.",
-    input = rect_tool_schema(),
+    description = "Click the center of a visible rectangle. Requires rect, never x/y points. Supports left, right, or middle clicks and click counts from 1 to 5.",
+    input = rect_tool_schema({
+      button = { type = "string", default = "left", enum = { "left", "right", "middle" } },
+      clickCount = { type = "integer", default = 1, minimum = 1, maximum = 5 },
+    }),
   }, function(_, args)
     local result, err = ac.desktop.click_rect(ac.rect.normalize(args.rect), {
       store = store,
@@ -2113,13 +2318,107 @@ function ac.tools.click_box(spec)
       focusTimeoutMs = option_value(spec, "focusTimeoutMs", "focus_timeout_ms", 10000),
       focusPollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
       focusAllowError = option_value(spec, "focusAllowError", "focus_allow_error", false),
+      button = args.button or "left",
+      clickCount = args.clickCount or 1,
       rectClickXFraction = 0.5,
       rectClickYFraction = 0.5,
     })
     if not result then
       return ac.tool_result.error({ code = "invalid_input", message = "click_box " .. tostring(err) })
     end
-    return ac.tool_result.ok(result)
+    return action_tool_result(spec, store, result)
+  end)
+end
+
+function ac.tools.drag_box(spec)
+  spec = spec or {}
+  local store = spec.store
+  local focus_app = focus_app_name(nil, spec)
+  return standard_tool("drag_box", {
+    description = "Drag from the center of one visible rectangle to the center of another.",
+    input = {
+      type = "object",
+      properties = {
+        fromRect = ac.schemas.rect_like(),
+        toRect = ac.schemas.rect_like(),
+        button = { type = "string", default = "left", enum = { "left", "right", "middle" } },
+        durationMs = { type = "integer", default = 0, minimum = 0, maximum = 5000 },
+        steps = { type = "integer", default = 0, minimum = 0, maximum = 120 },
+      },
+      required = { "fromRect", "toRect" },
+      additionalProperties = false,
+    },
+  }, function(_, args)
+    local result, err = ac.desktop.drag_rects(
+      ac.rect.normalize(args.fromRect),
+      ac.rect.normalize(args.toRect),
+      {
+        store = store,
+        coordinateSpace = option_value(spec, "coordinateSpace", "coordinate_space", nil),
+        requireScreenshot = option_value(spec, "requireScreenshot", "require_screenshot", false),
+        focusApp = focus_app,
+        focusTimeoutMs = option_value(spec, "focusTimeoutMs", "focus_timeout_ms", 10000),
+        focusPollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
+        focusAllowError = option_value(spec, "focusAllowError", "focus_allow_error", false),
+        button = args.button or "left",
+        durationMs = args.durationMs or 0,
+        steps = args.steps or 0,
+      })
+    if not result then
+      return ac.tool_result.error({ code = "invalid_input", message = "drag_box " .. tostring(err) })
+    end
+    return action_tool_result(spec, store, result)
+  end)
+end
+
+function ac.tools.scroll(spec)
+  spec = spec or {}
+  local store = spec.store
+  local focus_app = focus_app_name(nil, spec)
+  return standard_tool("scroll", {
+    description = "Scroll in one direction by a bounded amount, optionally anchored inside a visible rectangle.",
+    input = {
+      type = "object",
+      properties = {
+        direction = { type = "string", required = true, enum = { "up", "down", "left", "right" } },
+        pixels = { type = "integer", default = 600, minimum = 1, maximum = 3000 },
+        anchorRect = ac.schemas.rect_like(),
+      },
+      required = { "direction" },
+      additionalProperties = false,
+    },
+  }, function(_, args)
+    local pixels = tonumber(args.pixels) or 600
+    local params = { dy = 0, dx = 0 }
+    if args.direction == "up" then params.dy = pixels
+    elseif args.direction == "down" then params.dy = -pixels
+    elseif args.direction == "left" then params.dx = pixels
+    else params.dx = -pixels end
+
+    if args.anchorRect ~= nil then
+      local screen_rect, err = ac.desktop.rect_to_screen(
+        store,
+        ac.rect.normalize(args.anchorRect),
+        nil,
+        {
+          coordinateSpace = option_value(spec, "coordinateSpace", "coordinate_space", nil),
+          requireScreenshot = option_value(spec, "requireScreenshot", "require_screenshot", false),
+        })
+      if not screen_rect then
+        return ac.tool_result.error({ code = "invalid_input", message = "scroll " .. tostring(err) })
+      end
+      local x = math.floor((screen_rect.left + screen_rect.right) / 2)
+      local y = math.floor((screen_rect.top + screen_rect.bottom) / 2)
+      params.at = "point:" .. tostring(x) .. "," .. tostring(y)
+    end
+    local result = focus_app
+      and ac.desktop.step_for_app(focus_app, "scroll", "scroll", params, spec)
+      or response_data(ac.request("scroll", params))
+    return action_tool_result(spec, store, {
+      direction = args.direction,
+      amount = pixels,
+      result = result,
+    })
   end)
 end
 function ac.tools.scroll_down(spec)
@@ -2155,6 +2454,7 @@ end
 function ac.tools.press_key(spec)
   spec = spec or {}
   local focus_app = focus_app_name(nil, spec)
+  local store = spec.store
   return standard_tool("press_key", {
     description = "Press a key or key chord",
     input = {
@@ -2164,12 +2464,13 @@ function ac.tools.press_key(spec)
   }, function(_, args)
     local params = { keys = args.keys, holdMs = args.holdMs }
     local result = focus_app and ac.desktop.step_for_app(focus_app, "press", "press", params, spec) or response_data(ac.request("press", params))
-    return ac.tool_result.ok(result)
+    return action_tool_result(spec, store, result)
   end)
 end
 function ac.tools.type_text(spec)
   spec = spec or {}
   local focus_app = focus_app_name(nil, spec)
+  local store = spec.store
   return standard_tool("type_text", {
     description = "Type text into the focused field",
     input = {
@@ -2179,9 +2480,175 @@ function ac.tools.type_text(spec)
   }, function(_, args)
 )LUA" R"LUA(    local params = { text = args.text, paste = args.paste ~= false }
     local result = focus_app and ac.desktop.step_for_app(focus_app, "type", "type", params, spec) or response_data(ac.request("type", params))
+    return action_tool_result(spec, store, result)
+  end)
+end
+
+function ac.tools.observe_desktop(spec)
+  spec = spec or {}
+  local store = spec.store
+  local default_accessibility = option_value(spec, "includeAccessibility", "include_accessibility", false)
+  return standard_tool("observe_desktop", {
+    description = "Observe the desktop with a screenshot, frontmost application, active window, and optional bounded interactive accessibility snapshot.",
+    input = {
+      includeAccessibility = { type = "boolean", default = default_accessibility },
+      frontmostWindowOnly = {
+        type = "boolean",
+        default = option_value(spec, "frontmostWindowOnly", "frontmost_window_only", false),
+      },
+      maxDimension = {
+        type = "integer",
+        default = option_value(spec, "maxDimension", "max_dimension", 1200),
+        minimum = 1,
+        maximum = 1600,
+      },
+    },
+  }, function(_, args)
+    local active = response_data(ac.request("app_active", {}, { allow_error = true })) or {}
+    local window = response_data(ac.request("window_active", {}, { allow_error = true })) or {}
+    local screenshot = ac.desktop.capture_required_screenshot(nil, store, {
+      maxDimension = args.maxDimension or option_value(spec, "maxDimension", "max_dimension", 1200),
+      frontmostWindowOnly = args.frontmostWindowOnly == true,
+    })
+    local result = {
+      app = active.app or active,
+      window = window.window or window,
+      screenshot = screenshot,
+      image = screenshot.__ac_image_path,
+      __ac_image_path = screenshot.__ac_image_path,
+      coordinate = ac.desktop.screenshot_state(screenshot, {
+        coordinateSpace = option_value(spec, "coordinateSpace", "coordinate_space", "model_1000"),
+      }),
+    }
+    if args.includeAccessibility == true then
+      local snapshot = ac.request("snapshot", {
+        interactive = true,
+        bounds = true,
+        maxDepth = option_value(spec, "snapshotMaxDepth", "snapshot_max_depth", 8),
+        maxNodes = option_value(spec, "snapshotMaxNodes", "snapshot_max_nodes", 250),
+      }, { allow_error = true })
+      if snapshot and snapshot.ok then
+        result.accessibility = snapshot.data or {}
+      else
+        result.accessibility = {
+          available = false,
+          code = snapshot and snapshot.code or "snapshot_unavailable",
+          error = snapshot and snapshot.error or "accessibility snapshot unavailable",
+        }
+      end
+    end
     return ac.tool_result.ok(result)
   end)
 end
+
+function ac.tools.activate_app(spec)
+  spec = spec or {}
+  local store = spec.store
+  return standard_tool("activate_app", {
+    description = "Launch or activate an application by name, wait until it is frontmost, then observe it.",
+    input = {
+      app = { type = "string", required = true },
+    },
+  }, function(_, args)
+    local focused = ac.desktop.focus_app(args.app, {
+      timeoutMs = option_value(spec, "focusTimeoutMs", "focus_timeout_ms", 10000),
+      pollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
+      allowError = false,
+    })
+    return action_tool_result(spec, store, {
+      app = args.app,
+      focused = response_data(focused),
+    })
+  end)
+end
+
+function ac.tools.list_windows()
+  return standard_tool("list_windows", {
+    description = "List visible application windows, optionally restricted to one application.",
+    input = {
+      app = { type = "string" },
+    },
+  }, function(_, args)
+    local params = {}
+    if ac.text.present(args.app) then params.app = args.app end
+    return ac.tool_result.ok(response_data(ac.request("window_list", params, { allow_error = true })))
+  end)
+end
+
+function ac.tools.activate_window(spec)
+  spec = spec or {}
+  local store = spec.store
+  return standard_tool("activate_window", {
+    description = "Activate an exact window id returned by list_windows, then observe it.",
+    input = {
+      id = { type = "string", required = true },
+    },
+  }, function(_, args)
+    local activated = response_data(ac.request("window_activate", { id = args.id }))
+    return action_tool_result(spec, store, activated)
+  end)
+end
+
+function ac.tools.request_approval(spec)
+  spec = spec or {}
+  return standard_tool("request_approval", {
+    description = "Pause an asynchronous operation and request explicit approval before a consequential action.",
+    input = {
+      title = { type = "string", required = true },
+      reason = { type = "string", required = true },
+      action = { type = "string", required = true },
+      risk = {
+        type = "string",
+        default = "other",
+        enum = { "communication", "destructive", "external_side_effect", "financial", "security", "other" },
+      },
+      details = { type = "object", properties = {}, additionalProperties = true },
+      timeoutMs = {
+        type = "integer",
+        default = option_value(spec, "approvalTimeoutMs", "approval_timeout_ms", 600000),
+        minimum = 1000,
+        maximum = 3600000,
+      },
+    },
+  }, function(ctx, args)
+    if not ctx or type(ctx.request_approval) ~= "function" then
+      return ac.tool_result.error({
+        code = "approval_unavailable",
+        message = "the current app context does not support approval requests",
+      })
+    end
+    local approved, err = ctx:request_approval(args)
+    if not approved then return ac.tool_result.error(err) end
+    return ac.tool_result.ok(approved)
+  end)
+end
+
+function ac.tools.desktop_agent(opts)
+  opts = opts or {}
+  local store = opts.store or {}
+  local action_opts = merge(opts, {
+    store = store,
+    coordinateSpace = option_value(opts, "coordinateSpace", "coordinate_space", "model_1000"),
+    requireScreenshot = true,
+    observeAfterAction = true,
+  })
+  return {
+    ac.tools.observe_desktop(merge(opts, { store = store })),
+    ac.tools.activate_app(action_opts),
+    ac.tools.list_windows(),
+    ac.tools.activate_window(action_opts),
+    ac.tools.click_box(action_opts),
+    ac.tools.drag_box(action_opts),
+    ac.tools.scroll(action_opts),
+    ac.tools.press_key(action_opts),
+    ac.tools.type_text(action_opts),
+    ac.tools.wait_stable(),
+    ac.tools.request_approval(opts),
+    ac.tools.done(),
+    ac.tools.blocked(),
+  }
+end
+
 function ac.tools.desktop_app(app, opts)
   opts = opts or {}
   local store = opts.store or {}
@@ -2413,6 +2880,29 @@ function MicroAgent:run_loop(ctx, opts)
   end
 
   local max_steps = tonumber(opts.max_steps) or tonumber(self.spec.max_steps) or 10
+  local max_runtime_ms = tonumber(opts.maxRuntimeMs)
+    or tonumber(opts.max_runtime_ms)
+    or tonumber(self.spec.maxRuntimeMs)
+    or tonumber(self.spec.max_runtime_ms)
+  if max_runtime_ms ~= nil and max_runtime_ms <= 0 then
+    return { ok = false, error = { code = "invalid_input", message = "micro-agent maxRuntimeMs must be positive" } }
+  end
+  local runtime_started_ms = os.time() * 1000
+  local function runtime_expired()
+    if max_runtime_ms == nil then return false end
+    local paused_ms = tonumber(ctx and ctx._ac_paused_ms) or 0
+    return (os.time() * 1000 - runtime_started_ms - paused_ms) >= max_runtime_ms
+  end
+  local function runtime_timeout()
+    log_line("agent", "runtime timeout", { name = self.name, max_runtime_ms = max_runtime_ms })
+    return {
+      ok = false,
+      error = {
+        code = "runtime_timeout",
+        message = "micro-agent exceeded maxRuntimeMs",
+      },
+    }
+  end
   local max_missing_tool_replies = tonumber(opts.max_missing_tool_replies)
     or tonumber(self.spec.max_missing_tool_replies)
     or 2
@@ -2434,6 +2924,7 @@ function MicroAgent:run_loop(ctx, opts)
       log_line("agent", "cancelled", { name = self.name, step = step })
       return { ok = false, error = { code = "operation_cancelled", message = "operation cancelled" } }
     end
+    if runtime_expired() then return runtime_timeout() end
     local request = {
       model = opts.model or self.spec.model,
       temperature = self.spec.temperature or 0,
@@ -2487,6 +2978,10 @@ function MicroAgent:run_loop(ctx, opts)
     messages[#messages + 1] = message
 
     for _, raw_call in ipairs(tool_calls) do
+      if ctx.cancelled and ctx:cancelled() then
+        return { ok = false, error = { code = "operation_cancelled", message = "operation cancelled" } }
+      end
+      if runtime_expired() then return runtime_timeout() end
       local parsed, parse_error = parse_tool_call(raw_call)
       if not parsed then
         log_line("tool", "parse failed", { step = step, error = parse_error })
@@ -2590,6 +3085,7 @@ function ac.micro_agent.run(ctx, spec)
     model = spec.model or ac.models.main_fabric(),
     max_tokens = spec.max_tokens or 2400,
     max_steps = spec.max_steps or 12,
+    maxRuntimeMs = spec.maxRuntimeMs or spec.max_runtime_ms,
     max_images = spec.max_images or 3,
     temperature = spec.temperature or 0,
     tool_choice = spec.tool_choice,
@@ -2600,6 +3096,7 @@ function ac.micro_agent.run(ctx, spec)
     state = spec.state,
     user_content = spec.user_content,
     max_steps = spec.max_steps,
+    maxRuntimeMs = spec.maxRuntimeMs or spec.max_runtime_ms,
     tool_choice = spec.tool_choice,
     on_tool_call = spec.on_tool_call,
   })
@@ -2608,7 +3105,13 @@ function ac.micro_agent.run(ctx, spec)
   end
 
   local err = result.error or {}
-  error(tostring(err.message or err.code or "micro-agent failed"), 2)
+  error(setmetatable({
+    code = tostring(err.code or "operation_failed"),
+    message = tostring(err.message or err.code or "micro-agent failed"),
+    details = err.details,
+  }, {
+    __tostring = function(value) return value.message end,
+  }), 0)
 end
 
 function ac.role(role, name)

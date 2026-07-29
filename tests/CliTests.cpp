@@ -2503,6 +2503,102 @@ void TestMicroAgentStrictToolCallsLuaDryRun() {
     assert(data["invalid_args"]["reported"] == false);
 }
 
+void TestMicroAgentRuntimeLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestMicroAgentRuntimeLuaDryRun")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/micro-agent-runtime-dry-run.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    const auto& data = payload["data"]["result"];
+    assert(data["timeout_ok"] == false);
+    assert(data["timeout_code"] == "runtime_timeout");
+    assert(data["timeout_requests"] == 1);
+    assert(data["paused_ok"] == true);
+    assert(data["paused_requests"] == 1);
+}
+
+void TestLuaApprovalContextDryRun() {
+    if (SkipLuaTestIfUnavailable("TestLuaApprovalContextDryRun")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions syncOptions;
+    syncOptions.scriptPath = RepoRoot() / "tests/lua/app-approval.lua";
+    syncOptions.dryRun = true;
+    syncOptions.jsonOutput = true;
+    syncOptions.vars["__ac_app_mode"] = "run";
+    syncOptions.vars["__ac_app_command"] = "needs-approval";
+    syncOptions.vars["__ac_app_input_json"] =
+        R"({"message":"sync action","timeoutMs":5000})";
+    auto syncResult = ComputerCpp::RunLuaScriptCapture(syncOptions);
+    assert(!syncResult.stdoutText.empty());
+    auto syncPayload = nlohmann::json::parse(syncResult.stdoutText);
+    assert(syncPayload["ok"] == false);
+    assert(syncPayload["code"] == "approval_requires_async");
+
+    const auto root = std::filesystem::temp_directory_path() /
+        ("computer-cpp-approval-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root);
+    {
+        std::ofstream operation(root / "operation.json");
+        operation << R"({"status":"running","cancel_requested":false})";
+    }
+
+    std::thread approver([&]() {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::ifstream input(root / "approval.json");
+            nlohmann::json approval = nlohmann::json::parse(input, nullptr, false);
+            if (approval.is_object() && approval.value("status", "") == "pending") {
+                approval["status"] = "approved";
+                approval["note"] = "unit approved";
+                std::ofstream output(root / "approval.json", std::ios::trunc);
+                output << approval.dump();
+                return;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-approval.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+    options.controlSessionToken = "unit-control-token";
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "needs-approval";
+    options.vars["__ac_app_input_json"] =
+        R"({"message":"dry-run action","timeoutMs":5000})";
+    options.vars["__ac_operation_dir"] = root.string();
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    approver.join();
+    std::filesystem::remove_all(root);
+    AssertLuaRunSucceeded(result);
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["ok"] == true);
+    assert(payload["data"]["result"]["approved"] == true);
+    assert(payload["data"]["result"]["note"] == "unit approved");
+    bool released = false;
+    bool resumed = false;
+    for (const auto& entry : payload["data"]["trace"]) {
+        for (const auto& step : entry.value("steps", nlohmann::json::array())) {
+            released = released || step.value("method", "") == "control_session_release";
+            resumed = resumed || step.value("method", "") == "control_session_resume";
+        }
+    }
+    assert(released);
+    assert(resumed);
+}
+
 void TestLuaAppErrorsAreUserFacing() {
     if (SkipLuaTestIfUnavailable("TestLuaAppErrorsAreUserFacing")) {
         return;
@@ -2737,6 +2833,41 @@ void TestLuaDesktopToolPixelRects() {
     assert(data["vision_content_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
 }
 
+void TestLuaDesktopAgentTools() {
+    if (SkipLuaTestIfUnavailable("TestLuaDesktopAgentTools")) {
+        return;
+    }
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/desktop-agent-tools-dry-run.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+
+    auto payload = nlohmann::json::parse(result.stdoutText);
+    assert(payload["ok"] == true);
+    const auto& data = payload["data"]["result"];
+    assert(data["tool_count"] == 13);
+    assert(data["tool_names"].get<std::string>().find("observe_desktop") != std::string::npos);
+    assert(data["tool_names"].get<std::string>().find("request_approval") != std::string::npos);
+    assert(data["click_ok"] == true);
+    assert(data["click_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["click_button"] == "right");
+    assert(data["click_count"] == 2);
+    assert(data["click_left"] == 150);
+    assert(data["drag_ok"] == true);
+    assert(data["drag_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["drag_from"] == "point:80,60");
+    assert(data["drag_to"] == "point:560,420");
+    assert(data["drag_duration"] == 450);
+    assert(data["observe_ok"] == true);
+    assert(data["observe_image"] == "/tmp/computer.cpp-dry-run-screenshot.png");
+    assert(data["observe_has_coordinate"] == true);
+    assert(data["observe_has_accessibility"] == true);
+}
+
 } // namespace
 
 namespace ComputerCpp::Tests {
@@ -2753,12 +2884,15 @@ void RunCliTests() {
     TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
+    TestMicroAgentRuntimeLuaDryRun();
+    TestLuaApprovalContextDryRun();
     TestLuaAppErrorsAreUserFacing();
     TestLuaManagedControlSessionSerializesConcurrentApps();
     TestLuaRuntimeWritesConfiguredLogFile();
     TestLuaRuntimeLogFileHonorsQuietFlag();
     TestLuaPortableTempCapture();
     TestLuaDesktopToolPixelRects();
+    TestLuaDesktopAgentTools();
 }
 
 }
