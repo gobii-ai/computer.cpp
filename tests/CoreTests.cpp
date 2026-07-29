@@ -176,6 +176,7 @@ ComputerCpp::ScreenRecordingFactory FakeRecordingFactory(bool startSucceeds, boo
 }
 
 void TestCommandRecordingLifecycle() {
+    ComputerCpp::ResetRecordingCleanupForTesting();
     ComputerCpp::CommandRecordingOptions disabledOptions;
     disabledOptions.enabled = false;
     disabledOptions.factory = [](const auto&, int, std::string*) {
@@ -357,13 +358,57 @@ void TestCommandRecordingLifecycle() {
             {"sidecarPath", staleSidecar.string()},
         }).dump(2);
     }
-    (void)ComputerCpp::ActiveRecordingCount();
+    ComputerCpp::ResetRecordingCleanupForTesting();
+    ComputerCpp::CleanupExpiredRecordings(14);
     assert(!fs::exists(staleMarker));
     {
         std::ifstream file(staleSidecar);
         json recovered = json::parse(file);
         assert(recovered["status"] == "interrupted");
         assert(recovered["commandStatus"] == "interrupted");
+    }
+
+    const fs::path reusedPidSidecar =
+        ComputerCpp::RecordingDir() / "reused-pid.json";
+    const fs::path reusedPidMarker =
+        ComputerCpp::RecordingDir() / ".active" / "reused-pid.json";
+    {
+        std::ofstream file(reusedPidSidecar);
+        file << json({
+            {"recordingId", "rec_reused_pid"},
+            {"status", "recording"},
+            {"startedAt", "2026-01-01T00:00:00Z"},
+            {"finishedAt", nullptr},
+            {"durationMs", nullptr},
+            {"error", nullptr},
+            {"commandStatus", "running"},
+        }).dump(2);
+    }
+    {
+#if defined(_WIN32)
+        const long long processId = static_cast<long long>(GetCurrentProcessId());
+#else
+        const long long processId = static_cast<long long>(getpid());
+#endif
+        const int64_t oldStart = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch() -
+            std::chrono::hours(25)).count();
+        std::ofstream file(reusedPidMarker);
+        file << json({
+            {"recordingId", "rec_reused_pid"},
+            {"pid", processId},
+            {"sidecarPath", reusedPidSidecar.string()},
+            {"startedAtMs", oldStart},
+        }).dump(2);
+    }
+    assert(ComputerCpp::ActiveRecordingCount() == 0);
+    ComputerCpp::ResetRecordingCleanupForTesting();
+    ComputerCpp::CleanupExpiredRecordings(14);
+    assert(!fs::exists(reusedPidMarker));
+    {
+        std::ifstream file(reusedPidSidecar);
+        const json recovered = json::parse(file);
+        assert(recovered["status"] == "interrupted");
     }
 }
 

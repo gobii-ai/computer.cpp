@@ -25,6 +25,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -58,6 +59,60 @@ namespace {
 
 constexpr std::string_view kMcpEndpointPath = "/mcp";
 constexpr std::string_view kMcpLatestProtocolVersion = "2025-11-25";
+
+AppConfig LoadAppConfigForCommand(std::string* error) {
+    struct Cache {
+        std::mutex mutex;
+        bool initialized = false;
+        fs::path path;
+        bool exists = false;
+        fs::file_time_type modified;
+        uintmax_t size = 0;
+        AppConfig config;
+        std::string error;
+    };
+    static Cache cache;
+
+    const fs::path path = ConfigPath();
+    std::error_code statError;
+    const bool exists = fs::exists(path, statError);
+    fs::file_time_type modified{};
+    uintmax_t size = 0;
+    if (!statError && exists) {
+        modified = fs::last_write_time(path, statError);
+        if (!statError) {
+            size = fs::file_size(path, statError);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (!statError &&
+        cache.initialized &&
+        cache.path == path &&
+        cache.exists == exists &&
+        (!exists || (cache.modified == modified && cache.size == size))) {
+        if (error) {
+            *error = cache.error;
+        }
+        return cache.config;
+    }
+
+    std::string loadError;
+    AppConfig config = LoadAppConfig(&loadError);
+    if (!statError) {
+        cache.initialized = true;
+        cache.path = path;
+        cache.exists = exists;
+        cache.modified = modified;
+        cache.size = size;
+        cache.config = config;
+        cache.error = loadError;
+    }
+    if (error) {
+        *error = loadError;
+    }
+    return config;
+}
 
 #if defined(_WIN32)
 using AppSocket = SOCKET;
@@ -710,9 +765,8 @@ std::optional<json> RunAppCommand(
     json* recordingOut,
     std::string& error
 ) {
-    AppConfig appConfig;
     std::string configError;
-    appConfig = LoadAppConfig(&configError);
+    const AppConfig appConfig = LoadAppConfigForCommand(&configError);
     const bool recordingEnabled = recordingEnabledOverride.value_or(
         configError.empty() && appConfig.recording.enabled);
     const int retentionDays = configError.empty()
@@ -1166,7 +1220,7 @@ void PrintRecordingStatusToStderr(const json& recording) {
         return;
     }
     std::cerr << "Recording: " << (status.empty() ? "failed" : status);
-    const std::string recordingError = recording.value("error", "");
+    const std::string recordingError = RecordingErrorText(recording);
     if (!recordingError.empty()) {
         std::cerr << " (" << recordingError << ")";
     }

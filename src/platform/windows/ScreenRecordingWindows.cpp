@@ -229,6 +229,9 @@ void RunRecording(const std::shared_ptr<WindowsRecordingState>& state) {
         if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         if (SUCCEEDED(result)) result = inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
         if (SUCCEEDED(result)) result = inputType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        if (SUCCEEDED(result)) result = inputType->SetUINT32(
+            MF_MT_DEFAULT_STRIDE,
+            static_cast<UINT32>(targetWidth * 4));
         if (SUCCEEDED(result)) result = MFSetAttributeSize(inputType, MF_MT_FRAME_SIZE, targetWidth, targetHeight);
         if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_FRAME_RATE, frameRate, 1);
         if (SUCCEEDED(result)) result = MFSetAttributeRatio(inputType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -316,8 +319,14 @@ void RunRecording(const std::shared_ptr<WindowsRecordingState>& state) {
         if (frameNumber++ == 0) {
             SignalStarted(*state);
         }
-        nextFrame += std::chrono::microseconds(1000000 / frameRate);
-        nextFrame = std::max(nextFrame, std::chrono::steady_clock::now());
+        const auto frameInterval =
+            std::chrono::nanoseconds(1000000000LL / frameRate);
+        nextFrame += frameInterval;
+        const auto now = std::chrono::steady_clock::now();
+        if (nextFrame <= now) {
+            const auto missedIntervals = (now - nextFrame) / frameInterval + 1;
+            nextFrame += frameInterval * missedIntervals;
+        }
         if (!WaitForNextFrame(*state, nextFrame)) {
             break;
         }

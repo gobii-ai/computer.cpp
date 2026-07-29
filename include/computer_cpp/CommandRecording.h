@@ -39,7 +39,7 @@ public:
     const nlohmann::json& metadata() const;
 
 private:
-    void WriteMetadata();
+    bool WriteMetadata();
     void RemoveActiveMarker();
     void FinishInternal(const std::string& commandStatus, bool interrupted);
 
@@ -59,5 +59,6 @@ void CleanupExpiredRecordings(int retentionDays);
 size_t ActiveRecordingCount();
 std::string NewCommandRecordingId();
 void SetScreenRecordingFactoryForTesting(ScreenRecordingFactory factory);
+void ResetRecordingCleanupForTesting();
 
 } // namespace ComputerCpp

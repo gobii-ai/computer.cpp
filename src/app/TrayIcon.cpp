@@ -2753,10 +2753,15 @@ wxMenu* TrayIcon::CreatePopupMenu() {
         ID_RECORDING_TOGGLE,
         "Record app commands");
     recordingToggle->Check(configError.empty() && config.recording.enabled);
-    const size_t activeRecordings = ActiveRecordingCount();
+    const auto now = std::chrono::steady_clock::now();
+    if (activeRecordingCountRefreshedAt_.time_since_epoch().count() == 0 ||
+        now - activeRecordingCountRefreshedAt_ >= std::chrono::seconds(2)) {
+        cachedActiveRecordingCount_ = ActiveRecordingCount();
+        activeRecordingCountRefreshedAt_ = now;
+    }
     wxMenuItem* recordingStatus = menu->Append(
         wxID_ANY,
-        "Active recordings: " + std::to_string(activeRecordings));
+        "Active recordings: " + std::to_string(cachedActiveRecordingCount_));
     recordingStatus->Enable(false);
 
     wxMenu* advanced = new wxMenu;

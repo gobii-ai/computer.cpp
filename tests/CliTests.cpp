@@ -2181,28 +2181,46 @@ public:
 };
 
 void TestRecordingSurfaceMetadata() {
+    const std::filesystem::path recordingPath =
+        ComputerCpp::RecordingDir() / "test-app" / "2026-07-29" /
+        "command with space.mp4";
     const nlohmann::json recording = {
         {"recordingId", "rec 123"},
         {"status", "recorded"},
-        {"path", "/tmp/video folder/command.mp4"},
+        {"path", recordingPath.string()},
     };
+    nlohmann::json externalRecording = recording;
+    externalRecording["path"] =
+        "test-app/2026-07-29/command with space.mp4";
     const auto headers = ComputerCpp::Cli::RecordingHttpHeaders(recording);
     assert(headers.at("X-ComputerCpp-Recording-Id") == "rec%20123");
     assert(headers.at("X-ComputerCpp-Recording-Status") == "recorded");
     assert(headers.at("X-ComputerCpp-Recording-Path") ==
-        "%2Ftmp%2Fvideo%20folder%2Fcommand.mp4");
+        "test-app%2F2026-07-29%2Fcommand%20with%20space.mp4");
 
     nlohmann::json success = {{"content", nlohmann::json::array()}};
     ComputerCpp::Cli::AttachMcpRecordingMetadata(success, recording);
-    assert(success["_meta"]["org.computercpp/recording"] == recording);
+    assert(success["_meta"]["org.computercpp/recording"] == externalRecording);
 
     nlohmann::json toolError = {{"isError", true}};
     ComputerCpp::Cli::AttachMcpRecordingMetadata(toolError, recording);
-    assert(toolError["_meta"]["org.computercpp/recording"] == recording);
+    assert(toolError["_meta"]["org.computercpp/recording"] == externalRecording);
 
     const nlohmann::json rpcErrorData =
         ComputerCpp::Cli::McpRecordingErrorData(recording);
-    assert(rpcErrorData["_meta"]["org.computercpp/recording"] == recording);
+    assert(rpcErrorData["_meta"]["org.computercpp/recording"] == externalRecording);
+    assert(ComputerCpp::Cli::RecordingErrorText({
+        {"status", "starting"},
+        {"error", nullptr},
+    }).empty());
+    const nlohmann::json outsideRecording = {
+        {"recordingId", "rec-outside"},
+        {"status", "recorded"},
+        {"path", (ComputerCpp::RecordingDir().parent_path() / "private.mp4").string()},
+    };
+    const auto outsideHeaders =
+        ComputerCpp::Cli::RecordingHttpHeaders(outsideRecording);
+    assert(outsideHeaders.at("X-ComputerCpp-Recording-Path").empty());
     assert(ComputerCpp::Cli::RecordingHttpHeaders(nlohmann::json::object()).empty());
     assert(ComputerCpp::Cli::McpRecordingErrorData(nlohmann::json::object()).is_null());
 }

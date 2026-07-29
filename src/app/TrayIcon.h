@@ -2,6 +2,8 @@
 
 #include "UpdateFlow.h"
 
+#include <chrono>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <thread>
@@ -59,6 +61,8 @@ private:
     std::string serverUrl_;
     std::string serverAppDisplayName_;
     std::thread daemonThread_;
+    size_t cachedActiveRecordingCount_ = 0;
+    std::chrono::steady_clock::time_point activeRecordingCountRefreshedAt_;
 
     wxDECLARE_EVENT_TABLE();
 };

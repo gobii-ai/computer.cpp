@@ -3,17 +3,20 @@
 #include "computer_cpp/AppPaths.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <cctype>
 #include <cerrno>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <system_error>
+#include <vector>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -35,11 +38,14 @@ constexpr int kFramesPerSecond = 15;
 constexpr int kMaxDimension = 1920;
 constexpr int kStartTimeoutMs = 5000;
 constexpr int kStopTimeoutMs = 10000;
+constexpr auto kCleanupInterval = std::chrono::hours(1);
+constexpr auto kMaximumActiveAge = std::chrono::hours(24);
 
 std::mutex gCleanupMutex;
 std::chrono::steady_clock::time_point gLastCleanup;
 std::mutex gFactoryMutex;
 ScreenRecordingFactory gTestingFactory;
+std::atomic<uint64_t> gTempFileSequence{0};
 
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -82,9 +88,13 @@ std::string SanitizePart(const std::string& value) {
     std::string out;
     out.reserve(std::min<size_t>(value.size(), 80));
     for (unsigned char ch : value) {
-        if (std::isalnum(ch) || ch == '-' || ch == '_') {
+        const bool asciiAlphaNumeric =
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9');
+        if (asciiAlphaNumeric || ch == '-' || ch == '_') {
             out.push_back(static_cast<char>(ch));
-        } else if (ch == '.' || std::isspace(ch)) {
+        } else if (ch == '.' || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
             out.push_back('-');
         }
         if (out.size() >= 80) {
@@ -132,10 +142,13 @@ bool ProcessAlive(long long pid) {
 }
 
 bool WriteJsonAtomic(const fs::path& path, const json& value) {
+    fs::path temp;
     try {
         EnsureDirectory(path.parent_path());
-        fs::path temp = path;
-        temp += "." + std::to_string(CurrentPid()) + ".tmp";
+        temp = path;
+        temp += "." + std::to_string(CurrentPid()) + "." +
+            std::to_string(gTempFileSequence.fetch_add(1, std::memory_order_relaxed)) +
+            ".tmp";
         {
             std::ofstream file(temp, std::ios::binary | std::ios::trunc);
             if (!file) {
@@ -143,19 +156,36 @@ bool WriteJsonAtomic(const fs::path& path, const json& value) {
             }
             file << value.dump(2) << "\n";
             if (!file.good()) {
+                file.close();
+                std::error_code removeError;
+                fs::remove(temp, removeError);
                 return false;
             }
         }
         std::error_code ec;
-        fs::remove(path, ec);
-        ec.clear();
+#if defined(_WIN32)
+        const std::wstring source = temp.wstring();
+        const std::wstring destination = path.wstring();
+        if (!MoveFileExW(
+                source.c_str(),
+                destination.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fs::remove(temp, ec);
+            return false;
+        }
+#else
         fs::rename(temp, path, ec);
         if (ec) {
             fs::remove(temp, ec);
             return false;
         }
+#endif
         return true;
     } catch (...) {
+        std::error_code ec;
+        if (!temp.empty()) {
+            fs::remove(temp, ec);
+        }
         return false;
     }
 }
@@ -176,6 +206,15 @@ bool OlderThan(const fs::path& path, std::chrono::hours age) {
     std::error_code ec;
     const auto written = fs::last_write_time(path, ec);
     return !ec && fs::file_time_type::clock::now() - written > age;
+}
+
+bool MarkerIsStale(const json& marker) {
+    const int64_t startedAtMs = marker.value("startedAtMs", 0LL);
+    const bool implausiblyOld =
+        startedAtMs > 0 && NowMs() - startedAtMs >
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                kMaximumActiveAge).count();
+    return implausiblyOld || !ProcessAlive(marker.value("pid", 0LL));
 }
 
 void MarkInterruptedFromMarker(const fs::path& markerPath, const json& marker) {
@@ -208,12 +247,17 @@ void CleanupStaleMarkers() {
     if (!fs::exists(activeDir, ec)) {
         return;
     }
-    for (const auto& entry : fs::directory_iterator(activeDir, ec)) {
-        if (ec || !entry.is_regular_file()) {
+    fs::directory_iterator iterator(activeDir, ec);
+    const fs::directory_iterator end;
+    while (!ec && iterator != end) {
+        const fs::directory_entry entry = *iterator;
+        iterator.increment(ec);
+        std::error_code typeError;
+        if (!entry.is_regular_file(typeError)) {
             continue;
         }
         auto marker = ReadJson(entry.path());
-        if (!marker || !ProcessAlive(marker->value("pid", 0LL))) {
+        if (!marker || MarkerIsStale(*marker)) {
             MarkInterruptedFromMarker(entry.path(), marker.value_or(json::object()));
         }
     }
@@ -225,8 +269,13 @@ void CleanupExpiredRecordingsImpl(int retentionDays) {
     std::set<std::string> activeArtifacts;
     const fs::path activeDir = root / ".active";
     std::error_code ec;
-    for (const auto& entry : fs::directory_iterator(activeDir, ec)) {
-        if (ec || !entry.is_regular_file()) {
+    fs::directory_iterator activeIterator(activeDir, ec);
+    const fs::directory_iterator directoryEnd;
+    while (!ec && activeIterator != directoryEnd) {
+        const fs::directory_entry entry = *activeIterator;
+        activeIterator.increment(ec);
+        std::error_code typeError;
+        if (!entry.is_regular_file(typeError)) {
             continue;
         }
         auto marker = ReadJson(entry.path());
@@ -242,9 +291,15 @@ void CleanupExpiredRecordingsImpl(int retentionDays) {
     }
     const auto retention = std::chrono::hours(24LL * std::max(0, retentionDays));
     const auto partialRetention = std::chrono::hours(24);
+    std::vector<fs::path> expiredPaths;
     ec.clear();
-    for (const auto& entry : fs::recursive_directory_iterator(root, ec)) {
-        if (ec || !entry.is_regular_file()) {
+    fs::recursive_directory_iterator iterator(root, ec);
+    const fs::recursive_directory_iterator recursiveEnd;
+    while (!ec && iterator != recursiveEnd) {
+        const fs::directory_entry entry = *iterator;
+        iterator.increment(ec);
+        std::error_code typeError;
+        if (!entry.is_regular_file(typeError)) {
             continue;
         }
         const fs::path path = entry.path();
@@ -258,9 +313,25 @@ void CleanupExpiredRecordingsImpl(int retentionDays) {
         const bool inactivePartial = partial && !active;
         if ((inactivePartial && OlderThan(path, partialRetention)) ||
             (!partial && !active && retentionDays >= 0 && OlderThan(path, retention))) {
-            fs::remove(path, ec);
-            ec.clear();
+            expiredPaths.push_back(path);
         }
+    }
+    for (const fs::path& path : expiredPaths) {
+        fs::remove(path, ec);
+        ec.clear();
+    }
+}
+
+bool CleanupStampIsRecent(const fs::path& stampPath) {
+    std::error_code ec;
+    const auto written = fs::last_write_time(stampPath, ec);
+    return !ec && fs::file_time_type::clock::now() - written < kCleanupInterval;
+}
+
+void TouchCleanupStamp(const fs::path& stampPath) {
+    std::ofstream stamp(stampPath, std::ios::binary | std::ios::trunc);
+    if (stamp) {
+        stamp << CurrentPid() << "\n";
     }
 }
 
@@ -279,28 +350,72 @@ void CleanupExpiredRecordings(int retentionDays) {
     std::lock_guard<std::mutex> lock(gCleanupMutex);
     const auto now = std::chrono::steady_clock::now();
     if (gLastCleanup.time_since_epoch().count() != 0 &&
-        now - gLastCleanup < std::chrono::hours(1)) {
+        now - gLastCleanup < kCleanupInterval) {
         return;
     }
-    gLastCleanup = now;
+
+    const fs::path root = RecordingDir();
+    EnsureDirectory(root);
+    const fs::path stampPath = root / ".last-cleanup";
+    if (CleanupStampIsRecent(stampPath)) {
+        gLastCleanup = now;
+        return;
+    }
+
+    const fs::path lockPath = root / ".cleanup-lock";
+    std::error_code ec;
+    if (!fs::create_directory(lockPath, ec)) {
+        if (!OlderThan(lockPath, kCleanupInterval)) {
+            return;
+        }
+        fs::remove(lockPath, ec);
+        ec.clear();
+        if (!fs::create_directory(lockPath, ec)) {
+            return;
+        }
+    }
+    if (CleanupStampIsRecent(stampPath)) {
+        fs::remove(lockPath, ec);
+        gLastCleanup = now;
+        return;
+    }
+
     CleanupExpiredRecordingsImpl(retentionDays);
+    TouchCleanupStamp(stampPath);
+    fs::remove(lockPath, ec);
+    gLastCleanup = now;
 }
 
 size_t ActiveRecordingCount() {
-    std::lock_guard<std::mutex> lock(gCleanupMutex);
-    CleanupStaleMarkers();
     const fs::path activeDir = RecordingDir() / ".active";
     std::error_code ec;
     if (!fs::exists(activeDir, ec)) {
         return 0;
     }
     size_t count = 0;
-    for (const auto& entry : fs::directory_iterator(activeDir, ec)) {
-        if (!ec && entry.is_regular_file()) {
+    fs::directory_iterator iterator(activeDir, ec);
+    const fs::directory_iterator end;
+    while (!ec && iterator != end) {
+        const fs::directory_entry entry = *iterator;
+        iterator.increment(ec);
+        std::error_code typeError;
+        if (entry.is_regular_file(typeError)) {
+            const auto marker = ReadJson(entry.path());
+            if (!marker || MarkerIsStale(*marker)) {
+                continue;
+            }
             ++count;
         }
     }
     return count;
+}
+
+void ResetRecordingCleanupForTesting() {
+    std::lock_guard<std::mutex> lock(gCleanupMutex);
+    gLastCleanup = {};
+    std::error_code ec;
+    fs::remove(RecordingDir() / ".last-cleanup", ec);
+    fs::remove(RecordingDir() / ".cleanup-lock", ec);
 }
 
 CommandRecording::CommandRecording(CommandRecordingOptions options)
@@ -340,8 +455,16 @@ CommandRecording::CommandRecording(CommandRecordingOptions options)
         {"surface", options_.surface},
         {"commandStatus", "running"},
     };
-    WriteMetadata();
-    WriteJsonAtomic(activeMarkerPath_, {
+    if (!WriteMetadata()) {
+        metadata_["status"] = "failed";
+        metadata_["finishedAt"] = NowIsoUtc();
+        metadata_["durationMs"] = std::max<int64_t>(0, NowMs() - startedAtMs_);
+        metadata_["error"] = "could not write recording metadata";
+        metadata_["commandStatus"] = "failed";
+        finished_ = true;
+        return;
+    }
+    if (!WriteJsonAtomic(activeMarkerPath_, {
         {"recordingId", recordingId},
         {"pid", CurrentPid()},
         {"sidecarPath", sidecarPath_.string()},
@@ -350,7 +473,16 @@ CommandRecording::CommandRecording(CommandRecordingOptions options)
         {"statusMirrorPath", options_.statusMirrorPath.string()},
         {"startedAt", metadata_["startedAt"]},
         {"startedAtMs", startedAtMs_},
-    });
+    })) {
+        metadata_["status"] = "failed";
+        metadata_["finishedAt"] = NowIsoUtc();
+        metadata_["durationMs"] = std::max<int64_t>(0, NowMs() - startedAtMs_);
+        metadata_["error"] = "could not create recording activity marker";
+        metadata_["commandStatus"] = "failed";
+        WriteMetadata();
+        finished_ = true;
+        return;
+    }
 
     Platform::ScreenRecordingOptions platformOptions;
     platformOptions.outputPath = partialPath_;
@@ -404,15 +536,20 @@ const json& CommandRecording::metadata() const {
     return metadata_;
 }
 
-void CommandRecording::WriteMetadata() {
+bool CommandRecording::WriteMetadata() {
     if (!enabled_) {
-        return;
+        return true;
     }
     json publicMetadata = metadata_;
-    WriteJsonAtomic(sidecarPath_, publicMetadata);
+    bool ok = WriteJsonAtomic(sidecarPath_, publicMetadata);
     if (!options_.statusMirrorPath.empty()) {
-        WriteJsonAtomic(options_.statusMirrorPath, publicMetadata);
+        ok = WriteJsonAtomic(options_.statusMirrorPath, publicMetadata) && ok;
     }
+    if (!ok) {
+        std::cerr << "computer.cpp: could not write recording metadata for "
+                  << metadata_.value("recordingId", "unknown") << "\n";
+    }
+    return ok;
 }
 
 void CommandRecording::RemoveActiveMarker() {

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 
 namespace ComputerCpp::Platform {
@@ -22,7 +23,7 @@ struct MacRecordingState {
 };
 
 void SetMacRecordingState(
-    MacRecordingState* state,
+    const std::shared_ptr<MacRecordingState>& state,
     bool started,
     bool finished,
     const std::string& error) {
@@ -44,14 +45,16 @@ void SetMacRecordingState(
 } // namespace ComputerCpp::Platform
 
 @interface ComputerCppRecordingDelegate : NSObject <SCRecordingOutputDelegate>
-- (instancetype)initWithState:(ComputerCpp::Platform::MacRecordingState*)state;
+- (instancetype)initWithState:
+    (std::shared_ptr<ComputerCpp::Platform::MacRecordingState>)state;
 @end
 
 @implementation ComputerCppRecordingDelegate {
-    ComputerCpp::Platform::MacRecordingState* _state;
+    std::shared_ptr<ComputerCpp::Platform::MacRecordingState> _state;
 }
 
-- (instancetype)initWithState:(ComputerCpp::Platform::MacRecordingState*)state {
+- (instancetype)initWithState:
+    (std::shared_ptr<ComputerCpp::Platform::MacRecordingState>)state {
     self = [super init];
     if (self) {
         _state = state;
@@ -80,6 +83,42 @@ void SetMacRecordingState(
 
 namespace ComputerCpp::Platform {
 namespace {
+
+class DispatchSemaphore {
+public:
+    DispatchSemaphore() : value_(dispatch_semaphore_create(0)) {}
+
+    ~DispatchSemaphore() {
+#if !OS_OBJECT_USE_OBJC
+        dispatch_release(value_);
+#endif
+    }
+
+    dispatch_semaphore_t get() const {
+        return value_;
+    }
+
+private:
+    dispatch_semaphore_t value_;
+};
+
+struct ShareableContentResult {
+    ~ShareableContentResult() {
+        [content release];
+        [error release];
+    }
+
+    SCShareableContent* content = nil;
+    NSError* error = nil;
+};
+
+struct CaptureStopResult {
+    ~CaptureStopResult() {
+        [error release];
+    }
+
+    NSError* error = nil;
+};
 
 std::string NSErrorText(NSError* error, const std::string& fallback) {
     if (!error) {
@@ -113,6 +152,10 @@ public:
 
     MacRecordingState& state() {
         return *state_;
+    }
+
+    void Disarm() {
+        stopped_ = true;
     }
 
     bool Stop(int timeoutMs, std::string* error) override {
@@ -149,25 +192,30 @@ public:
             }
         }
 
-        dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
-        __block NSError* captureStopError = nil;
+        DispatchSemaphore stopped;
+        const auto captureStopResult = std::make_shared<CaptureStopResult>();
+        const dispatch_semaphore_t stoppedSignal = stopped.get();
         [stream_ stopCaptureWithCompletionHandler:^(NSError* captureError) {
             if (captureError) {
-                captureStopError = [captureError retain];
+                captureStopResult->error = [captureError retain];
             }
-            dispatch_semaphore_signal(stopped);
+            dispatch_semaphore_signal(stoppedSignal);
         }];
         const dispatch_time_t stopCaptureDeadline = dispatch_time(
             DISPATCH_TIME_NOW,
             std::max<int64_t>(0, remainingMs()) * NSEC_PER_MSEC);
-        if (dispatch_semaphore_wait(stopped, stopCaptureDeadline) != 0 && stopError_.empty()) {
+        if (dispatch_semaphore_wait(stopped.get(), stopCaptureDeadline) != 0 && stopError_.empty()) {
             stopError_ = "timed out stopping ScreenCaptureKit stream";
-        } else if (captureStopError && stopError_.empty()) {
-            stopError_ = NSErrorText(captureStopError, "could not stop ScreenCaptureKit stream");
+        } else if (captureStopResult->error && stopError_.empty()) {
+            stopError_ = NSErrorText(
+                captureStopResult->error,
+                "could not stop ScreenCaptureKit stream");
         }
-        [captureStopError release];
 
-        stopOk_ = stopError_.empty() && state_->finished;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            stopOk_ = stopError_.empty() && state_->finished;
+        }
         if (error && !stopError_.empty()) {
             *error = stopError_;
         }
@@ -224,32 +272,32 @@ std::unique_ptr<ScreenRecordingSession> StartScreenRecording(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         startupDeadline - std::chrono::steady_clock::now()).count());
             };
-            __block SCShareableContent* content = nil;
-            __block NSError* contentError = nil;
-            dispatch_semaphore_t contentReady = dispatch_semaphore_create(0);
+            const auto contentResult = std::make_shared<ShareableContentResult>();
+            DispatchSemaphore contentReady;
+            const dispatch_semaphore_t contentReadySignal = contentReady.get();
             [SCShareableContent
                 getShareableContentExcludingDesktopWindows:NO
                 onScreenWindowsOnly:YES
                 completionHandler:^(SCShareableContent* available, NSError* availableError) {
-                    content = [available retain];
-                    contentError = [availableError retain];
-                    dispatch_semaphore_signal(contentReady);
+                    contentResult->content = [available retain];
+                    contentResult->error = [availableError retain];
+                    dispatch_semaphore_signal(contentReadySignal);
                 }];
             const dispatch_time_t deadline = dispatch_time(
                 DISPATCH_TIME_NOW,
                 remainingMs() * NSEC_PER_MSEC);
-            if (dispatch_semaphore_wait(contentReady, deadline) != 0) {
+            if (dispatch_semaphore_wait(contentReady.get(), deadline) != 0) {
                 if (error) {
                     *error = "timed out enumerating ScreenCaptureKit displays";
                 }
                 return nullptr;
             }
+            SCShareableContent* content = contentResult->content;
+            NSError* contentError = contentResult->error;
             if (contentError || !content || content.displays.count == 0) {
                 if (error) {
                     *error = NSErrorText(contentError, "ScreenCaptureKit found no displays");
                 }
-                [contentError release];
-                [content release];
                 return nullptr;
             }
 
@@ -285,8 +333,7 @@ std::unique_ptr<ScreenRecordingSession> StartScreenRecording(
             outputConfiguration.outputFileType = AVFileTypeMPEG4;
 
             auto state = std::make_shared<MacRecordingState>();
-            MacRecordingState* statePtr = state.get();
-            auto* delegate = [[ComputerCppRecordingDelegate alloc] initWithState:statePtr];
+            auto* delegate = [[ComputerCppRecordingDelegate alloc] initWithState:state];
             SCRecordingOutput* output =
                 [[SCRecordingOutput alloc] initWithConfiguration:outputConfiguration delegate:delegate];
             SCStream* stream =
@@ -294,8 +341,6 @@ std::unique_ptr<ScreenRecordingSession> StartScreenRecording(
             [filter release];
             [configuration release];
             [outputConfiguration release];
-            [contentError release];
-            [content release];
 
             auto session = std::make_unique<MacScreenRecordingSession>(
                 stream, output, delegate, state);
@@ -305,17 +350,19 @@ std::unique_ptr<ScreenRecordingSession> StartScreenRecording(
                 if (error) {
                     *error = NSErrorText(addError, "could not add ScreenCaptureKit recording output");
                 }
+                session->Disarm();
                 return nullptr;
             }
             const auto callbackState = state;
             [stream startCaptureWithCompletionHandler:^(NSError* startError) {
                 if (startError) {
                     SetMacRecordingState(
-                        callbackState.get(), false, false,
+                        callbackState, false, false,
                         NSErrorText(startError, "could not start ScreenCaptureKit stream"));
                 }
             }];
 
+            std::string startupError;
             {
                 std::unique_lock<std::mutex> lock(session->state().mutex);
                 const int64_t remaining = remainingMs();
@@ -325,17 +372,18 @@ std::unique_ptr<ScreenRecordingSession> StartScreenRecording(
                         [&session] {
                             return session->state().started || session->state().failed;
                         })) {
-                    if (error) {
-                        *error = "timed out starting ScreenCaptureKit recording";
-                    }
-                    return nullptr;
+                    startupError = "timed out starting ScreenCaptureKit recording";
+                } else if (session->state().failed) {
+                    startupError = session->state().error;
                 }
-                if (session->state().failed) {
-                    if (error) {
-                        *error = session->state().error;
-                    }
-                    return nullptr;
+            }
+            if (!startupError.empty()) {
+                std::string ignored;
+                session->Stop(static_cast<int>(std::max<int64_t>(1, remainingMs())), &ignored);
+                if (error) {
+                    *error = startupError;
                 }
+                return nullptr;
             }
             return session;
         }
