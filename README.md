@@ -369,6 +369,53 @@ computer.cpp app serve ./reminders.lua --listen 127.0.0.1:8787
 POST /mcp
 ```
 
+### Multiple Lua App Servers
+
+The desktop tray can run every configured Lua app at the same time. Each app
+gets its own `computer.cpp app serve` process and port, so it can be restarted
+or stopped without affecting the others.
+
+Configure apps in **Settings > Server**. A blank app port is assigned
+automatically from `base_port`; a fixed port is reserved for that app and
+cannot be reused by another configured app. Automatic assignment checks at
+most 100 consecutive ports beginning at `base_port` (and never past 65535).
+
+```toml
+[server]
+host = "127.0.0.1"
+base_port = 8787
+
+[server.apps.notes]
+display_name = "Notes"
+path = "/absolute/path/to/notes.lua"
+port = 8787
+
+[server.apps.reminders]
+display_name = "Reminders"
+path = "/absolute/path/to/reminders.lua"
+# No port: choose the first available non-reserved port from 8787.
+```
+
+The tray menu shows the number of running servers, one-click **Start All
+Servers** and **Stop All Servers** actions, and a Start/Stop row for each app.
+Servers are not started automatically when ComputerCpp launches. Any healthy
+configured servers left by an interrupted tray process are adopted, and
+quitting ComputerCpp stops all managed servers.
+
+Server processes keep independent Lua memory and operation storage, while
+top-level app commands share one desktop-control queue. If Notes and Reminders
+receive commands at the same time, one command holds exclusive mouse and
+keyboard control for its entire workflow and the other waits. The lease is
+renewed while a long command runs and released on success or failure. Health,
+schema, and operation-status requests do not acquire desktop control.
+
+With the example above, the MCP endpoints could be:
+
+```text
+http://127.0.0.1:8787/mcp  # Notes
+http://127.0.0.1:8788/mcp  # Reminders
+```
+
 The MCP server turns a Lua app definition into app-level tools such as:
 
 ```text

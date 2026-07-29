@@ -3,8 +3,10 @@
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,17 @@ struct ServerConfig {
     std::vector<std::string> allowedOrigins;
     std::map<std::string, ServerAppConfig> apps;
 };
+
+struct ServerPortPlan {
+    std::map<std::string, int> ports;
+    std::map<std::string, std::string> errors;
+};
+
+ServerPortPlan PlanServerPorts(
+    const ServerConfig& server,
+    const std::set<std::string>& appNames,
+    const std::set<int>& occupiedPorts,
+    const std::function<bool(int)>& portAvailable);
 
 struct RecordingConfig {
     bool enabled = false;

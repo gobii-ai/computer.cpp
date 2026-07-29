@@ -11,12 +11,14 @@
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
+#include "computer_cpp/ControlSession.h"
 #include "computer_cpp/LuaRunner.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -91,6 +94,22 @@ CapturedConfigCommand RunConfigCommand(std::initializer_list<std::string> args, 
     auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
     auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
     int exitCode = ComputerCpp::Cli::HandleConfigCommand(options, std::vector<std::string>(args));
+    std::cout.rdbuf(oldOut);
+    std::cerr.rdbuf(oldErr);
+    return {exitCode, stdoutCapture.str(), stderrCapture.str()};
+}
+
+CapturedConfigCommand RunSemanticAppCommand(std::initializer_list<std::string> args) {
+    ComputerCpp::Cli::CliOptions options;
+    options.jsonOutput = true;
+    std::ostringstream stdoutCapture;
+    std::ostringstream stderrCapture;
+    auto* oldOut = std::cout.rdbuf(stdoutCapture.rdbuf());
+    auto* oldErr = std::cerr.rdbuf(stderrCapture.rdbuf());
+    int exitCode = ComputerCpp::Cli::HandleSemanticAppCommand(
+        options,
+        std::vector<std::string>(args),
+        "computer.cpp");
     std::cout.rdbuf(oldOut);
     std::cerr.rdbuf(oldErr);
     return {exitCode, stdoutCapture.str(), stderrCapture.str()};
@@ -2029,6 +2048,17 @@ void TestLuaRunCommandParsing() {
     assert(error.find("--var requires a value") != std::string::npos);
 }
 
+void TestTrayServeConfigNameValidation() {
+    const auto missingValue = RunSemanticAppCommand({
+        "app",
+        "serve",
+        (RepoRoot() / "tests" / "lua" / "app-basic.lua").string(),
+        "--tray-config-name",
+    });
+    assert(missingValue.exitCode == 2);
+    assert(missingValue.stdoutText.find("--tray-config-name requires a value") != std::string::npos);
+}
+
 void TestConfigCliCanonicalFile() {
     auto init = RunConfigCommand({"config", "init", "--force"});
     assert(init.exitCode == 0);
@@ -2498,6 +2528,49 @@ void TestLuaAppErrorsAreUserFacing() {
     assert(raw.find("stack traceback") != std::string::npos);
 }
 
+void TestLuaManagedControlSessionSerializesConcurrentApps() {
+    if (SkipLuaTestIfUnavailable("TestLuaManagedControlSessionSerializesConcurrentApps")) {
+        return;
+    }
+
+    constexpr const char* scope = "desktop:test-lua-app-queue";
+    std::vector<ComputerCpp::LuaRunResult> results(2);
+    std::vector<std::thread> runners;
+    const auto started = std::chrono::steady_clock::now();
+
+    for (int i = 0; i < 2; ++i) {
+        runners.emplace_back([i, &results]() {
+            ComputerCpp::LuaRunOptions options;
+            options.scriptPath = RepoRoot() / "tests/lua/app-basic.lua";
+            options.controlScope = "desktop:test-lua-app-queue";
+            options.acquireControlSession = true;
+            options.leaseOwner = "unit-lua-app-" + std::to_string(i);
+            options.leasePurpose = "verify whole-command queue";
+            options.leaseTtlMs = 1000;
+            options.leaseWaitMs = 5000;
+            options.leaseMaxRuntimeMs = 10000;
+            options.vars["__ac_app_mode"] = "run";
+            options.vars["__ac_app_command"] = "slow";
+            options.vars["__ac_app_input_json"] = R"({"delay":1})";
+            results[static_cast<size_t>(i)] = ComputerCpp::RunLuaScriptCapture(options);
+        });
+    }
+    for (auto& runner : runners) {
+        runner.join();
+    }
+
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    for (const auto& result : results) {
+        AssertLuaRunSucceeded(result);
+        const auto payload = nlohmann::json::parse(result.stdoutText);
+        assert(payload["ok"] == true);
+        assert(payload["data"]["result"]["done"] == true);
+    }
+    assert(elapsedMs >= 1800);
+    assert(!ComputerCpp::HasActiveControlSession(scope));
+}
+
 void TestLuaRuntimeWritesConfiguredLogFile() {
     if (SkipLuaTestIfUnavailable("TestLuaRuntimeWritesConfiguredLogFile")) {
         return;
@@ -2674,12 +2747,14 @@ void RunCliTests() {
     TestCliDurationParsing();
     TestSessionChildCommandParsing();
     TestLuaRunCommandParsing();
+    TestTrayServeConfigNameValidation();
     TestConfigCliCanonicalFile();
     TestRecordingSurfaceMetadata();
     TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestLuaAppErrorsAreUserFacing();
+    TestLuaManagedControlSessionSerializesConcurrentApps();
     TestLuaRuntimeWritesConfiguredLogFile();
     TestLuaRuntimeLogFileHonorsQuietFlag();
     TestLuaPortableTempCapture();

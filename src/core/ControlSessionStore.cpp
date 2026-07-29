@@ -4,10 +4,12 @@
 #include "computer_cpp/Timeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <sqlite3.h>
 #include <stdexcept>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -21,7 +23,22 @@ fs::path ControlSessionDbPath() {
 } // namespace
 
 Db::Db() : connection_(ControlSessionDbPath(), "failed to open control session db", 5000) {
-    init();
+    constexpr int kInitAttempts = 100;
+    for (int attempt = 0; ; ++attempt) {
+        try {
+            init();
+            break;
+        } catch (const std::runtime_error& ex) {
+            const std::string message = ex.what();
+            const bool locked =
+                message.find("database is locked") != std::string::npos ||
+                message.find("database table is locked") != std::string::npos;
+            if (!locked || attempt + 1 >= kInitAttempts) {
+                throw;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
 }
 
 Db::~Db() = default;

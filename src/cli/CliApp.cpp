@@ -1,5 +1,6 @@
 #include "CliApp.h"
 #include "CliRecordingMetadata.h"
+#include "PosixArgv.h"
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
@@ -765,6 +766,10 @@ std::optional<json> RunAppCommand(
     json* recordingOut,
     std::string& error
 ) {
+    constexpr int64_t kAppCommandLeaseTtlMs = 60 * 1000;
+    constexpr int64_t kAppCommandQueueWaitMs = 60 * 60 * 1000;
+    constexpr int64_t kAppCommandMaxRuntimeMs = 24 * 60 * 60 * 1000LL;
+
     std::string configError;
     const AppConfig appConfig = LoadAppConfigForCommand(&configError);
     const bool recordingEnabled = recordingEnabledOverride.value_or(
@@ -806,6 +811,15 @@ std::optional<json> RunAppCommand(
     }
 
     LuaRunOptions lua = BaseLuaOptions(options, executablePath, appPath, "run");
+    if (lua.controlSessionToken.empty() &&
+        (!operationDir.has_value() || !executablePath.empty())) {
+        lua.acquireControlSession = true;
+        lua.leaseOwner = "lua-app:" + appId + ":" + surface;
+        lua.leasePurpose = "run " + commandName;
+        lua.leaseTtlMs = kAppCommandLeaseTtlMs;
+        lua.leaseWaitMs = kAppCommandQueueWaitMs;
+        lua.leaseMaxRuntimeMs = kAppCommandMaxRuntimeMs;
+    }
     lua.vars["__ac_app_command"] = commandName;
     lua.vars["__ac_app_input_json"] = input.dump();
     if (operationDir.has_value()) {
@@ -1072,6 +1086,51 @@ bool StartOperationProcess(
     std::string& error
 ) {
 #if defined(__unix__) || defined(__APPLE__)
+    if (!executablePath.empty()) {
+        std::vector<std::string> command = {executablePath};
+        command.push_back("--session");
+        command.push_back(options.session);
+        if (!options.controlScope.empty()) {
+            command.push_back("--control-scope");
+            command.push_back(options.controlScope);
+        }
+        if (!options.controlSessionToken.empty()) {
+            command.push_back("--control-session");
+            command.push_back(options.controlSessionToken);
+        }
+        command.push_back("app");
+        command.push_back("operation");
+        command.push_back("__run-stored");
+        command.push_back(appPath.string());
+        command.push_back(appId);
+        command.push_back(operationId);
+
+        pid_t pid = ::fork();
+        if (pid < 0) {
+            error = "failed to fork operation runner";
+            return false;
+        }
+        if (pid == 0) {
+            (void)::setsid();
+            int devNull = ::open("/dev/null", O_RDWR);
+            if (devNull >= 0) {
+                ::dup2(devNull, STDIN_FILENO);
+                ::dup2(devNull, STDOUT_FILENO);
+                ::dup2(devNull, STDERR_FILENO);
+                if (devNull > STDERR_FILENO) {
+                    ::close(devNull);
+                }
+            }
+            PosixArgv argv(command);
+            ::execv(argv.front(), argv.data());
+            _exit(127);
+        }
+        return true;
+    }
+
+    // Unit-test embeddings may not have a standalone CLI path. Production
+    // callers always exec a fresh process so SQLite and runtime locks are not
+    // inherited across fork.
     pid_t pid = ::fork();
     if (pid < 0) {
         error = "failed to fork operation runner";
@@ -1469,6 +1528,7 @@ struct AppServeOptions {
     std::string authToken;
     std::set<std::string> allowedOrigins;
     std::optional<fs::path> trayStateFile;
+    std::string trayConfigName;
     std::string trayDisplayName;
 };
 
@@ -2450,6 +2510,12 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
                 return std::nullopt;
             }
             serve.trayStateFile = args[++i];
+        } else if (args[i] == "--tray-config-name") {
+            if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
+                error = "app serve --tray-config-name requires a value";
+                return std::nullopt;
+            }
+            serve.trayConfigName = args[++i];
         } else if (args[i] == "--tray-display-name") {
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --tray-display-name requires a value";
@@ -2560,6 +2626,7 @@ int RunHttpServer(
         state.url = "http://" + bindHost + ":" + std::to_string(serveOptions.port);
         state.appPath = fs::absolute(serveOptions.appPath).string();
         state.appId = appId;
+        state.configName = serveOptions.trayConfigName;
         state.displayName = serveOptions.trayDisplayName;
         state.startedAt = NowIsoUtc();
         std::string stateError;

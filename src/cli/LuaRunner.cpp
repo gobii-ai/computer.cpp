@@ -1,17 +1,23 @@
 #include "computer_cpp/LuaRunner.h"
+#include "computer_cpp/ControlSession.h"
 #include "computer_cpp/WindowsUtil.h"
 
 #include "LuaPrelude.h"
 #include "PosixArgv.h"
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -30,6 +36,103 @@ namespace fs = std::filesystem;
 namespace ComputerCpp {
 
 namespace {
+
+class ManagedControlSession {
+public:
+    ManagedControlSession() = default;
+    ManagedControlSession(const ManagedControlSession&) = delete;
+    ManagedControlSession& operator=(const ManagedControlSession&) = delete;
+
+    ~ManagedControlSession() {
+        StopAndRelease();
+    }
+
+    ControlSessionResult Acquire(const LuaRunOptions& options) {
+        ControlSessionAcquireOptions acquire;
+        acquire.scope = options.controlScope;
+        acquire.daemonSession = options.session;
+        acquire.owner = options.leaseOwner;
+        acquire.purpose = options.leasePurpose;
+        acquire.ttlMs = options.leaseTtlMs;
+        acquire.waitMs = options.leaseWaitMs;
+        acquire.maxRuntimeMs = options.leaseMaxRuntimeMs;
+
+        ControlSessionResult result;
+        try {
+            result = AcquireControlSession(acquire);
+        } catch (const std::exception& ex) {
+            result.code = "control_session_error";
+            result.error = ex.what();
+            return result;
+        }
+        if (!result.ok) {
+            return result;
+        }
+
+        token_ = result.record.token;
+        ttlMs_ = result.record.expiresAtMs - result.record.renewedAtMs;
+        if (ttlMs_ <= 0) {
+            ttlMs_ = ClampControlSessionTtlMs(options.leaseTtlMs);
+        }
+        renewIntervalMs_ =
+            std::clamp(ttlMs_ / 3, static_cast<int64_t>(250), static_cast<int64_t>(30000));
+        nextRenewal_ = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(renewIntervalMs_);
+        return result;
+    }
+
+    const std::string& token() const {
+        return token_;
+    }
+
+    bool RenewIfDue() {
+        if (token_.empty() ||
+            !renewalError_.empty() ||
+            std::chrono::steady_clock::now() < nextRenewal_) {
+            return renewalError_.empty();
+        }
+        ControlSessionResult renewed;
+        try {
+            renewed = RenewControlSession(token_, ttlMs_);
+        } catch (const std::exception& ex) {
+            renewalError_ = ex.what();
+            return false;
+        }
+        if (!renewed.ok) {
+            renewalError_ = renewed.error.empty()
+                ? "control session renewal failed"
+                : renewed.error;
+            return false;
+        }
+        nextRenewal_ = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(renewIntervalMs_);
+        return true;
+    }
+
+    const std::string& RenewalError() const {
+        return renewalError_;
+    }
+
+    void StopAndRelease() {
+        if (!token_.empty()) {
+            try {
+                ReleaseControlSession(token_);
+            } catch (const std::exception&) {
+                // The lease will expire by TTL even if storage is unavailable
+                // during best-effort cleanup.
+            }
+            token_.clear();
+        }
+    }
+
+private:
+    std::string token_;
+    int64_t ttlMs_ = 0;
+    int64_t renewIntervalMs_ = 0;
+    std::chrono::steady_clock::time_point nextRenewal_;
+    std::string renewalError_;
+};
+
 bool IsExecutable(const fs::path& path) {
 #if defined(__unix__) || defined(__APPLE__)
     return ::access(path.c_str(), X_OK) == 0;
@@ -206,7 +309,11 @@ fs::path TempPreludePath() {
     return fs::temp_directory_path() / ("computer.cpp-lua-" + std::to_string(pid) + "-" + std::to_string(stamp) + ".lua");
 }
 
-int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
+int RunChildProcess(
+    const std::vector<std::string>& args,
+    bool agentStdio,
+    ManagedControlSession* managedControlSession
+) {
 #if defined(__unix__) || defined(__APPLE__)
     Cli::PosixArgv argv(args);
 
@@ -225,9 +332,25 @@ int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
     }
 
     int status = 0;
-    if (::waitpid(pid, &status, 0) < 0) {
-        std::cerr << "Error: failed waiting for Lua runner\n";
-        return 1;
+    while (true) {
+        pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            break;
+        }
+        if (waited < 0 && errno == EINTR) {
+            continue;
+        }
+        if (waited < 0) {
+            std::cerr << "Error: failed waiting for Lua runner\n";
+            return 1;
+        }
+        if (managedControlSession && !managedControlSession->RenewIfDue()) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            return 6;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -252,7 +375,22 @@ int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
         std::cerr << "Error: failed to start Lua interpreter: " << args[0] << "\n";
         return 127;
     }
-    WaitForSingleObject(processInfo.hProcess, INFINITE);
+    while (true) {
+        DWORD wait = WaitForSingleObject(processInfo.hProcess, 100);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
+        if (wait != WAIT_TIMEOUT) {
+            TerminateProcess(processInfo.hProcess, 1);
+            WaitForSingleObject(processInfo.hProcess, INFINITE);
+            break;
+        }
+        if (managedControlSession && !managedControlSession->RenewIfDue()) {
+            TerminateProcess(processInfo.hProcess, 6);
+            WaitForSingleObject(processInfo.hProcess, INFINITE);
+            break;
+        }
+    }
     int exitCode = Windows::ProcessExitCode(processInfo.hProcess);
     CloseHandle(processInfo.hThread);
     CloseHandle(processInfo.hProcess);
@@ -260,6 +398,7 @@ int RunChildProcess(const std::vector<std::string>& args, bool agentStdio) {
 #else
     (void)args;
     (void)agentStdio;
+    (void)managedControlSession;
     std::cerr << "Error: Lua runner is not implemented on this platform yet\n";
     return 1;
 #endif
@@ -275,7 +414,12 @@ std::string ReadFileBestEffort(const fs::path& path) {
     return buffer.str();
 }
 
-LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool agentStdio, bool streamStderr) {
+LuaRunResult RunChildProcessCapture(
+    const std::vector<std::string>& args,
+    bool agentStdio,
+    bool streamStderr,
+    ManagedControlSession* managedControlSession
+) {
     LuaRunResult result;
 #if defined(__unix__) || defined(__APPLE__)
     fs::path stdoutPath = TempPreludePath();
@@ -319,15 +463,36 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     }
 
     int status = 0;
-    if (::waitpid(pid, &status, 0) < 0) {
-        result.exitCode = 1;
-        result.stderrText = "Error: failed waiting for Lua runner\n";
-    } else if (WIFEXITED(status)) {
+    bool waitedSuccessfully = false;
+    while (true) {
+        pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            waitedSuccessfully = true;
+            break;
+        }
+        if (waited < 0 && errno == EINTR) {
+            continue;
+        }
+        if (waited < 0) {
+            result.exitCode = 1;
+            result.stderrText = "Error: failed waiting for Lua runner\n";
+            break;
+        }
+        if (managedControlSession && !managedControlSession->RenewIfDue()) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            result.exitCode = 6;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (waitedSuccessfully && WIFEXITED(status)) {
         result.exitCode = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
+    } else if (waitedSuccessfully && WIFSIGNALED(status)) {
         result.exitCode = 128 + WTERMSIG(status);
         result.stderrText = "Error: Lua runner terminated by signal " + std::to_string(WTERMSIG(status)) + "\n";
-    } else {
+    } else if (waitedSuccessfully) {
         result.exitCode = 1;
     }
 
@@ -404,7 +569,22 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
         result.exitCode = 127;
         result.stderrText = "Error: failed to start Lua interpreter: " + args[0] + "\n";
     } else {
-        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        while (true) {
+            DWORD wait = WaitForSingleObject(processInfo.hProcess, 100);
+            if (wait == WAIT_OBJECT_0) {
+                break;
+            }
+            if (wait != WAIT_TIMEOUT) {
+                TerminateProcess(processInfo.hProcess, 1);
+                WaitForSingleObject(processInfo.hProcess, INFINITE);
+                break;
+            }
+            if (managedControlSession && !managedControlSession->RenewIfDue()) {
+                TerminateProcess(processInfo.hProcess, 6);
+                WaitForSingleObject(processInfo.hProcess, INFINITE);
+                break;
+            }
+        }
         result.exitCode = Windows::ProcessExitCode(processInfo.hProcess);
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
@@ -427,6 +607,7 @@ LuaRunResult RunChildProcessCapture(const std::vector<std::string>& args, bool a
     (void)args;
     (void)agentStdio;
     (void)streamStderr;
+    (void)managedControlSession;
     result.exitCode = 1;
     result.stderrText = "Error: Lua runner is not implemented on this platform yet\n";
     return result;
@@ -453,6 +634,23 @@ LuaRunResult RunLuaScriptInternal(const LuaRunOptions& options, bool capture, bo
         return result;
     }
 
+    LuaRunOptions effectiveOptions = options;
+    ManagedControlSession managedControlSession;
+    if (!effectiveOptions.dryRun &&
+        effectiveOptions.controlSessionToken.empty() &&
+        effectiveOptions.acquireControlSession) {
+        ControlSessionResult acquired = managedControlSession.Acquire(effectiveOptions);
+        if (!acquired.ok) {
+            result.exitCode = acquired.code == "control_session_busy" ? 6 : 1;
+            result.stderrText = "Error: " +
+                (acquired.error.empty() ? "could not acquire desktop control" : acquired.error) +
+                "\n";
+            return result;
+        }
+        effectiveOptions.controlSessionToken = managedControlSession.token();
+        effectiveOptions.controlScope = acquired.record.scope;
+    }
+
     fs::path prelude = TempPreludePath();
     {
         std::ofstream file(prelude);
@@ -461,7 +659,7 @@ LuaRunResult RunLuaScriptInternal(const LuaRunOptions& options, bool capture, bo
             result.stderrText = "Error: could not write Lua prelude: " + prelude.string() + "\n";
             return result;
         }
-        file << LuaPreludeSource(options);
+        file << LuaPreludeSource(effectiveOptions);
     }
 
     std::vector<std::string> args = {
@@ -472,12 +670,26 @@ LuaRunResult RunLuaScriptInternal(const LuaRunOptions& options, bool capture, bo
     args.insert(args.end(), options.scriptArgs.begin(), options.scriptArgs.end());
 
     if (capture) {
-        result = RunChildProcessCapture(args, options.agentStdio, streamStderr);
+        result = RunChildProcessCapture(
+            args,
+            effectiveOptions.agentStdio,
+            streamStderr,
+            managedControlSession.token().empty() ? nullptr : &managedControlSession);
     } else {
-        result.exitCode = RunChildProcess(args, options.agentStdio);
+        result.exitCode = RunChildProcess(
+            args,
+            effectiveOptions.agentStdio,
+            managedControlSession.token().empty() ? nullptr : &managedControlSession);
     }
     std::error_code ec;
     fs::remove(prelude, ec);
+    managedControlSession.StopAndRelease();
+    const std::string renewalError = managedControlSession.RenewalError();
+    if (!renewalError.empty()) {
+        result.exitCode = 6;
+        result.stdoutText.clear();
+        result.stderrText += "Error: lost exclusive desktop control: " + renewalError + "\n";
+    }
     return result;
 }
 
