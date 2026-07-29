@@ -127,7 +127,8 @@ std::vector<fs::path> ListTrayAppServerStatePaths(std::string* error) {
         if (error) {
             *error = "could not list tray server state directory: " + ec.message();
         }
-        return {};
+        std::sort(paths.begin(), paths.end());
+        return paths;
     }
     std::sort(paths.begin(), paths.end());
     return paths;

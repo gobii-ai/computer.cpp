@@ -377,7 +377,8 @@ or stopped without affecting the others.
 
 Configure apps in **Settings > Server**. A blank app port is assigned
 automatically from `base_port`; a fixed port is reserved for that app and
-cannot be reused by another configured app.
+cannot be reused by another configured app. Automatic assignment checks at
+most 100 consecutive ports beginning at `base_port` (and never past 65535).
 
 ```toml
 [server]

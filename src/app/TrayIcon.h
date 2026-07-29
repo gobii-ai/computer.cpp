@@ -59,6 +59,7 @@ private:
         bool configured = false;
         bool batchMember = false;
         std::string failure;
+        std::chrono::steady_clock::time_point nextHealthProbe;
     };
 
     enum class ServerBatchAction {
@@ -82,8 +83,9 @@ private:
     void OnTaskbarRightUp(wxTaskBarIconEvent& event);
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
-    void RefreshConfiguredServers();
+    void RefreshConfiguredServers(bool force = false);
     void AdoptExistingServers(bool removeInvalidState);
+    std::set<int> OccupiedServerPorts(const std::string& excludedConfigName = {}) const;
     void ToggleServer(const std::string& configName);
     void StartOneServer(
         const ComputerCpp::ServerConfig& server,
@@ -94,6 +96,8 @@ private:
     void PollServers();
     void CompleteServerAction(const std::string& configName, bool success, const std::string& error = {});
     void FinishBatchIfReady();
+    void QueueServerNotification(std::string message);
+    void ShowPendingServerNotifications();
     void ReleaseServerProcess(ManagedServer& server);
     void StopAllServersBlocking();
 
@@ -110,7 +114,12 @@ private:
     ServerBatchAction serverBatchAction_ = ServerBatchAction::None;
     std::set<std::string> serverBatchPending_;
     std::vector<std::string> serverBatchFailures_;
+    std::vector<std::string> pendingServerNotifications_;
+    bool serverNotificationScheduled_ = false;
+    bool serverNotificationShowing_ = false;
+    std::string lastHealthProbeConfigName_;
     std::thread daemonThread_;
+    std::chrono::steady_clock::time_point configuredServersRefreshedAt_;
     size_t cachedActiveRecordingCount_ = 0;
     std::chrono::steady_clock::time_point activeRecordingCountRefreshedAt_;
 

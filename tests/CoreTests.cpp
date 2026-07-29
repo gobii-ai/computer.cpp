@@ -194,6 +194,46 @@ void TestServerPortPlanning() {
         {65535},
         available);
     assert(noPorts.errors.contains("exhausted"));
+    assert(noPorts.errors["exhausted"].find("65535-65535") != std::string::npos);
+
+    ComputerCpp::ServerConfig fallback;
+    fallback.basePort = 0;
+    ComputerCpp::ServerAppConfig fallbackApp;
+    fallbackApp.name = "fallback";
+    fallback.apps[fallbackApp.name] = fallbackApp;
+    auto fallbackPlan = ComputerCpp::PlanServerPorts(
+        fallback,
+        {"fallback"},
+        {},
+        available);
+    assert(fallbackPlan.errors.empty());
+    assert(fallbackPlan.ports["fallback"] == 8787);
+    fallback.basePort = 70000;
+    auto highFallbackPlan = ComputerCpp::PlanServerPorts(
+        fallback,
+        {"fallback"},
+        {},
+        available);
+    assert(highFallbackPlan.errors.empty());
+    assert(highFallbackPlan.ports["fallback"] == 8787);
+
+    ComputerCpp::ServerConfig bounded;
+    bounded.basePort = 10000;
+    ComputerCpp::ServerAppConfig boundedApp;
+    boundedApp.name = "bounded";
+    bounded.apps[boundedApp.name] = boundedApp;
+    int highestChecked = 0;
+    auto boundedPlan = ComputerCpp::PlanServerPorts(
+        bounded,
+        {"bounded"},
+        {},
+        [&highestChecked](int port) {
+            highestChecked = std::max(highestChecked, port);
+            return port >= 10100;
+        });
+    assert(boundedPlan.errors.contains("bounded"));
+    assert(boundedPlan.errors["bounded"].find("10000-10099") != std::string::npos);
+    assert(highestChecked == 10099);
 }
 
 class FakeScreenRecordingSession final : public ComputerCpp::Platform::ScreenRecordingSession {
@@ -584,6 +624,16 @@ void TestTrayServerState() {
     assert(firstPath == ComputerCpp::TrayAppServerStatePath(first.configName));
     assert(firstPath.filename().string().find('/') == std::string::npos);
     assert(secondPath.filename().string().find("..") == std::string::npos);
+    const std::string sharedPrefix(48, 'a');
+    const fs::path collidingPrefixA =
+        ComputerCpp::TrayAppServerStatePath(sharedPrefix + "-first");
+    const fs::path collidingPrefixB =
+        ComputerCpp::TrayAppServerStatePath(sharedPrefix + "-second");
+    assert(collidingPrefixA != collidingPrefixB);
+    assert(collidingPrefixA.filename().string().substr(0, sharedPrefix.size()) ==
+        sharedPrefix);
+    assert(collidingPrefixB.filename().string().substr(0, sharedPrefix.size()) ==
+        sharedPrefix);
     assert(ComputerCpp::SaveTrayAppServerState(first, firstPath, &error));
     assert(ComputerCpp::SaveTrayAppServerState(second, secondPath, &error));
     const auto paths = ComputerCpp::ListTrayAppServerStatePaths(&error);

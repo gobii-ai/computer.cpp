@@ -345,6 +345,7 @@ ServerPortPlan PlanServerPorts(
     const int start = server.basePort > 0 && server.basePort <= 65535
         ? server.basePort
         : 8787;
+    const int end = std::min(65535, start + 99);
     for (const auto& name : appNames) {
         auto appIt = server.apps.find(name);
         if (appIt == server.apps.end()) {
@@ -366,7 +367,7 @@ ServerPortPlan PlanServerPorts(
         }
 
         std::optional<int> selected;
-        for (int port = start; port <= 65535 && port < start + 100; ++port) {
+        for (int port = start; port <= end; ++port) {
             if (reservedFixedPorts.contains(port) ||
                 occupiedPorts.contains(port) ||
                 allocatedPorts.contains(port) ||
@@ -377,7 +378,8 @@ ServerPortPlan PlanServerPorts(
             break;
         }
         if (!selected.has_value()) {
-            plan.errors[name] = "no available port was found starting at " + std::to_string(start);
+            plan.errors[name] = "no available port was found in " +
+                std::to_string(start) + "-" + std::to_string(end);
             continue;
         }
         plan.ports[name] = *selected;

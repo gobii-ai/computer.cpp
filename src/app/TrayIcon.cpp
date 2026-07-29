@@ -26,6 +26,7 @@
 #include <sstream>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 #include <wx/clipbrd.h>
 #include <wx/dcmemory.h>
@@ -49,7 +50,9 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -279,7 +282,8 @@ bool HttpServerRequestOk(
     const std::string& bearerToken,
     const std::string& method,
     const std::string& path,
-    int expectedStatus
+    int expectedStatus,
+    int timeoutMs = 1000
 ) {
 #if defined(__unix__) || defined(__APPLE__)
     if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
@@ -290,8 +294,10 @@ bool HttpServerRequestOk(
         return false;
     }
 
+    timeoutMs = std::max(1, timeoutMs);
     timeval timeout {};
-    timeout.tv_sec = 1;
+    timeout.tv_sec = timeoutMs / 1000;
+    timeout.tv_usec = (timeoutMs % 1000) * 1000;
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
@@ -303,7 +309,34 @@ bool HttpServerRequestOk(
         ::close(fd);
         return false;
     }
+    const int originalFlags = ::fcntl(fd, F_GETFL, 0);
+    if (originalFlags < 0 ||
+        ::fcntl(fd, F_SETFL, originalFlags | O_NONBLOCK) != 0) {
+        ::close(fd);
+        return false;
+    }
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        if (errno != EINPROGRESS) {
+            ::close(fd);
+            return false;
+        }
+        pollfd descriptor{};
+        descriptor.fd = fd;
+        descriptor.events = POLLOUT;
+        int ready = 0;
+        do {
+            ready = ::poll(&descriptor, 1, timeoutMs);
+        } while (ready < 0 && errno == EINTR);
+        int socketError = 0;
+        socklen_t socketErrorSize = sizeof(socketError);
+        if (ready <= 0 ||
+            ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &socketErrorSize) != 0 ||
+            socketError != 0) {
+            ::close(fd);
+            return false;
+        }
+    }
+    if (::fcntl(fd, F_SETFL, originalFlags) != 0) {
         ::close(fd);
         return false;
     }
@@ -341,11 +374,14 @@ bool HttpServerRequestOk(
         return false;
     }
     wxSocketClient socket;
-    socket.SetTimeout(1);
+    timeoutMs = std::max(1, timeoutMs);
+    socket.SetTimeout(std::max(1, (timeoutMs + 999) / 1000));
     wxIPV4address addr;
     addr.Hostname(HealthConnectHost(state.host));
     addr.Service(state.port);
-    if (!socket.Connect(addr, true)) {
+    socket.Connect(addr, false);
+    if (!socket.WaitOnConnect(timeoutMs / 1000, timeoutMs % 1000) ||
+        !socket.IsConnected()) {
         return false;
     }
     std::string host = HealthConnectHost(state.host);
@@ -354,12 +390,20 @@ bool HttpServerRequestOk(
         "\r\nAuthorization: Bearer " + bearerToken +
         "\r\nContent-Length: 0" +
         "\r\nConnection: close\r\n\r\n";
+    if (!socket.WaitForWrite(timeoutMs / 1000, timeoutMs % 1000)) {
+        socket.Close();
+        return false;
+    }
     socket.Write(request.data(), request.size());
     if (socket.Error()) {
         socket.Close();
         return false;
     }
     char buffer[512]{};
+    if (!socket.WaitForRead(timeoutMs / 1000, timeoutMs % 1000)) {
+        socket.Close();
+        return false;
+    }
     socket.Read(buffer, sizeof(buffer) - 1);
     size_t read = socket.LastCount();
     socket.Close();
@@ -373,8 +417,12 @@ bool HttpServerRequestOk(
 #endif
 }
 
-bool HttpHealthOk(const TrayAppServerState& state, const std::string& bearerToken) {
-    return HttpServerRequestOk(state, bearerToken, "GET", "/health", 200);
+bool HttpHealthOk(
+    const TrayAppServerState& state,
+    const std::string& bearerToken,
+    int timeoutMs = 1000
+) {
+    return HttpServerRequestOk(state, bearerToken, "GET", "/health", 200, timeoutMs);
 }
 
 bool RequestServerShutdown(const TrayAppServerState& state, const std::string& bearerToken) {
@@ -554,29 +602,34 @@ std::optional<TrayAppServerState> FindAdoptableConfiguredServerState(
     return std::nullopt;
 }
 
-bool WaitForProcessExit(long pid, bool reapChild) {
-    for (int i = 0; i < 20; ++i) {
+bool ProcessHasExited(long pid, bool reapChild) {
 #if defined(__unix__) || defined(__APPLE__)
-        if (reapChild) {
-            int status = 0;
-            pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
-            if (result == static_cast<pid_t>(pid)) {
-                return true;
-            }
-            if (result < 0 && errno == ECHILD) {
-                return !IsProcessAlive(pid);
-            }
-        } else if (!IsProcessAlive(pid)) {
+    if (reapChild) {
+        int status = 0;
+        pid_t result = ::waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (result == static_cast<pid_t>(pid)) {
             return true;
         }
-#else
-        if (!IsProcessAlive(pid)) {
-            return true;
+        if (result < 0 && errno == ECHILD) {
+            return !IsProcessAlive(pid);
         }
-#endif
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        return false;
     }
     return !IsProcessAlive(pid);
+#else
+    (void)reapChild;
+    return !IsProcessAlive(pid);
+#endif
+}
+
+bool WaitForProcessExit(long pid, bool reapChild) {
+    for (int i = 0; i < 20; ++i) {
+        if (ProcessHasExited(pid, reapChild)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return ProcessHasExited(pid, reapChild);
 }
 
 void SignalServerProcess(long pid, wxSignal signal, bool includeChildren) {
@@ -2645,7 +2698,7 @@ TrayIcon::TrayIcon() {
         wxExit();
     });
     StartOwnedDaemon();
-    RefreshConfiguredServers();
+    RefreshConfiguredServers(true);
     AdoptExistingServers(true);
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
@@ -2700,7 +2753,6 @@ void TrayIcon::StartOwnedDaemon() {
 
 wxMenu* TrayIcon::CreatePopupMenu() {
     RefreshConfiguredServers();
-    AdoptExistingServers(false);
 
     wxMenu* menu = new wxMenu;
     size_t running = 0;
@@ -2712,10 +2764,13 @@ wxMenu* TrayIcon::CreatePopupMenu() {
             ++running;
         }
         if (server.configured &&
-            (server.status == ServerStatus::Stopped || server.status == ServerStatus::Failed)) {
+            (server.status == ServerStatus::Stopped ||
+             (server.status == ServerStatus::Failed && server.pid <= 0))) {
             canStart = true;
         }
-        if (server.status == ServerStatus::Running || server.status == ServerStatus::Starting) {
+        if (server.status == ServerStatus::Running ||
+            server.status == ServerStatus::Starting ||
+            (server.status == ServerStatus::Failed && server.pid > 0)) {
             canStop = true;
         }
         if (server.configured) {
@@ -2750,7 +2805,10 @@ wxMenu* TrayIcon::CreatePopupMenu() {
                 label = "🟡 " + server.displayName + " — Stopping…";
                 break;
             case ServerStatus::Failed:
-                label = "⚠️ " + server.displayName + " — Retry";
+                label = server.pid > 0
+                    ? "⚠️ " + server.displayName + " — Retry Stop (:" +
+                        std::to_string(server.port) + ")"
+                    : "⚠️ " + server.displayName + " — Retry Start";
                 break;
             case ServerStatus::Stopped:
                 label = "⚪ " + server.displayName + " — Start";
@@ -2814,6 +2872,7 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
     settingsDialog_ = new LlmSettingsDialog();
     settingsDialog_->Bind(wxEVT_DESTROY, [this](wxWindowDestroyEvent&) {
         settingsDialog_ = nullptr;
+        RefreshConfiguredServers(true);
     });
     PresentSettingsDialog(settingsDialog_);
 }
@@ -2893,16 +2952,10 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
         return;
     }
     serverAuthToken_ = config.server.authToken;
-    RefreshConfiguredServers();
+    RefreshConfiguredServers(true);
     AdoptExistingServers(false);
 
-    std::set<int> occupiedPorts;
-    for (const auto& [_, managed] : servers_) {
-        if (managed.pid > 0 &&
-            (managed.status == ServerStatus::Running || managed.status == ServerStatus::Starting)) {
-            occupiedPorts.insert(managed.port);
-        }
-    }
+    const std::set<int> occupiedPorts = OccupiedServerPorts();
 
     serverBatchAction_ = ServerBatchAction::Start;
     serverBatchPending_.clear();
@@ -2911,7 +2964,8 @@ void TrayIcon::OnStartServer(wxCommandEvent&) {
         auto existing = servers_.find(name);
         if (existing == servers_.end() ||
             existing->second.status == ServerStatus::Stopped ||
-            existing->second.status == ServerStatus::Failed) {
+            (existing->second.status == ServerStatus::Failed &&
+             existing->second.pid <= 0)) {
             serverBatchPending_.insert(name);
             servers_[name].batchMember = true;
         }
@@ -2951,7 +3005,9 @@ void TrayIcon::OnStopServer(wxCommandEvent&) {
     serverBatchPending_.clear();
     serverBatchFailures_.clear();
     for (auto& [name, server] : servers_) {
-        if (server.status == ServerStatus::Running || server.status == ServerStatus::Starting) {
+        if (server.status == ServerStatus::Running ||
+            server.status == ServerStatus::Starting ||
+            (server.status == ServerStatus::Failed && server.pid > 0)) {
             serverBatchPending_.insert(name);
             server.batchMember = true;
         }
@@ -2994,12 +3050,19 @@ void TrayIcon::OnServerTimer(wxTimerEvent&) {
     PollServers();
 }
 
-void TrayIcon::RefreshConfiguredServers() {
+void TrayIcon::RefreshConfiguredServers(bool force) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force &&
+        configuredServersRefreshedAt_.time_since_epoch().count() != 0 &&
+        now - configuredServersRefreshedAt_ < std::chrono::seconds(2)) {
+        return;
+    }
     std::string error;
     const AppConfig config = LoadAppConfig(&error);
     if (!error.empty()) {
         return;
     }
+    configuredServersRefreshedAt_ = now;
     serverAuthToken_ = config.server.authToken;
     for (auto& [_, server] : servers_) {
         server.configured = false;
@@ -3011,7 +3074,8 @@ void TrayIcon::RefreshConfiguredServers() {
         server.configured = true;
         server.configName = name;
         server.displayName = app.displayName.empty() ? name : app.displayName;
-        if (server.status == ServerStatus::Stopped || server.status == ServerStatus::Failed) {
+        if (server.status == ServerStatus::Stopped ||
+            (server.status == ServerStatus::Failed && server.pid <= 0)) {
             server.appPath = AbsolutePathString(app.path);
             if (server.appPath.empty()) {
                 server.appPath = app.path;
@@ -3021,13 +3085,24 @@ void TrayIcon::RefreshConfiguredServers() {
     }
     for (auto it = servers_.begin(); it != servers_.end();) {
         if (!configured.contains(it->first) &&
-            (it->second.status == ServerStatus::Stopped || it->second.status == ServerStatus::Failed)) {
+            (it->second.status == ServerStatus::Stopped ||
+             (it->second.status == ServerStatus::Failed && it->second.pid <= 0))) {
             ReleaseServerProcess(it->second);
             it = servers_.erase(it);
         } else {
             ++it;
         }
     }
+}
+
+std::set<int> TrayIcon::OccupiedServerPorts(const std::string& excludedConfigName) const {
+    std::set<int> ports;
+    for (const auto& [name, server] : servers_) {
+        if (name != excludedConfigName && server.pid > 0 && server.port > 0) {
+            ports.insert(server.port);
+        }
+    }
+    return ports;
 }
 
 void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
@@ -3068,6 +3143,27 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
                 }
             }
         }
+        if (!configName.empty()) {
+            auto managed = servers_.find(configName);
+            if (managed != servers_.end() &&
+                (managed->second.status == ServerStatus::Running ||
+                 managed->second.status == ServerStatus::Starting ||
+                 managed->second.status == ServerStatus::Stopping ||
+                 managed->second.pid > 0)) {
+                continue;
+            }
+            const bool pidAlreadyManaged = std::any_of(
+                servers_.begin(),
+                servers_.end(),
+                [&](const auto& item) {
+                    return item.first != configName &&
+                        item.second.pid > 0 &&
+                        item.second.pid == state->pid;
+                });
+            if (pidAlreadyManaged) {
+                continue;
+            }
+        }
         const bool valid = !configName.empty() &&
             IsProcessAlive(state->pid) &&
             LooksLikeTrayAppServerProcess(*state) &&
@@ -3078,24 +3174,7 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
             }
             continue;
         }
-        const bool pidAlreadyManaged = std::any_of(
-            servers_.begin(),
-            servers_.end(),
-            [&](const auto& item) {
-                return item.first != configName &&
-                    item.second.pid == state->pid &&
-                    item.second.status != ServerStatus::Stopped &&
-                    item.second.status != ServerStatus::Failed;
-            });
-        if (pidAlreadyManaged) {
-            continue;
-        }
         ManagedServer& server = servers_[configName];
-        if (server.status == ServerStatus::Running ||
-            server.status == ServerStatus::Starting ||
-            server.status == ServerStatus::Stopping) {
-            continue;
-        }
         const ServerAppConfig& app = config.server.apps.at(configName);
         server.configName = configName;
         server.configured = true;
@@ -3117,12 +3196,28 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
         AppendAppLog("server", "adopted app=" + server.displayName + " url=" + server.url + " pid=" + std::to_string(server.pid));
     }
 
+    const bool needsProcessRecovery = std::any_of(
+        config.server.apps.begin(),
+        config.server.apps.end(),
+        [&](const auto& item) {
+            auto managed = servers_.find(item.first);
+            return managed == servers_.end() ||
+                (managed->second.status != ServerStatus::Running &&
+                 managed->second.status != ServerStatus::Starting &&
+                 managed->second.status != ServerStatus::Stopping &&
+                 managed->second.pid <= 0);
+        });
+    if (!needsProcessRecovery) {
+        return;
+    }
+
     const auto processes = AppServeProcesses();
     for (const auto& [name, app] : config.server.apps) {
         ManagedServer& server = servers_[name];
         if (server.status == ServerStatus::Running ||
             server.status == ServerStatus::Starting ||
-            server.status == ServerStatus::Stopping) {
+            server.status == ServerStatus::Stopping ||
+            server.pid > 0) {
             continue;
         }
         auto recovered = FindAdoptableConfiguredServerState(config.server, app, processes);
@@ -3134,9 +3229,8 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
             servers_.end(),
             [&](const auto& item) {
                 return item.first != name &&
-                    item.second.pid == recovered->pid &&
-                    item.second.status != ServerStatus::Stopped &&
-                    item.second.status != ServerStatus::Failed;
+                    item.second.pid > 0 &&
+                    item.second.pid == recovered->pid;
             });
         if (pidAlreadyManaged) {
             continue;
@@ -3163,7 +3257,8 @@ void TrayIcon::ToggleServer(const std::string& configName) {
     if (managed == servers_.end()) {
         return;
     }
-    if (managed->second.status == ServerStatus::Running) {
+    if (managed->second.status == ServerStatus::Running ||
+        (managed->second.status == ServerStatus::Failed && managed->second.pid > 0)) {
         StopOneServer(configName, false);
         return;
     }
@@ -3194,12 +3289,7 @@ void TrayIcon::ToggleServer(const std::string& configName) {
         return;
     }
 
-    std::set<int> occupiedPorts;
-    for (const auto& [name, server] : servers_) {
-        if (name != configName && server.pid > 0) {
-            occupiedPorts.insert(server.port);
-        }
-    }
+    const std::set<int> occupiedPorts = OccupiedServerPorts(configName);
     const std::string bindHost = NormalizeBindHost(config.server.host);
     const ServerPortPlan portPlan = PlanServerPorts(
         config.server,
@@ -3239,6 +3329,7 @@ void TrayIcon::StartOneServer(
     server.batchMember = batchMember;
     server.shutdownStage = 0;
     server.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    server.nextHealthProbe = std::chrono::steady_clock::now();
 
     const std::filesystem::path cliPath = ComputerCppCliHelperPath();
     std::error_code ec;
@@ -3321,7 +3412,7 @@ void TrayIcon::StartOneServer(
     state.displayName = server.displayName;
     SaveTrayAppServerState(state, server.statePath, nullptr);
     if (serverTimer_ && !serverTimer_->IsRunning()) {
-        serverTimer_->Start(100);
+        serverTimer_->Start(250);
     }
 }
 
@@ -3331,7 +3422,9 @@ void TrayIcon::StopOneServer(const std::string& configName, bool batchMember) {
         return;
     }
     ManagedServer& server = it->second;
-    if (server.status != ServerStatus::Running && server.status != ServerStatus::Starting) {
+    if (server.status != ServerStatus::Running &&
+        server.status != ServerStatus::Starting &&
+        !(server.status == ServerStatus::Failed && server.pid > 0)) {
         return;
     }
     server.batchMember = batchMember;
@@ -3354,16 +3447,37 @@ void TrayIcon::StopOneServer(const std::string& configName, bool batchMember) {
     }
     server.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     if (serverTimer_ && !serverTimer_->IsRunning()) {
-        serverTimer_->Start(100);
+        serverTimer_->Start(250);
     }
 }
 
 void TrayIcon::PollServers() {
     const auto now = std::chrono::steady_clock::now();
+    std::string healthProbeName;
+    auto selectHealthProbe = [&](auto begin, auto end) {
+        for (auto it = begin; it != end; ++it) {
+            if (it->second.status == ServerStatus::Starting &&
+                now >= it->second.nextHealthProbe) {
+                healthProbeName = it->first;
+                return true;
+            }
+        }
+        return false;
+    };
+    auto afterLastProbe = lastHealthProbeConfigName_.empty()
+        ? servers_.begin()
+        : servers_.upper_bound(lastHealthProbeConfigName_);
+    if (!selectHealthProbe(afterLastProbe, servers_.end())) {
+        selectHealthProbe(servers_.begin(), afterLastProbe);
+    }
+    if (!healthProbeName.empty()) {
+        lastHealthProbeConfigName_ = healthProbeName;
+    }
+
     std::vector<std::tuple<std::string, bool, std::string>> completions;
     for (auto& [name, server] : servers_) {
         if (server.status == ServerStatus::Starting) {
-            if (!IsProcessAlive(server.pid)) {
+            if (ProcessHasExited(server.pid, server.process != nullptr)) {
                 server.status = ServerStatus::Failed;
                 RemoveTrayAppServerStateForPid(server.statePath, server.pid, nullptr);
                 ReleaseServerProcess(server);
@@ -3373,19 +3487,24 @@ void TrayIcon::PollServers() {
                 completions.emplace_back(name, false, "server exited before becoming healthy");
                 continue;
             }
-            TrayAppServerState state;
-            state.pid = server.pid;
-            state.host = server.host;
-            state.port = server.port;
-            state.url = server.url;
-            state.appPath = server.appPath;
-            state.configName = name;
-            if (HttpHealthOk(state, serverAuthToken_)) {
-                server.status = ServerStatus::Running;
-                server.failure.clear();
-                AppendAppLog("server", "started app=" + server.displayName + " url=" + server.url + " pid=" + std::to_string(server.pid));
-                completions.emplace_back(name, true, "");
-            } else if (now >= server.deadline) {
+            if (name == healthProbeName) {
+                server.nextHealthProbe = now + std::chrono::milliseconds(500);
+                TrayAppServerState state;
+                state.pid = server.pid;
+                state.host = server.host;
+                state.port = server.port;
+                state.url = server.url;
+                state.appPath = server.appPath;
+                state.configName = name;
+                if (HttpHealthOk(state, serverAuthToken_, 100)) {
+                    server.status = ServerStatus::Running;
+                    server.failure.clear();
+                    AppendAppLog("server", "started app=" + server.displayName + " url=" + server.url + " pid=" + std::to_string(server.pid));
+                    completions.emplace_back(name, true, "");
+                    continue;
+                }
+            }
+            if (now >= server.deadline) {
                 SignalServerProcess(server.pid, wxSIGTERM, server.process != nullptr);
                 server.status = ServerStatus::Stopping;
                 server.shutdownStage = 1;
@@ -3393,7 +3512,7 @@ void TrayIcon::PollServers() {
                 server.deadline = now + std::chrono::seconds(2);
             }
         } else if (server.status == ServerStatus::Stopping) {
-            if (!IsProcessAlive(server.pid)) {
+            if (ProcessHasExited(server.pid, server.process != nullptr)) {
                 const std::string failure = server.failure;
                 RemoveTrayAppServerStateForPid(server.statePath, server.pid, nullptr);
                 ReleaseServerProcess(server);
@@ -3419,7 +3538,7 @@ void TrayIcon::PollServers() {
                 const std::string failure = server.failure.empty()
                     ? "server process did not stop"
                     : server.failure + "; process did not stop";
-                server.status = ServerStatus::Running;
+                server.status = ServerStatus::Failed;
                 completions.emplace_back(name, false, failure);
             }
         }
@@ -3464,7 +3583,9 @@ void TrayIcon::CompleteServerAction(
         }
     }
     if (!success) {
-        wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
+        const std::string displayName =
+            it != servers_.end() ? it->second.displayName : configName;
+        QueueServerNotification(displayName + ": " + error);
     }
 }
 
@@ -3482,9 +3603,50 @@ void TrayIcon::FinishBatchIfReady() {
         for (const auto& failure : serverBatchFailures_) {
             message << "\n\n• " << failure;
         }
-        wxMessageBox(message.str(), "ComputerCpp Server", wxOK | wxICON_ERROR);
+        QueueServerNotification(message.str());
     }
     serverBatchFailures_.clear();
+}
+
+void TrayIcon::QueueServerNotification(std::string message) {
+    if (message.empty()) {
+        return;
+    }
+    pendingServerNotifications_.push_back(std::move(message));
+    if (serverNotificationScheduled_ || serverNotificationShowing_) {
+        return;
+    }
+    serverNotificationScheduled_ = true;
+    CallAfter([this] {
+        ShowPendingServerNotifications();
+    });
+}
+
+void TrayIcon::ShowPendingServerNotifications() {
+    serverNotificationScheduled_ = false;
+    if (serverNotificationShowing_ || pendingServerNotifications_.empty()) {
+        return;
+    }
+    std::vector<std::string> notifications;
+    notifications.swap(pendingServerNotifications_);
+    std::ostringstream message;
+    if (notifications.size() == 1) {
+        message << notifications.front();
+    } else {
+        message << "Server errors:";
+        for (const auto& notification : notifications) {
+            message << "\n\n• " << notification;
+        }
+    }
+    serverNotificationShowing_ = true;
+    wxMessageBox(message.str(), "ComputerCpp Server", wxOK | wxICON_ERROR);
+    serverNotificationShowing_ = false;
+    if (!pendingServerNotifications_.empty()) {
+        serverNotificationScheduled_ = true;
+        CallAfter([this] {
+            ShowPendingServerNotifications();
+        });
+    }
 }
 
 void TrayIcon::ReleaseServerProcess(ManagedServer& server) {
