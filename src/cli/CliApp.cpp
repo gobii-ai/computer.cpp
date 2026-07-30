@@ -33,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -1125,52 +1126,43 @@ bool StartOperationProcess(
     const std::string& operationId,
     std::string& error
 ) {
-#if defined(__unix__) || defined(__APPLE__)
-    if (!executablePath.empty()) {
-        std::vector<std::string> command = {executablePath};
-        command.push_back("--session");
-        command.push_back(options.session);
-        if (!options.controlScope.empty()) {
-            command.push_back("--control-scope");
-            command.push_back(options.controlScope);
-        }
-        if (!options.controlSessionToken.empty()) {
-            command.push_back("--control-session");
-            command.push_back(options.controlSessionToken);
-        }
-        command.push_back("app");
-        command.push_back("operation");
-        command.push_back("__run-stored");
-        command.push_back(appPath.string());
-        command.push_back(appId);
-        command.push_back(operationId);
-
-        pid_t pid = ::fork();
-        if (pid < 0) {
-            error = "failed to fork operation runner";
+    if (executablePath.empty()) {
+        try {
+            std::thread([options, appPath, appId, operationId] {
+                RunStoredOperation(
+                    options,
+                    "",
+                    appPath,
+                    appId,
+                    operationId);
+            }).detach();
+            return true;
+        } catch (const std::system_error& ex) {
+            error = "failed to start embedded operation runner: " +
+                std::string(ex.what());
             return false;
         }
-        if (pid == 0) {
-            (void)::setsid();
-            int devNull = ::open("/dev/null", O_RDWR);
-            if (devNull >= 0) {
-                ::dup2(devNull, STDIN_FILENO);
-                ::dup2(devNull, STDOUT_FILENO);
-                ::dup2(devNull, STDERR_FILENO);
-                if (devNull > STDERR_FILENO) {
-                    ::close(devNull);
-                }
-            }
-            PosixArgv argv(command);
-            ::execv(argv.front(), argv.data());
-            _exit(127);
-        }
-        return true;
     }
 
-    // Unit-test embeddings may not have a standalone CLI path. Production
-    // callers always exec a fresh process so SQLite and runtime locks are not
-    // inherited across fork.
+#if defined(__unix__) || defined(__APPLE__)
+    std::vector<std::string> command = {executablePath};
+    command.push_back("--session");
+    command.push_back(options.session);
+    if (!options.controlScope.empty()) {
+        command.push_back("--control-scope");
+        command.push_back(options.controlScope);
+    }
+    if (!options.controlSessionToken.empty()) {
+        command.push_back("--control-session");
+        command.push_back(options.controlSessionToken);
+    }
+    command.push_back("app");
+    command.push_back("operation");
+    command.push_back("__run-stored");
+    command.push_back(appPath.string());
+    command.push_back(appId);
+    command.push_back(operationId);
+
     pid_t pid = ::fork();
     if (pid < 0) {
         error = "failed to fork operation runner";
@@ -1187,8 +1179,9 @@ bool StartOperationProcess(
                 ::close(devNull);
             }
         }
-        int code = RunStoredOperation(options, executablePath, appPath, appId, operationId);
-        _exit(code == 0 ? 0 : 1);
+        PosixArgv argv(command);
+        ::execv(argv.front(), argv.data());
+        _exit(127);
     }
     return true;
 #else
