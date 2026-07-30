@@ -30,6 +30,7 @@ Daemon:
           [--allowed-origin https://host]
                                       Serve a semantic Lua app over HTTP and MCP at /mcp
   app serve --configured              Serve all configured apps on server.port
+                                      with aggregate MCP at /mcp and app routes
                                       under /apps/{stable-name}
   config path                         Print user config.toml path
   config init [--force]               Create default user config.toml
