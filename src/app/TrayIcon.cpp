@@ -814,28 +814,7 @@ void AppendPermissionTrace(const std::string& event) {
     AppendAppLog("permissions", event);
 }
 
-std::filesystem::path PermissionSetupMarkerPath() {
-    return ComputerCpp::AppDataDir() / "permission-setup-active";
-}
-
-void MarkPermissionSetupActive() {
-    try {
-        std::ofstream marker(PermissionSetupMarkerPath());
-        marker << "active\n";
-    } catch (...) {
-    }
-}
-
-void ClearPermissionSetupActive() {
-    try {
-        std::error_code ec;
-        std::filesystem::remove(PermissionSetupMarkerPath(), ec);
-    } catch (...) {
-    }
-}
-
 bool ResetPermissionsAndRelaunch(wxString* errorMessage = nullptr) {
-    ClearPermissionSetupActive();
     bool allReset = ResetMacPermissionService("All");
     bool accessibilityReset = ResetMacPermissionService("Accessibility");
     bool screenCaptureReset = ResetMacPermissionService("ScreenCapture");
@@ -2533,7 +2512,6 @@ private:
 
     void OnRequestAccessibility(wxCommandEvent&) {
         AppendPermissionTrace("accessibility_button_clicked before_status=" + PermissionStatusSummary(Platform::CheckPermissions(false)));
-        MarkPermissionSetupActive();
         accessibilityResult_ = "Request sent. Use Apple's prompt to open Accessibility settings, enable ComputerCpp, then return here.";
         ApplyStatus(Platform::CheckPermissions(false));
         Platform::RequestAccessibilityPermission();
@@ -2553,7 +2531,6 @@ private:
 
     void OnRequestScreenRecording(wxCommandEvent&) {
         AppendPermissionTrace("screen_button_clicked before_status=" + PermissionStatusSummary(Platform::CheckPermissions(false)));
-        MarkPermissionSetupActive();
         screenResult_ = "Request sent. If ComputerCpp is still missing, use + in Screen Recording and choose the running ComputerCpp.app.";
         ApplyStatus(Platform::CheckPermissions(false));
         Platform::RequestScreenCapturePermission();
@@ -2626,9 +2603,6 @@ private:
         timer_.Stop();
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("permission_dialog_closed status=" + PermissionStatusSummary(status));
-        if (status.accessibility && status.screenCapture) {
-            ClearPermissionSetupActive();
-        }
         Destroy();
     }
 
@@ -2695,9 +2669,7 @@ TrayIcon::TrayIcon() {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
                               " bundle_path=" + ComputerCppBundlePath());
-        if (status.accessibility && status.screenCapture) {
-            ClearPermissionSetupActive();
-        } else {
+        if (!status.accessibility || !status.screenCapture) {
             SetUpPermissionsIfNeeded(false);
         }
     });

@@ -57,5 +57,5 @@ print_existing_build_dir_message() {
   local build_dir="$1"
 
   echo "Using existing CMake build directory: ${build_dir}"
-  echo "Pass --reconfigure if you need to regenerate CMake files."
+  echo "Pass --reconfigure to recreate the build directory from scratch."
 }

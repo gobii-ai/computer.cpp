@@ -1223,23 +1223,47 @@ local function validate_value(schema, value, path, apply_defaults)
 end
 
 local function write_json_file(path, value)
-  local file = assert(io.open(path, "w"))
-  file:write(json.encode(value))
-  file:write("\n")
-  file:close()
+  local file, open_error = io.open(path, "w")
+  if not file then
+    error("could not open " .. tostring(path) .. ": " .. tostring(open_error))
+  end
+  local ok, write_error = file:write(json.encode(value), "\n")
+  if not ok then
+    file:close()
+    os.remove(path)
+    error("could not write " .. tostring(path) .. ": " .. tostring(write_error))
+  end
+  local closed, close_error = file:close()
+  if not closed then
+    os.remove(path)
+    error("could not close " .. tostring(path) .. ": " .. tostring(close_error))
+  end
 end
 
 local function write_bytes_file(path, value)
-  local file = assert(io.open(path, "wb"))
-  file:write(value)
-  file:close()
+  local file, open_error = io.open(path, "wb")
+  if not file then
+    error("could not open " .. tostring(path) .. ": " .. tostring(open_error))
+  end
+  local ok, write_error = file:write(value)
+  if not ok then
+    file:close()
+    os.remove(path)
+    error("could not write " .. tostring(path) .. ": " .. tostring(write_error))
+  end
+  local closed, close_error = file:close()
+  if not closed then
+    os.remove(path)
+    error("could not close " .. tostring(path) .. ": " .. tostring(close_error))
+  end
 end
 
-local function file_exists(path)
-  local file = io.open(path, "rb")
-  if not file then return false end
-  file:close()
-  return true
+local function split_artifact_filename(name)
+  local stem, extension = name:match("^(.*)(%.[^%.]+)$")
+  if not stem or #extension > 16 then
+    return name, ""
+  end
+  return stem, extension
 end
 
 local function artifact_filename(value)
@@ -1249,8 +1273,22 @@ local function artifact_filename(value)
   name = name:gsub("^%.+", "")
   name = name:gsub("%-+", "-")
   if name == "" then name = "artifact.bin" end
-  if #name > 180 then name = name:sub(1, 180) end
-  return name
+  local stem, extension = split_artifact_filename(name)
+  local upper_stem = stem:upper()
+  if upper_stem == "CON" or upper_stem == "PRN" or upper_stem == "AUX" or
+      upper_stem == "NUL" or upper_stem:match("^COM[1-9]$") or
+      upper_stem:match("^LPT[1-9]$") then
+    stem = "_" .. stem
+  end
+  local max_stem_length = math.max(1, 180 - #extension)
+  return stem:sub(1, max_stem_length) .. extension
+end
+
+local function artifact_output_filename(filename, namespace, sequence)
+  local stem, extension = split_artifact_filename(filename)
+  local suffix = "-" .. namespace .. "-" .. tostring(sequence)
+  local max_stem_length = math.max(1, 180 - #extension - #suffix)
+  return stem:sub(1, max_stem_length) .. suffix .. extension
 end
 
 local function read_json_file(path)
@@ -1268,9 +1306,17 @@ end
     out << R"LUA(
 local function make_app_context(command_name, input)
   local operation_dir = context.vars and context.vars.__ac_operation_dir or nil
-  local artifacts_dir = operation_dir and operation_dir ~= ""
-    and (operation_dir .. "/artifacts")
-    or (context.vars and context.vars.__ac_artifacts_dir or nil)
+  local artifacts_dir = context.vars and context.vars.__ac_artifacts_dir or nil
+  local artifacts_dir_error = context.vars and context.vars.__ac_artifacts_dir_error or nil
+  local artifact_namespace = tostring(
+    context.vars and context.vars.__ac_artifact_namespace or "")
+  artifact_namespace = artifact_namespace:gsub("[^%w%-]", "-"):sub(1, 64)
+  if artifact_namespace == "" then
+    artifact_namespace = tostring(os.time()) .. "-" ..
+      tostring({}):gsub("[^%w]", "")
+  end
+  local artifact_sequence = 0
+  local path_separator = package.config:sub(1, 1)
   local ctx = {
     command = command_name,
     input = input,
@@ -1290,30 +1336,46 @@ local function make_app_context(command_name, input)
     trace[#trace + 1] = { kind = "trace", name = tostring(name), value = redacted(value) }
     return value
   end
-  function ctx:artifact(path_or_bytes, metadata)
-    metadata = type(metadata) == "table" and metadata or {}
-    local path = tostring(path_or_bytes or "")
-    local filename = artifact_filename(metadata.filename)
-    if artifacts_dir and artifacts_dir ~= "" and metadata.filename ~= nil then
-      local output_path = artifacts_dir .. "/" .. filename
-      local stem, extension = filename:match("^(.*)(%.[^%.]+)$")
-      stem = stem or filename
-      extension = extension or ""
-      local suffix = 2
-      while file_exists(output_path) do
-        output_path = artifacts_dir .. "/" .. stem .. "-" .. tostring(suffix) .. extension
-        suffix = suffix + 1
-      end
-      local ok, write_error = pcall(write_bytes_file, output_path, path)
+  local function copy_metadata(value)
+    local copy = {}
+    if type(value) == "table" then
+      for key, field in pairs(value) do copy[key] = field end
+    end
+    return copy
+  end
+  local function record_artifact(path, metadata)
+    local entry = { path = path, metadata = metadata }
+    trace[#trace + 1] = { kind = "artifact", value = redacted(entry) }
+    return entry
+  end
+  function ctx:artifact(path, metadata)
+    return record_artifact(tostring(path or ""), copy_metadata(metadata))
+  end
+  function ctx:artifact_bytes(bytes, metadata)
+    metadata = copy_metadata(metadata)
+    local path = ""
+    if not artifacts_dir or artifacts_dir == "" then
+      metadata.writeError = tostring(
+        artifacts_dir_error or "artifact directory is unavailable")
+    else
+      artifact_sequence = artifact_sequence + 1
+      local filename = artifact_output_filename(
+        artifact_filename(metadata.filename),
+        artifact_namespace,
+        artifact_sequence)
+      local output_path = artifacts_dir .. path_separator .. filename
+      local ok, write_error = pcall(
+        write_bytes_file,
+        output_path,
+        tostring(bytes or ""))
       if ok then
         path = output_path
       else
         metadata.writeError = tostring(write_error)
+        os.remove(output_path)
       end
     end
-    local entry = { path = path, metadata = metadata }
-    trace[#trace + 1] = { kind = "artifact", value = redacted(entry) }
-    return entry
+    return record_artifact(path, metadata)
   end
   function ctx:screenshot(options)
     return ac.screenshot(nil, options or {})

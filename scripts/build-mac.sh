@@ -13,6 +13,7 @@ RECONFIGURE=0
 LAUNCH=0
 VERIFY=0
 RELEASE=0
+BUILD_DIR_EXPLICIT=0
 
 usage() {
   cat >&2 <<EOF
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       BUILD_DIR="$2"
+      BUILD_DIR_EXPLICIT=1
       shift
       ;;
     --config)
@@ -77,6 +79,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "${RELEASE}" == "1" && "${BUILD_DIR_EXPLICIT}" == "0" ]]; then
+  BUILD_DIR="${PROJECT_DIR}/build/release-ninja"
+fi
 
 cd "${PROJECT_DIR}"
 
