@@ -121,6 +121,12 @@ CMAKE_ARGS=(
   -DCOMPUTER_CPP_CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY}"
 )
 
+if brew --prefix curl >/dev/null 2>&1; then
+  CMAKE_ARGS+=(
+    -DCURL_ROOT="$(brew --prefix curl)"
+  )
+fi
+
 if command -v ccache >/dev/null 2>&1; then
   CMAKE_ARGS+=(
     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache

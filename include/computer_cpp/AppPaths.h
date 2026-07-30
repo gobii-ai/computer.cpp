@@ -15,6 +15,7 @@ std::filesystem::path RefStorePath(const std::string& session);
 std::filesystem::path DefaultArtifactDir();
 std::filesystem::path TimelineDir(const std::string& session);
 std::filesystem::path TimelineDbPath(const std::string& session);
+std::filesystem::path InstalledResourcePath(const std::filesystem::path& relative);
 void EnsureDirectory(const std::filesystem::path& path);
 
 }

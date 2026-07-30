@@ -19,6 +19,8 @@ class wxTimer;
 class wxTimerEvent;
 
 namespace ComputerCpp {
+class GobiiConnectionController;
+class ConfiguredServerController;
 struct TrayAppServerState;
 }
 
@@ -33,6 +35,7 @@ public:
     void SetUpPermissionsIfNeeded(bool notifyWhenGranted = true);
 
 private:
+    friend class TrayConfiguredServerController;
     enum class ServerStatus {
         Stopped,
         Starting,
@@ -61,6 +64,7 @@ private:
         std::string path;
         std::string status = "configured";
         std::string error;
+        std::string schemaSha256;
     };
 
     void OnPermissions(wxCommandEvent& event);
@@ -70,6 +74,11 @@ private:
     void OnCheckForUpdates(wxCommandEvent& event);
     void OnStartServer(wxCommandEvent& event);
     void OnStopServer(wxCommandEvent& event);
+    void OnGobiiConnect(wxCommandEvent& event);
+    void OnGobiiStatus(wxCommandEvent& event);
+    void OnGobiiPauseResume(wxCommandEvent& event);
+    void OnGobiiDisconnect(wxCommandEvent& event);
+    void OnGobiiManage(wxCommandEvent& event);
     void OnServerProcessEnded(wxProcessEvent& event);
     void OnServerTimer(wxTimerEvent& event);
     void OnState(wxCommandEvent& event);
@@ -98,7 +107,12 @@ private:
 #endif
     wxDialog* permissionDialog_ = nullptr;
     wxDialog* settingsDialog_ = nullptr;
+    wxDialog* gobiiDialog_ = nullptr;
     std::unique_ptr<TrayUpdateFlow> updateFlow_;
+    std::unique_ptr<ConfiguredServerController>
+        configuredServerController_;
+    std::unique_ptr<GobiiConnectionController>
+        gobiiController_;
     std::unique_ptr<wxTimer> serverTimer_;
     ManagedServer server_;
     std::map<std::string, ConfiguredAppStatus> configuredApps_;

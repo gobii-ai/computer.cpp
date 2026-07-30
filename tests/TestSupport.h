@@ -10,5 +10,6 @@ void RunControlSessionTests();
 void RunDaemonDispatchTests();
 void RunDaemonTests();
 void RunInferenceTests();
+void RunGobiiTests();
 
 }

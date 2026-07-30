@@ -1,0 +1,42 @@
+#pragma once
+
+#include <chrono>
+#include <optional>
+#include <string>
+
+namespace ComputerCpp {
+
+enum class GobiiConnectionState {
+    Disconnected,
+    Pairing,
+    PairingPending,
+    Connecting,
+    Connected,
+    Paused,
+    PermissionsRequired,
+    AuthenticationExpired,
+    UpdateRequired,
+    Error,
+};
+
+struct GobiiConnectionStatus {
+    GobiiConnectionState state = GobiiConnectionState::Disconnected;
+    std::string deviceId;
+    std::string deviceName;
+    std::string agentId;
+    std::string agentName;
+    std::optional<std::chrono::system_clock::time_point> lastConnectedAt;
+    std::optional<std::chrono::system_clock::time_point> lastHeartbeatAt;
+    std::string lastError;
+    std::string installedVersion;
+    std::string requiredVersion;
+    std::string currentOperationName;
+    std::string currentRequestId;
+    int reconnectAttempt = 0;
+};
+
+const char* GobiiConnectionStateName(GobiiConnectionState state);
+std::optional<std::chrono::system_clock::time_point>
+ParseGobiiTimestamp(const std::string& value);
+
+} // namespace ComputerCpp

@@ -3,6 +3,18 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#elif defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -44,6 +56,37 @@ void EnsurePrivateDirectory(const fs::path& path) {
         fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace, ec);
     }
 #endif
+}
+
+fs::path CurrentExecutablePath() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string value(size, '\0');
+    if (_NSGetExecutablePath(value.data(), &size) == 0) {
+        return fs::path(value.c_str());
+    }
+#elif defined(_WIN32)
+    std::wstring value(32768, L'\0');
+    DWORD size = GetModuleFileNameW(
+        nullptr,
+        value.data(),
+        static_cast<DWORD>(value.size()));
+    if (size > 0 && size < value.size()) {
+        value.resize(size);
+        return fs::path(value);
+    }
+#elif defined(__linux__)
+    std::vector<char> value(4096, '\0');
+    const ssize_t size = ::readlink(
+        "/proc/self/exe",
+        value.data(),
+        value.size() - 1);
+    if (size > 0) {
+        return fs::path(std::string(value.data(), static_cast<size_t>(size)));
+    }
+#endif
+    return {};
 }
 
 }
@@ -136,6 +179,44 @@ fs::path TimelineDir(const std::string& session) {
 
 fs::path TimelineDbPath(const std::string& session) {
     return TimelineDir(session) / "timeline.sqlite";
+}
+
+fs::path InstalledResourcePath(const fs::path& relative) {
+    std::vector<fs::path> roots;
+    if (const char* overrideDir =
+            std::getenv("COMPUTER_CPP_RESOURCE_DIR")) {
+        if (*overrideDir != '\0') {
+            roots.emplace_back(overrideDir);
+        }
+    }
+
+    const fs::path executable = CurrentExecutablePath();
+    if (!executable.empty()) {
+        const fs::path executableDir = executable.parent_path();
+#if defined(__APPLE__)
+        roots.push_back(executableDir.parent_path() / "Resources");
+        roots.push_back(
+            executableDir / "ComputerCpp.app" / "Contents" / "Resources");
+#elif defined(_WIN32)
+        roots.push_back(executableDir / "share" / "computer.cpp");
+        roots.push_back(executableDir.parent_path() / "share" / "computer.cpp");
+#else
+        roots.push_back(executableDir.parent_path() / "share" / "computer.cpp");
+#endif
+    }
+#ifdef COMPUTER_CPP_SOURCE_DIR
+    roots.emplace_back(
+        fs::path(COMPUTER_CPP_SOURCE_DIR) / "resources");
+#endif
+
+    for (const auto& root : roots) {
+        const fs::path candidate = root / relative;
+        std::error_code ec;
+        if (fs::is_regular_file(candidate, ec) && !ec) {
+            return candidate;
+        }
+    }
+    return {};
 }
 
 }

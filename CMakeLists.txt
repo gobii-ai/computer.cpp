@@ -12,6 +12,23 @@ option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
 option(COMPUTER_CPP_BUILD_GUI "Build the ComputerCpp desktop tray application when wxWidgets is available" ON)
 option(COMPUTER_CPP_BUNDLE_LUA "Copy a Lua executable beside Windows build and install artifacts" ON)
+option(COMPUTER_CPP_ENABLE_GOBII_BETA "Enable the gated Gobii connection UI and runtime" OFF)
+option(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES "Allow development-only inline Gobii images up to 128 KiB" OFF)
+
+if(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES AND NOT COMPUTER_CPP_ENABLE_GOBII_BETA)
+    message(FATAL_ERROR "COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES requires COMPUTER_CPP_ENABLE_GOBII_BETA")
+endif()
+if(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES
+   AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+        "COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES is forbidden in Release builds")
+endif()
+if(COMPUTER_CPP_ENABLE_GOBII_BETA
+   AND NOT COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES
+   AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+        "Production Gobii enablement is gated until the authenticated artifact upload contract is implemented")
+endif()
 
 if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
@@ -58,6 +75,25 @@ endif()
 find_package(CURL REQUIRED COMPONENTS HTTPS SSL)
 find_package(ZLIB REQUIRED)
 
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_LIBRARIES CURL::libcurl)
+check_cxx_source_compiles(
+    "#include <curl/curl.h>
+     int main() {
+       CURL* handle = nullptr;
+       size_t count = 0;
+       const curl_ws_frame* frame = nullptr;
+       (void)curl_ws_send(handle, nullptr, 0, &count, 0, CURLWS_TEXT);
+       (void)curl_ws_recv(handle, nullptr, 0, &count, &frame);
+       return 0;
+     }"
+    COMPUTER_CPP_CURL_HAS_WEBSOCKET_API
+)
+unset(CMAKE_REQUIRED_LIBRARIES)
+if(NOT COMPUTER_CPP_CURL_HAS_WEBSOCKET_API)
+    message(FATAL_ERROR "computer.cpp requires libcurl WebSocket APIs")
+endif()
+
 include(FetchContent)
 find_package(nlohmann_json CONFIG QUIET)
 if(NOT nlohmann_json_FOUND)
@@ -99,6 +135,15 @@ string(TIMESTAMP COMPUTER_CPP_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
 add_library(computer_cpp_core
     src/core/AppPaths.cpp
     src/core/AppConfig.cpp
+    src/core/GobiiApiClient.cpp
+    src/core/GobiiArtifactUploader.cpp
+    src/core/GobiiConnectionController.cpp
+    src/core/GobiiCredentialStore.cpp
+    src/core/GobiiLocalMcpClient.cpp
+    src/core/GobiiPairingClient.cpp
+    src/core/GobiiRelayClient.cpp
+    src/core/GobiiRelayProtocol.cpp
+    src/core/GobiiTypes.cpp
     src/core/Image.cpp
     src/core/ControlSessionAcquire.cpp
     src/core/ControlSession.cpp
@@ -118,6 +163,7 @@ add_library(computer_cpp_core
     src/core/NativeDeps.cpp
     src/core/RefStore.cpp
     src/core/RuntimeProvenance.cpp
+    src/core/Sha256.cpp
     src/core/Sqlite.cpp
     src/core/StringUtils.cpp
     src/core/Timeline.cpp
@@ -166,7 +212,15 @@ target_compile_definitions(computer_cpp_core
         COMPUTER_CPP_BUILD_TIMESTAMP="${COMPUTER_CPP_BUILD_TIMESTAMP}"
         COMPUTER_CPP_PROJECT_VERSION="${PROJECT_VERSION}"
         COMPUTER_CPP_GITHUB_REPOSITORY="gobii-ai/computer.cpp"
+        COMPUTER_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+if(COMPUTER_CPP_ENABLE_GOBII_BETA)
+    target_compile_definitions(computer_cpp_core PUBLIC COMPUTER_CPP_ENABLE_GOBII_BETA=1)
+endif()
+if(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
+    target_compile_definitions(computer_cpp_core PUBLIC COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES=1)
+endif()
 
 target_link_libraries(computer_cpp_core
     PUBLIC
@@ -182,6 +236,8 @@ if(APPLE)
         PRIVATE
             src/platform/macos/PlatformMac.mm
             src/platform/macos/ScreenRecordingMac.mm
+            src/platform/macos/GobiiCredentialStoreMac.mm
+            src/platform/macos/GobiiStartupRegistrationMac.mm
     )
 
     find_library(APPKIT_LIBRARY AppKit REQUIRED)
@@ -194,6 +250,8 @@ if(APPLE)
     find_library(IMAGEIO_LIBRARY ImageIO REQUIRED)
     find_library(IOKIT_LIBRARY IOKit REQUIRED)
     find_library(SCREENCAPTUREKIT_LIBRARY ScreenCaptureKit REQUIRED)
+    find_library(SECURITY_LIBRARY Security REQUIRED)
+    find_library(SERVICEMANAGEMENT_LIBRARY ServiceManagement REQUIRED)
 
     target_link_libraries(computer_cpp_core
         PUBLIC
@@ -207,15 +265,20 @@ if(APPLE)
             ${IMAGEIO_LIBRARY}
             ${IOKIT_LIBRARY}
             ${SCREENCAPTUREKIT_LIBRARY}
+            ${SECURITY_LIBRARY}
+            ${SERVICEMANAGEMENT_LIBRARY}
     )
 elseif(WIN32)
     target_sources(computer_cpp_core PRIVATE
         src/platform/windows/PlatformWindows.cpp
         src/platform/windows/ScreenRecordingWindows.cpp
+        src/platform/windows/GobiiCredentialStoreWindows.cpp
+        src/platform/windows/GobiiStartupRegistrationWindows.cpp
     )
     target_link_libraries(computer_cpp_core
         PUBLIC
             comctl32
+            advapi32
             gdi32
             mf
             mfplat
@@ -234,6 +297,8 @@ elseif(UNIX)
         src/platform/linux/LinuxPng.cpp
         src/platform/linux/PlatformLinux.cpp
         src/platform/linux/ScreenRecordingLinux.cpp
+        src/platform/linux/GobiiCredentialStoreLinux.cpp
+        src/platform/linux/GobiiStartupRegistrationLinux.cpp
     )
     find_package(X11 REQUIRED COMPONENTS Xtst)
     target_link_libraries(computer_cpp_core PUBLIC ${X11_LIBRARIES} ${X11_Xtst_LIB})
@@ -317,6 +382,7 @@ endif()
 if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
     add_executable(ComputerCpp MACOSX_BUNDLE
         src/app/Main.cpp
+        src/app/GobiiConnectionDialog.cpp
         src/app/TrayIcon.cpp
         src/app/UpdateFlow.cpp
     )
@@ -358,6 +424,10 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
 
         add_custom_command(TARGET ComputerCpp POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:computer.cpp>" "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/MacOS/computer.cpp"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/Resources/apps"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/resources/apps/gobii-desktop.lua"
+                "$<TARGET_BUNDLE_DIR:ComputerCpp>/Contents/Resources/apps/gobii-desktop.lua"
             VERBATIM
         )
 
@@ -421,6 +491,11 @@ if(wxWidgets_FOUND AND COMPUTER_CPP_BUILD_GUI)
         endif()
     endif()
 endif()
+
+install(
+    FILES resources/apps/gobii-desktop.lua
+    DESTINATION share/computer.cpp/apps
+)
 
 if(WIN32 AND COMPUTER_CPP_BUNDLE_LUA)
     find_package(unofficial-lua CONFIG QUIET)
@@ -505,6 +580,7 @@ if(BUILD_TESTING)
         tests/DaemonDispatchTests.cpp
         tests/DaemonTests.cpp
         tests/InferenceTests.cpp
+        tests/GobiiTests.cpp
         tests/TestSupport.cpp
     )
 

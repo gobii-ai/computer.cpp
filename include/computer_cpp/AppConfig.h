@@ -36,7 +36,7 @@ struct ServerAppConfig {
 };
 
 struct ServerConfig {
-    std::string host = "0.0.0.0";
+    std::string host = "127.0.0.1";
     int port = 8787;
     std::string authToken;
     std::vector<std::string> allowedOrigins;
@@ -50,6 +50,19 @@ struct RecordingConfig {
     int retentionDays = 14;
 };
 
+struct GobiiConfig {
+    std::string baseUrl = "https://gobii.ai";
+    std::string deviceId;
+    std::string deviceName;
+    std::string assignedAgentId;
+    std::string assignedAgentName;
+    std::string requiredVersion;
+    std::string updateRequiredInstalledVersion;
+    bool autoConnect = true;
+    bool startAtLogin = false;
+    bool paused = false;
+};
+
 struct AppConfig {
     int version = 1;
     std::string defaultProfile = "main";
@@ -57,6 +70,7 @@ struct AppConfig {
     std::map<std::string, LlmProfileConfig> profiles;
     ServerConfig server;
     RecordingConfig recording;
+    GobiiConfig gobii;
 };
 
 AppConfig DefaultAppConfig();
@@ -82,5 +96,6 @@ bool ImportLegacyInferenceEnv(AppConfig& config, std::string* warning = nullptr,
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error = nullptr);
 std::string GenerateServerAuthToken();
 bool EnsureServerAuthToken(AppConfig& config);
+bool EnsureGobiiDesktopApp(AppConfig& config, std::string* error = nullptr);
 
 } // namespace ComputerCpp

@@ -39,6 +39,7 @@ Daemon:
   config set-profile <name> ...       Configure model and sampling defaults
   config import-env                   One-time import from legacy LLM env vars
   config test [profile] [--live]      Validate or test configured inference
+  gobii diagnose                      Read-only Gobii runtime, credential, and resource checks
 
 Control Session:
   session acquire [--owner n] [--purpose t] [--ttl 10m] [--wait 2m] [--max 4h]

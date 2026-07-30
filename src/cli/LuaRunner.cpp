@@ -348,7 +348,8 @@ fs::path TempPreludePath() {
 int RunChildProcess(
     const std::vector<std::string>& args,
     bool agentStdio,
-    ManagedControlSession* managedControlSession
+    ManagedControlSession* managedControlSession,
+    int64_t executionTimeoutMs
 ) {
 #if defined(__unix__) || defined(__APPLE__)
     Cli::PosixArgv argv(args);
@@ -368,6 +369,7 @@ int RunChildProcess(
     }
 
     int status = 0;
+    const auto startedAt = std::chrono::steady_clock::now();
     while (true) {
         pid_t waited = ::waitpid(pid, &status, WNOHANG);
         if (waited == pid) {
@@ -385,6 +387,14 @@ int RunChildProcess(
             while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
             return 6;
+        }
+        if (executionTimeoutMs > 0 &&
+            std::chrono::steady_clock::now() - startedAt >=
+                std::chrono::milliseconds(executionTimeoutMs)) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            return 124;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -411,6 +421,7 @@ int RunChildProcess(
         std::cerr << "Error: failed to start Lua interpreter: " << args[0] << "\n";
         return 127;
     }
+    const auto startedAt = std::chrono::steady_clock::now();
     while (true) {
         DWORD wait = WaitForSingleObject(processInfo.hProcess, 100);
         if (wait == WAIT_OBJECT_0) {
@@ -426,6 +437,13 @@ int RunChildProcess(
             WaitForSingleObject(processInfo.hProcess, INFINITE);
             break;
         }
+        if (executionTimeoutMs > 0 &&
+            std::chrono::steady_clock::now() - startedAt >=
+                std::chrono::milliseconds(executionTimeoutMs)) {
+            TerminateProcess(processInfo.hProcess, 124);
+            WaitForSingleObject(processInfo.hProcess, INFINITE);
+            break;
+        }
     }
     int exitCode = Windows::ProcessExitCode(processInfo.hProcess);
     CloseHandle(processInfo.hThread);
@@ -435,6 +453,7 @@ int RunChildProcess(
     (void)args;
     (void)agentStdio;
     (void)managedControlSession;
+    (void)executionTimeoutMs;
     std::cerr << "Error: Lua runner is not implemented on this platform yet\n";
     return 1;
 #endif
@@ -454,7 +473,8 @@ LuaRunResult RunChildProcessCapture(
     const std::vector<std::string>& args,
     bool agentStdio,
     bool streamStderr,
-    ManagedControlSession* managedControlSession
+    ManagedControlSession* managedControlSession,
+    int64_t executionTimeoutMs
 ) {
     LuaRunResult result;
 #if defined(__unix__) || defined(__APPLE__)
@@ -500,6 +520,8 @@ LuaRunResult RunChildProcessCapture(
 
     int status = 0;
     bool waitedSuccessfully = false;
+    bool timedOut = false;
+    const auto startedAt = std::chrono::steady_clock::now();
     while (true) {
         pid_t waited = ::waitpid(pid, &status, WNOHANG);
         if (waited == pid) {
@@ -521,9 +543,22 @@ LuaRunResult RunChildProcessCapture(
             result.exitCode = 6;
             break;
         }
+        if (executionTimeoutMs > 0 &&
+            std::chrono::steady_clock::now() - startedAt >=
+                std::chrono::milliseconds(executionTimeoutMs)) {
+            ::kill(pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            result.exitCode = 124;
+            timedOut = true;
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    if (waitedSuccessfully && WIFEXITED(status)) {
+    if (timedOut) {
+        result.stderrText =
+            "Error: Lua runner exceeded its execution deadline\n";
+    } else if (waitedSuccessfully && WIFEXITED(status)) {
         result.exitCode = WEXITSTATUS(status);
     } else if (waitedSuccessfully && WIFSIGNALED(status)) {
         result.exitCode = 128 + WTERMSIG(status);
@@ -605,6 +640,8 @@ LuaRunResult RunChildProcessCapture(
         result.exitCode = 127;
         result.stderrText = "Error: failed to start Lua interpreter: " + args[0] + "\n";
     } else {
+        const auto startedAt = std::chrono::steady_clock::now();
+        bool timedOut = false;
         while (true) {
             DWORD wait = WaitForSingleObject(processInfo.hProcess, 100);
             if (wait == WAIT_OBJECT_0) {
@@ -620,8 +657,21 @@ LuaRunResult RunChildProcessCapture(
                 WaitForSingleObject(processInfo.hProcess, INFINITE);
                 break;
             }
+            if (executionTimeoutMs > 0 &&
+                std::chrono::steady_clock::now() - startedAt >=
+                    std::chrono::milliseconds(executionTimeoutMs)) {
+                TerminateProcess(processInfo.hProcess, 124);
+                WaitForSingleObject(processInfo.hProcess, INFINITE);
+                timedOut = true;
+                break;
+            }
         }
         result.exitCode = Windows::ProcessExitCode(processInfo.hProcess);
+        if (timedOut) {
+            result.exitCode = 124;
+            result.stderrText =
+                "Error: Lua runner exceeded its execution deadline\n";
+        }
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
     }
@@ -644,6 +694,7 @@ LuaRunResult RunChildProcessCapture(
     (void)agentStdio;
     (void)streamStderr;
     (void)managedControlSession;
+    (void)executionTimeoutMs;
     result.exitCode = 1;
     result.stderrText = "Error: Lua runner is not implemented on this platform yet\n";
     return result;
@@ -710,12 +761,14 @@ LuaRunResult RunLuaScriptInternal(const LuaRunOptions& options, bool capture, bo
             args,
             effectiveOptions.agentStdio,
             streamStderr,
-            managedControlSession.token().empty() ? nullptr : &managedControlSession);
+            managedControlSession.token().empty() ? nullptr : &managedControlSession,
+            effectiveOptions.executionTimeoutMs);
     } else {
         result.exitCode = RunChildProcess(
             args,
             effectiveOptions.agentStdio,
-            managedControlSession.token().empty() ? nullptr : &managedControlSession);
+            managedControlSession.token().empty() ? nullptr : &managedControlSession,
+            effectiveOptions.executionTimeoutMs);
     }
     std::error_code ec;
     fs::remove(prelude, ec);

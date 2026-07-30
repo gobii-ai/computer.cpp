@@ -22,6 +22,7 @@ struct LuaRunOptions {
     int64_t leaseTtlMs = 10 * 60 * 1000;
     int64_t leaseWaitMs = 0;
     int64_t leaseMaxRuntimeMs = 4 * 60 * 60 * 1000LL;
+    int64_t executionTimeoutMs = 0;
     bool dryRun = false;
     bool agentStdio = false;
     bool jsonOutput = false;

@@ -2265,6 +2265,17 @@ function ac.tool_result.invalid(message, code)
   return ac.tool_result.error({ code = code or "invalid_input", message = message or "invalid input" })
 end
 
+ac.mcp = {}
+function ac.mcp.result(spec)
+  spec = spec or {}
+  return {
+    __ac_mcp_result = true,
+    text = tostring(spec.text or ""),
+    structured = spec.structured or {},
+    images = spec.images or {},
+  }
+end
+
 ac.tool = {}
 function ac.tool.define(name, spec)
   if type(name) ~= "string" or name == "" then

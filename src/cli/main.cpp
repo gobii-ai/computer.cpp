@@ -1,5 +1,8 @@
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/ControlSession.h"
+#include "computer_cpp/AppPaths.h"
+#include "computer_cpp/GobiiApiClient.h"
+#include "computer_cpp/GobiiCredentialStore.h"
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/Transport.h"
 
@@ -146,6 +149,66 @@ int main(int argc, char** argv) {
 
     if (args[0] == "config") {
         return ComputerCpp::Cli::HandleConfigCommand(options, args);
+    }
+
+    if (args[0] == "gobii") {
+        if (args.size() != 2 || args[1] != "diagnose") {
+            return ErrorExit(
+                "gobii requires `diagnose`", 2);
+        }
+        std::string websocketError;
+        const bool websocket =
+            ComputerCpp::GobiiWebSocketRuntimeSupported(
+                &websocketError);
+        auto credentials =
+            ComputerCpp::CreateGobiiCredentialStore();
+        std::string credentialError;
+        const bool credentialStore =
+            credentials->Available(&credentialError);
+        const auto app = ComputerCpp::InstalledResourcePath(
+            "apps/gobii-desktop.lua");
+        json diagnosis = {
+            {"platformSupported",
+#if defined(__APPLE__) || defined(_WIN32)
+                true
+#else
+                false
+#endif
+            },
+            {"betaEnabled",
+#if defined(COMPUTER_CPP_ENABLE_GOBII_BETA)
+                true
+#else
+                false
+#endif
+            },
+            {"developmentInlineImages",
+#if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
+                true
+#else
+                false
+#endif
+            },
+            {"artifactUploadsAvailable", false},
+            {"websocketSupported", websocket},
+            {"websocketError", websocketError},
+            {"credentialStoreAvailable", credentialStore},
+            {"credentialStoreError", credentialError},
+            {"gobiiDesktopAppFound", !app.empty()},
+            {"gobiiDesktopAppPath",
+                app.empty() ? json(nullptr) : json(app.string())},
+        };
+        diagnosis["ready"] =
+            diagnosis["platformSupported"].get<bool>() &&
+            diagnosis["betaEnabled"].get<bool>() &&
+            websocket &&
+            credentialStore &&
+            !app.empty() &&
+            diagnosis["artifactUploadsAvailable"].get<bool>() &&
+            !diagnosis["developmentInlineImages"].get<bool>();
+        std::cout << diagnosis.dump(
+            options.jsonOutput ? 2 : -1) << "\n";
+        return diagnosis["ready"].get<bool>() ? 0 : 1;
     }
 
     if (args[0] == "run") {

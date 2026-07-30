@@ -6,6 +6,7 @@
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/LuaRunner.h"
+#include "computer_cpp/Sha256.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/TrayServerState.h"
 #include "computer_cpp/WindowsUtil.h"
@@ -19,12 +20,14 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -779,7 +782,9 @@ std::optional<json> RunAppCommand(
     const std::optional<bool>& recordingEnabledOverride,
     const std::optional<std::string>& recordingIdOverride,
     json* recordingOut,
-    std::string& error
+    std::string& error,
+    std::optional<int64_t> leaseWaitOverride = std::nullopt,
+    int64_t executionTimeoutMs = 0
 ) {
     constexpr int64_t kAppCommandLeaseTtlMs = 60 * 1000;
     constexpr int64_t kAppCommandQueueWaitMs = 60 * 60 * 1000;
@@ -833,9 +838,11 @@ std::optional<json> RunAppCommand(
             (operationDir.has_value() ? ":" + operationDir->filename().string() : "");
         lua.leasePurpose = "run " + commandName;
         lua.leaseTtlMs = kAppCommandLeaseTtlMs;
-        lua.leaseWaitMs = kAppCommandQueueWaitMs;
+        lua.leaseWaitMs =
+            leaseWaitOverride.value_or(kAppCommandQueueWaitMs);
         lua.leaseMaxRuntimeMs = kAppCommandMaxRuntimeMs;
     }
+    lua.executionTimeoutMs = executionTimeoutMs;
     lua.vars["__ac_app_command"] = commandName;
     lua.vars["__ac_app_input_json"] = input.dump();
     lua.vars["__ac_artifact_namespace"] = NewOperationId();
@@ -853,6 +860,22 @@ std::optional<json> RunAppCommand(
         lua.vars["__ac_operation_dir"] = operationDir->string();
     }
     LuaRunResult result = RunLuaScriptCapture(lua, true);
+    if (result.exitCode == 124) {
+        return json{
+            {"ok", false},
+            {"code", "deadline_exceeded"},
+            {"error",
+                "execution deadline exceeded; completion may be unknown"},
+        };
+    }
+    if (result.exitCode == 6 &&
+        result.stdoutText.empty()) {
+        return json{
+            {"ok", false},
+            {"code", "busy"},
+            {"error", "desktop control is currently busy"},
+        };
+    }
     auto parsed = ParseJsonOutput(result, error);
     std::string commandStatus = "failed";
     if (parsed) {
@@ -2372,7 +2395,110 @@ json McpTextContent(std::string text) {
     };
 }
 
+std::string Base64Encode(const std::string& input) {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string output;
+    output.reserve(((input.size() + 2) / 3) * 4);
+    for (size_t index = 0; index < input.size(); index += 3) {
+        const uint32_t first =
+            static_cast<unsigned char>(input[index]);
+        const uint32_t second = index + 1 < input.size()
+            ? static_cast<unsigned char>(input[index + 1])
+            : 0;
+        const uint32_t third = index + 2 < input.size()
+            ? static_cast<unsigned char>(input[index + 2])
+            : 0;
+        const uint32_t combined =
+            (first << 16) | (second << 8) | third;
+        output.push_back(kAlphabet[(combined >> 18) & 0x3f]);
+        output.push_back(kAlphabet[(combined >> 12) & 0x3f]);
+        output.push_back(index + 1 < input.size()
+            ? kAlphabet[(combined >> 6) & 0x3f]
+            : '=');
+        output.push_back(index + 2 < input.size()
+            ? kAlphabet[combined & 0x3f]
+            : '=');
+    }
+    return output;
+}
+
+std::optional<json> McpImageContent(
+    const json& image,
+    std::string& error
+) {
+    if (!image.is_object() ||
+        !image.contains("path") ||
+        !image["path"].is_string() ||
+        !image.contains("mime_type") ||
+        !image["mime_type"].is_string()) {
+        error = "MCP image requires path and mime_type";
+        return std::nullopt;
+    }
+    const std::string mime = image["mime_type"].get<std::string>();
+    if (mime != "image/png" && mime != "image/jpeg") {
+        error = "MCP image mime_type must be image/png or image/jpeg";
+        return std::nullopt;
+    }
+    const fs::path path = image["path"].get<std::string>();
+    std::error_code ec;
+    const uintmax_t size = fs::file_size(path, ec);
+    if (ec || size == 0 || size > 8 * 1024 * 1024) {
+        error = "MCP image is missing, empty, or too large";
+        return std::nullopt;
+    }
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "MCP image could not be read";
+        return std::nullopt;
+    }
+    std::string bytes{
+        std::istreambuf_iterator<char>(file),
+        std::istreambuf_iterator<char>()};
+    return json{
+        {"type", "image"},
+        {"data", Base64Encode(bytes)},
+        {"mimeType", mime},
+    };
+}
+
 json McpToolSuccessResult(const json& result, const json& recording = json::object()) {
+    if (result.is_object() &&
+        result.value("__ac_mcp_result", false)) {
+        json content = json::array();
+        const std::string text = result.value("text", "");
+        if (!text.empty()) {
+            content.push_back(McpTextContent(text));
+        }
+        std::string imageError;
+        if (result.contains("images") && result["images"].is_array()) {
+            for (const auto& image : result["images"]) {
+                auto item = McpImageContent(image, imageError);
+                if (!item) {
+                    json out = {
+                        {"content", json::array({
+                            McpTextContent(
+                                "invalid_image: " + imageError)
+                        })},
+                        {"isError", true},
+                    };
+                    AttachMcpRecordingMetadata(out, recording);
+                    return out;
+                }
+                content.push_back(std::move(*item));
+            }
+        }
+        json out = {
+            {"content", std::move(content)},
+            {"isError", false},
+        };
+        if (result.contains("structured") &&
+            result["structured"].is_object()) {
+            out["structuredContent"] = result["structured"];
+        }
+        AttachMcpRecordingMetadata(out, recording);
+        return out;
+    }
     json out = {
         {"content", json::array({McpTextContent(result.is_string() ? result.get<std::string>() : result.dump(2))})},
         {"isError", false}
@@ -2404,7 +2530,9 @@ bool HandleMcpJsonRpcRequest(
     const AppServeOptions& serveOptions,
     const json& schema,
     const json& message,
-    const ConfiguredServerContext* configured = nullptr
+    const ConfiguredServerContext* configured = nullptr,
+    std::optional<int64_t> leaseWaitOverride = std::nullopt,
+    int64_t executionTimeoutMs = 0
 ) {
     const json id = JsonRpcIdOrNull(message);
     const std::string method = message.value("method", "");
@@ -2473,7 +2601,10 @@ bool HandleMcpJsonRpcRequest(
                 executablePath,
                 routedOptions,
                 app.schema,
-                routedMessage);
+                routedMessage,
+                nullptr,
+                leaseWaitOverride,
+                executionTimeoutMs);
         }
         json arguments = json::object();
         if (params.contains("arguments")) {
@@ -2605,7 +2736,9 @@ bool HandleMcpJsonRpcRequest(
             std::nullopt,
             std::nullopt,
             &recording,
-            error);
+            error,
+            leaseWaitOverride,
+            executionTimeoutMs);
         if (!payload) {
             AppendServerRuntimeLog(serveOptions, "mcp_tool_failed", {
                 {"tool", toolName},
@@ -2642,6 +2775,7 @@ template <typename Handler>
 bool HandleMcpTransportRequest(
     AppSocket fd,
     const HttpRequest& request,
+    bool allowInternalControlHints,
     Handler&& handler
 ) {
     if (request.method == "GET") {
@@ -2696,7 +2830,35 @@ bool HandleMcpTransportRequest(
     if (!ValidJsonRpcId(message["id"])) {
         return SendJsonRpcError(fd, 400, nullptr, -32600, "JSON-RPC request id must be a string or integer");
     }
-    return handler(message);
+    std::optional<int64_t> leaseWaitOverride;
+    int64_t executionTimeoutMs = 0;
+    if (allowInternalControlHints) {
+        const auto queue = request.headers.find(
+            "x-computercpp-control-queue");
+        if (queue != request.headers.end() &&
+            queue->second == "reject") {
+            leaseWaitOverride = 0;
+        }
+        const auto deadline = request.headers.find(
+            "x-computercpp-deadline-ms");
+        if (deadline != request.headers.end()) {
+            int64_t parsed = 0;
+            if (!ParseInteger(deadline->second, parsed) ||
+                parsed <= 0 || parsed > 24LL * 60 * 60 * 1000) {
+                return SendJsonRpcError(
+                    fd,
+                    400,
+                    id,
+                    -32602,
+                    "invalid internal execution deadline");
+            }
+            executionTimeoutMs = parsed;
+        }
+    }
+    return handler(
+        message,
+        leaseWaitOverride,
+        executionTimeoutMs);
 }
 
 bool HandleMcpRequest(
@@ -2710,14 +2872,20 @@ bool HandleMcpRequest(
     return HandleMcpTransportRequest(
         fd,
         request,
-        [&](const json& message) {
+        serveOptions.configured && !serveOptions.authToken.empty(),
+        [&](const json& message,
+            std::optional<int64_t> leaseWaitOverride,
+            int64_t executionTimeoutMs) {
             return HandleMcpJsonRpcRequest(
                 fd,
                 options,
                 executablePath,
                 serveOptions,
                 schema,
-                message);
+                message,
+                nullptr,
+                leaseWaitOverride,
+                executionTimeoutMs);
         });
 }
 
@@ -2732,7 +2900,10 @@ bool HandleConfiguredMcpRequest(
     return HandleMcpTransportRequest(
         fd,
         request,
-        [&](const json& message) {
+        !serveOptions.authToken.empty(),
+        [&](const json& message,
+            std::optional<int64_t> leaseWaitOverride,
+            int64_t executionTimeoutMs) {
             return HandleMcpJsonRpcRequest(
                 fd,
                 options,
@@ -2740,7 +2911,9 @@ bool HandleConfiguredMcpRequest(
                 serveOptions,
                 json::object(),
                 message,
-                &configured);
+                &configured,
+                leaseWaitOverride,
+                executionTimeoutMs);
         });
 }
 
@@ -3032,6 +3205,10 @@ json ConfiguredAppsHealth(const ConfiguredAppRegistry& apps) {
             {"appId", app.ready() ? json(app.appId) : json(nullptr)},
             {"path", app.appPath.string()},
             {"error", app.ready() ? json(nullptr) : json(app.error)},
+            {"schemaSha256",
+                app.ready()
+                ? json(Sha256Hex(app.schema.dump()))
+                : json(nullptr)},
         };
     }
     return result;

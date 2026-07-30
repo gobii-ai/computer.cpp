@@ -69,14 +69,14 @@ void TestAppConfigServerRoundTrip() {
     std::string missingError;
     ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
     assert(missingError.empty());
-    assert(missing.server.host == "0.0.0.0");
+    assert(missing.server.host == "127.0.0.1");
     assert(missing.server.port == 8787);
     assert(missing.server.apps.empty());
     assert(!missing.recording.enabled);
     assert(missing.recording.retentionDays == 14);
 
     ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
-    assert(defaults.server.host == "0.0.0.0");
+    assert(defaults.server.host == "127.0.0.1");
     assert(defaults.server.port == 8787);
     assert(defaults.server.authToken.empty());
 
@@ -1079,6 +1079,7 @@ int main() {
     RunTest("ImageUtilities", TestImageUtilities);
     RunTest("HumanInputPlans", TestHumanInputPlans);
     RunTest("InferenceTests", ComputerCpp::Tests::RunInferenceTests);
+    RunTest("GobiiTests", ComputerCpp::Tests::RunGobiiTests);
     RunTest("ControlSessionTests", ComputerCpp::Tests::RunControlSessionTests);
     RunTest("DaemonTests", ComputerCpp::Tests::RunDaemonTests);
     RunTest("DaemonDispatchTests", ComputerCpp::Tests::RunDaemonDispatchTests);

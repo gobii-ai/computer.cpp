@@ -431,6 +431,7 @@ AppConfig LoadAppConfig(
     config.profiles.clear();
     config.server = ServerConfig{};
     config.recording = RecordingConfig{};
+    config.gobii = GobiiConfig{};
     config.version = static_cast<int>(parsed["version"].value_or<int64_t>(1));
     config.defaultProfile = parsed["default_profile"].value_or("main");
 
@@ -539,6 +540,41 @@ AppConfig LoadAppConfig(
         }
     }
 
+    if (auto gobii = parsed["gobii"].as_table()) {
+        config.gobii.baseUrl =
+            TomlString(*gobii, "base_url", config.gobii.baseUrl);
+        config.gobii.deviceId = TomlString(*gobii, "device_id");
+        config.gobii.deviceName = TomlString(*gobii, "device_name");
+        config.gobii.assignedAgentId =
+            TomlString(*gobii, "assigned_agent_id");
+        config.gobii.assignedAgentName =
+            TomlString(*gobii, "assigned_agent_name");
+        config.gobii.requiredVersion =
+            TomlString(*gobii, "required_version");
+        config.gobii.updateRequiredInstalledVersion =
+            TomlString(*gobii, "update_required_installed_version");
+        config.gobii.autoConnect =
+            (*gobii)["auto_connect"].value_or(true);
+        config.gobii.startAtLogin =
+            (*gobii)["start_at_login"].value_or(false);
+        config.gobii.paused = (*gobii)["paused"].value_or(false);
+    }
+
+    const bool secureGobiiUrl =
+        config.gobii.baseUrl.rfind("https://", 0) == 0;
+#if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
+    const bool developmentGobiiUrl =
+        config.gobii.baseUrl.rfind("http://", 0) == 0;
+#else
+    const bool developmentGobiiUrl = false;
+#endif
+    if (!secureGobiiUrl && !developmentGobiiUrl) {
+        if (error) {
+            *error = "gobii.base_url must use https";
+        }
+        return {};
+    }
+
     if (config.providers.empty()) {
         config.providers = DefaultAppConfig().providers;
     }
@@ -624,6 +660,19 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
         {"includesCursor", true},
         {"includesAudio", false},
     };
+    out["gobii"] = {
+        {"baseUrl", config.gobii.baseUrl},
+        {"deviceId", config.gobii.deviceId},
+        {"deviceName", config.gobii.deviceName},
+        {"assignedAgentId", config.gobii.assignedAgentId},
+        {"assignedAgentName", config.gobii.assignedAgentName},
+        {"requiredVersion", config.gobii.requiredVersion},
+        {"updateRequiredInstalledVersion",
+            config.gobii.updateRequiredInstalledVersion},
+        {"autoConnect", config.gobii.autoConnect},
+        {"startAtLogin", config.gobii.startAtLogin},
+        {"paused", config.gobii.paused},
+    };
     for (const auto& [name, app] : config.server.apps) {
         json item = {
             {"displayName", app.displayName},
@@ -701,6 +750,40 @@ std::string AppConfigToToml(const AppConfig& config) {
     out << TomlTablePath({"recording"}) << "\n";
     out << "enabled = " << (config.recording.enabled ? "true" : "false") << "\n";
     out << "retention_days = " << config.recording.retentionDays << "\n\n";
+
+    out << TomlTablePath({"gobii"}) << "\n";
+    out << "base_url = " << TomlStringLiteral(config.gobii.baseUrl) << "\n";
+    if (!config.gobii.deviceId.empty()) {
+        out << "device_id = "
+            << TomlStringLiteral(config.gobii.deviceId) << "\n";
+    }
+    if (!config.gobii.deviceName.empty()) {
+        out << "device_name = "
+            << TomlStringLiteral(config.gobii.deviceName) << "\n";
+    }
+    if (!config.gobii.assignedAgentId.empty()) {
+        out << "assigned_agent_id = "
+            << TomlStringLiteral(config.gobii.assignedAgentId) << "\n";
+    }
+    if (!config.gobii.assignedAgentName.empty()) {
+        out << "assigned_agent_name = "
+            << TomlStringLiteral(config.gobii.assignedAgentName) << "\n";
+    }
+    if (!config.gobii.requiredVersion.empty()) {
+        out << "required_version = "
+            << TomlStringLiteral(config.gobii.requiredVersion) << "\n";
+    }
+    if (!config.gobii.updateRequiredInstalledVersion.empty()) {
+        out << "update_required_installed_version = "
+            << TomlStringLiteral(
+                config.gobii.updateRequiredInstalledVersion) << "\n";
+    }
+    out << "auto_connect = "
+        << (config.gobii.autoConnect ? "true" : "false") << "\n";
+    out << "start_at_login = "
+        << (config.gobii.startAtLogin ? "true" : "false") << "\n";
+    out << "paused = "
+        << (config.gobii.paused ? "true" : "false") << "\n\n";
 
     for (const auto& [name, app] : config.server.apps) {
         out << TomlTablePath({"server", "apps", name}) << "\n";
@@ -849,6 +932,29 @@ bool ImportLegacyInferenceEnv(AppConfig& config, std::string* warning, std::stri
     profile.timeoutMs = 180000;
     config.defaultProfile = profile.name;
     config.profiles[profile.name] = profile;
+    return true;
+}
+
+bool EnsureGobiiDesktopApp(AppConfig& config, std::string* error) {
+    if (error) {
+        error->clear();
+    }
+    constexpr const char* kName = "gobii-desktop";
+    if (config.server.apps.contains(kName)) {
+        return false;
+    }
+    const fs::path path = InstalledResourcePath("apps/gobii-desktop.lua");
+    if (path.empty()) {
+        if (error) {
+            *error = "bundled Gobii Desktop application was not found";
+        }
+        return false;
+    }
+    ServerAppConfig app;
+    app.name = kName;
+    app.displayName = "Gobii Desktop";
+    app.path = path.string();
+    config.server.apps.emplace(app.name, std::move(app));
     return true;
 }
 
