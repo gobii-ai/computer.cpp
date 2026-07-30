@@ -70,19 +70,19 @@ void TestAppConfigServerRoundTrip() {
     ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
     assert(missingError.empty());
     assert(missing.server.host == "0.0.0.0");
-    assert(missing.server.basePort == 8787);
+    assert(missing.server.port == 8787);
     assert(missing.server.apps.empty());
     assert(!missing.recording.enabled);
     assert(missing.recording.retentionDays == 14);
 
     ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
     assert(defaults.server.host == "0.0.0.0");
-    assert(defaults.server.basePort == 8787);
+    assert(defaults.server.port == 8787);
     assert(defaults.server.authToken.empty());
 
     ComputerCpp::AppConfig config = defaults;
     config.server.host = "0.0.0.0";
-    config.server.basePort = 8790;
+    config.server.port = 8790;
     config.server.authToken = "test-token";
     config.server.allowedOrigins = {"https://mcp.example.com", "http://127.0.0.1:3000"};
     config.recording.enabled = true;
@@ -91,11 +91,12 @@ void TestAppConfigServerRoundTrip() {
     linkedin.name = "linkedin";
     linkedin.displayName = "LinkedIn Recruiter";
     linkedin.path = "/tmp/linkedin-recruiter.lua";
-    linkedin.port = 8788;
     config.server.apps[linkedin.name] = linkedin;
 
     std::string toml = ComputerCpp::AppConfigToToml(config);
     assert(toml.find("[server]") != std::string::npos);
+    assert(toml.find("port = 8790") != std::string::npos);
+    assert(toml.find("base_port") == std::string::npos);
     assert(toml.find("[server.apps.linkedin]") != std::string::npos);
     assert(toml.find("auth_token = \"test-token\"") != std::string::npos);
     assert(toml.find("[recording]") != std::string::npos);
@@ -107,13 +108,12 @@ void TestAppConfigServerRoundTrip() {
     ComputerCpp::AppConfig loaded = ComputerCpp::LoadAppConfig(&error);
     assert(error.empty());
     assert(loaded.server.host == "0.0.0.0");
-    assert(loaded.server.basePort == 8790);
+    assert(loaded.server.port == 8790);
     assert(loaded.server.authToken == "test-token");
     assert(loaded.server.allowedOrigins.size() == 2);
     assert(loaded.server.apps.contains("linkedin"));
     assert(loaded.server.apps["linkedin"].displayName == "LinkedIn Recruiter");
     assert(loaded.server.apps["linkedin"].path == "/tmp/linkedin-recruiter.lua");
-    assert(loaded.server.apps["linkedin"].port == 8788);
     assert(loaded.recording.enabled);
     assert(loaded.recording.retentionDays == 14);
 
@@ -121,6 +121,9 @@ void TestAppConfigServerRoundTrip() {
     assert(redacted["server"]["authToken"] == "<redacted>");
     auto visible = ComputerCpp::AppConfigToJson(loaded, false);
     assert(visible["server"]["authToken"] == "test-token");
+    assert(visible["server"]["port"] == 8790);
+    assert(!visible["server"].contains("basePort"));
+    assert(!visible["server"]["apps"]["linkedin"].contains("port"));
     assert(visible["recording"]["enabled"] == true);
     assert(visible["recording"]["retentionDays"] == 14);
     assert(visible["recording"]["directory"] == ComputerCpp::RecordingDir().string());
@@ -138,102 +141,56 @@ void TestAppConfigServerRoundTrip() {
     assert(ComputerCpp::SaveAppConfig(loaded, &error));
 }
 
-void TestServerPortPlanning() {
-    ComputerCpp::ServerConfig server;
-    server.basePort = 8787;
+void TestServerAppNameValidation() {
+    assert(ComputerCpp::IsValidServerAppName("notes"));
+    assert(ComputerCpp::IsValidServerAppName("Notes.v2_test-app"));
+    assert(ComputerCpp::IsValidServerAppName("1-app"));
+    assert(!ComputerCpp::IsValidServerAppName(""));
+    assert(!ComputerCpp::IsValidServerAppName("-notes"));
+    assert(!ComputerCpp::IsValidServerAppName("notes app"));
+    assert(!ComputerCpp::IsValidServerAppName("notes/app"));
+}
 
-    ComputerCpp::ServerAppConfig fixedA;
-    fixedA.name = "fixed-a";
-    fixedA.port = 8787;
-    server.apps[fixedA.name] = fixedA;
+void TestServerPortConfigMigration() {
+    std::string error;
+    const ComputerCpp::AppConfig original = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
 
-    ComputerCpp::ServerAppConfig automatic;
-    automatic.name = "automatic";
-    server.apps[automatic.name] = automatic;
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[server]\n"
+               << "host = \"127.0.0.1\"\n"
+               << "base_port = 8891\n\n"
+               << "[server.apps.legacy]\n"
+               << "path = \"/tmp/legacy.lua\"\n"
+               << "port = 8899\n";
+    }
+    std::vector<std::string> warnings;
+    auto legacy = ComputerCpp::LoadAppConfig(&error, &warnings);
+    assert(error.empty());
+    assert(legacy.server.port == 8891);
+    assert(legacy.server.apps.contains("legacy"));
+    assert(warnings.size() == 1);
+    assert(warnings.front().find("legacy per-app port 8899") !=
+        std::string::npos);
+    std::string migrated = ComputerCpp::AppConfigToToml(legacy);
+    assert(migrated.find("port = 8891") != std::string::npos);
+    assert(migrated.find("base_port") == std::string::npos);
+    assert(migrated.find("port = 8899") == std::string::npos);
 
-    ComputerCpp::ServerAppConfig fixedB;
-    fixedB.name = "fixed-b";
-    fixedB.port = 8789;
-    server.apps[fixedB.name] = fixedB;
-
-    const std::set<std::string> allNames = {"fixed-a", "automatic", "fixed-b"};
-    auto available = [](int) { return true; };
-    auto plan = ComputerCpp::PlanServerPorts(server, allNames, {}, available);
-    assert(plan.errors.empty());
-    assert(plan.ports["fixed-a"] == 8787);
-    assert(plan.ports["automatic"] == 8788);
-    assert(plan.ports["fixed-b"] == 8789);
-
-    auto occupiedPlan = ComputerCpp::PlanServerPorts(server, allNames, {8788}, available);
-    assert(occupiedPlan.errors.empty());
-    assert(occupiedPlan.ports["automatic"] == 8790);
-
-    auto unavailableFixed = ComputerCpp::PlanServerPorts(
-        server,
-        allNames,
-        {},
-        [](int port) { return port != 8787; });
-    assert(unavailableFixed.errors.contains("fixed-a"));
-    assert(unavailableFixed.ports["automatic"] == 8788);
-    assert(unavailableFixed.ports["fixed-b"] == 8789);
-
-    server.apps["fixed-b"].port = 8787;
-    auto duplicate = ComputerCpp::PlanServerPorts(server, allNames, {}, available);
-    assert(duplicate.errors.contains("fixed-a"));
-    assert(duplicate.errors.contains("fixed-b"));
-    assert(duplicate.ports["automatic"] == 8788);
-
-    ComputerCpp::ServerConfig exhausted;
-    exhausted.basePort = 65535;
-    ComputerCpp::ServerAppConfig exhaustedApp;
-    exhaustedApp.name = "exhausted";
-    exhausted.apps[exhaustedApp.name] = exhaustedApp;
-    auto noPorts = ComputerCpp::PlanServerPorts(
-        exhausted,
-        {"exhausted"},
-        {65535},
-        available);
-    assert(noPorts.errors.contains("exhausted"));
-    assert(noPorts.errors["exhausted"].find("65535-65535") != std::string::npos);
-
-    ComputerCpp::ServerConfig fallback;
-    fallback.basePort = 0;
-    ComputerCpp::ServerAppConfig fallbackApp;
-    fallbackApp.name = "fallback";
-    fallback.apps[fallbackApp.name] = fallbackApp;
-    auto fallbackPlan = ComputerCpp::PlanServerPorts(
-        fallback,
-        {"fallback"},
-        {},
-        available);
-    assert(fallbackPlan.errors.empty());
-    assert(fallbackPlan.ports["fallback"] == 8787);
-    fallback.basePort = 70000;
-    auto highFallbackPlan = ComputerCpp::PlanServerPorts(
-        fallback,
-        {"fallback"},
-        {},
-        available);
-    assert(highFallbackPlan.errors.empty());
-    assert(highFallbackPlan.ports["fallback"] == 8787);
-
-    ComputerCpp::ServerConfig bounded;
-    bounded.basePort = 10000;
-    ComputerCpp::ServerAppConfig boundedApp;
-    boundedApp.name = "bounded";
-    bounded.apps[boundedApp.name] = boundedApp;
-    int highestChecked = 0;
-    auto boundedPlan = ComputerCpp::PlanServerPorts(
-        bounded,
-        {"bounded"},
-        {},
-        [&highestChecked](int port) {
-            highestChecked = std::max(highestChecked, port);
-            return port >= 10100;
-        });
-    assert(boundedPlan.errors.contains("bounded"));
-    assert(boundedPlan.errors["bounded"].find("10000-10099") != std::string::npos);
-    assert(highestChecked == 10099);
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[server]\n"
+               << "port = 8892\n"
+               << "base_port = 8891\n";
+    }
+    auto preferred = ComputerCpp::LoadAppConfig(&error, &warnings);
+    assert(error.empty());
+    assert(preferred.server.port == 8892);
+    assert(warnings.empty());
+    assert(ComputerCpp::SaveAppConfig(original, &error));
 }
 
 class FakeScreenRecordingSession final : public ComputerCpp::Platform::ScreenRecordingSession {
@@ -586,6 +543,8 @@ void TestTrayServerState() {
     assert(ComputerCpp::SaveTrayAppServerState(state, path, &error));
     auto loaded = ComputerCpp::LoadTrayAppServerState(path, &error);
     assert(loaded.has_value());
+    assert(loaded->version == 1);
+    assert(!loaded->configured);
     assert(loaded->pid == state.pid);
     assert(loaded->host == state.host);
     assert(loaded->port == state.port);
@@ -595,6 +554,25 @@ void TestTrayServerState() {
     assert(loaded->configName == state.configName);
     assert(loaded->displayName == state.displayName);
     assert(loaded->startedAt == state.startedAt);
+
+    ComputerCpp::TrayAppServerState configuredState;
+    configuredState.version = 2;
+    configuredState.configured = true;
+    configuredState.pid = 54321;
+    configuredState.host = "127.0.0.1";
+    configuredState.port = 8790;
+    configuredState.url = "http://127.0.0.1:8790";
+    configuredState.startedAt = "2026-07-30T00:00:00Z";
+    assert(ComputerCpp::SaveTrayAppServerState(configuredState, path, &error));
+    auto configuredLoaded =
+        ComputerCpp::LoadTrayAppServerState(path, &error);
+    assert(configuredLoaded.has_value());
+    assert(configuredLoaded->version == 2);
+    assert(configuredLoaded->configured);
+    assert(configuredLoaded->appPath.empty());
+    assert(ComputerCpp::RemoveTrayAppServerState(path, &error));
+
+    assert(ComputerCpp::SaveTrayAppServerState(state, path, &error));
 
     assert(ComputerCpp::RemoveTrayAppServerStateForPid(path, 999, &error));
     assert(fs::exists(path));
@@ -1085,7 +1063,8 @@ int main() {
 
     RunTest("StringUtils", TestStringUtils);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
-    RunTest("ServerPortPlanning", TestServerPortPlanning);
+    RunTest("ServerAppNameValidation", TestServerAppNameValidation);
+    RunTest("ServerPortConfigMigration", TestServerPortConfigMigration);
     RunTest("CommandRecordingLifecycle", TestCommandRecordingLifecycle);
     RunTest("NativeCommandRecordingSmoke", TestNativeCommandRecordingSmoke);
     RunTest("TrayServerState", TestTrayServerState);

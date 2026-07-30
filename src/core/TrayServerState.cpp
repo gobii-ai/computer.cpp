@@ -69,6 +69,8 @@ std::string SafeStateName(const std::string& configName) {
 
 json TrayStateToJson(const TrayAppServerState& state) {
     return {
+        {"version", state.version},
+        {"configured", state.configured},
         {"pid", state.pid},
         {"host", state.host},
         {"port", state.port},
@@ -86,6 +88,8 @@ std::optional<TrayAppServerState> TrayStateFromJson(const json& value) {
         return std::nullopt;
     }
     TrayAppServerState state;
+    state.version = value.value("version", 1);
+    state.configured = value.value("configured", false);
     state.pid = value.value("pid", 0L);
     state.host = value.value("host", "");
     state.port = value.value("port", 0);
@@ -95,7 +99,8 @@ std::optional<TrayAppServerState> TrayStateFromJson(const json& value) {
     state.configName = value.value("configName", "");
     state.displayName = value.value("displayName", "");
     state.startedAt = value.value("startedAt", "");
-    if (state.pid <= 0 || state.host.empty() || state.port <= 0 || state.url.empty() || state.appPath.empty()) {
+    if (state.pid <= 0 || state.host.empty() || state.port <= 0 ||
+        state.url.empty() || (!state.configured && state.appPath.empty())) {
         return std::nullopt;
     }
     return state;

@@ -8,6 +8,8 @@
 namespace ComputerCpp {
 
 struct TrayAppServerState {
+    int version = 1;
+    bool configured = false;
     long pid = 0;
     std::string host;
     int port = 0;
@@ -19,7 +21,8 @@ struct TrayAppServerState {
     std::string startedAt;
 };
 
-// Legacy single-server state path. Kept for migration from older releases.
+// Singleton configured-server state path. Version 1 files remain readable for
+// migration from the legacy single-app server.
 std::filesystem::path TrayAppServerStatePath();
 std::filesystem::path TrayAppServerStateDirectory();
 std::filesystem::path TrayAppServerStatePath(const std::string& configName);

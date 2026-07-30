@@ -26,16 +26,18 @@ Daemon:
                                       Inspect async semantic app operations
   app operation approve|deny <app.lua> <operation-id> <approval-id> [--note text]
                                       Respond to a pending async approval request
-	  app serve <app.lua> [--listen 0.0.0.0:8787] [--auth-token-env ENV]
-	          [--allowed-origin https://host]
-	                                      Serve a semantic Lua app over HTTP and MCP at /mcp
-	  config path                         Print user config.toml path
-	  config init [--force]               Create default user config.toml
-	  config show                         Show redacted model/provider config
-	  config set-provider <name> ...      Configure an LLM endpoint and API key
-	  config set-profile <name> ...       Configure model and sampling defaults
-	  config import-env                   One-time import from legacy LLM env vars
-	  config test [profile] [--live]      Validate or test configured inference
+  app serve <app.lua> [--listen 0.0.0.0:8787] [--auth-token-env ENV]
+          [--allowed-origin https://host]
+                                      Serve a semantic Lua app over HTTP and MCP at /mcp
+  app serve --configured              Serve all configured apps on server.port
+                                      under /apps/{stable-name}
+  config path                         Print user config.toml path
+  config init [--force]               Create default user config.toml
+  config show                         Show redacted model/provider config
+  config set-provider <name> ...      Configure an LLM endpoint and API key
+  config set-profile <name> ...       Configure model and sampling defaults
+  config import-env                   One-time import from legacy LLM env vars
+  config test [profile] [--live]      Validate or test configured inference
 
 Control Session:
   session acquire [--owner n] [--purpose t] [--ttl 10m] [--wait 2m] [--max 4h]

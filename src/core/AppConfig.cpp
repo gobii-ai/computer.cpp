@@ -325,67 +325,19 @@ bool EnsureServerAuthToken(AppConfig& config) {
     return true;
 }
 
-ServerPortPlan PlanServerPorts(
-    const ServerConfig& server,
-    const std::set<std::string>& appNames,
-    const std::set<int>& occupiedPorts,
-    const std::function<bool(int)>& portAvailable
-) {
-    ServerPortPlan plan;
-    std::map<int, size_t> fixedPortCounts;
-    std::set<int> reservedFixedPorts;
-    for (const auto& [_, app] : server.apps) {
-        if (app.port.has_value()) {
-            ++fixedPortCounts[*app.port];
-            reservedFixedPorts.insert(*app.port);
-        }
+bool IsValidServerAppName(const std::string& name) {
+    const auto asciiAlphanumeric = [](unsigned char ch) {
+        return (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9');
+    };
+    if (name.empty() ||
+        !asciiAlphanumeric(static_cast<unsigned char>(name.front()))) {
+        return false;
     }
-
-    std::set<int> allocatedPorts;
-    const int start = server.basePort > 0 && server.basePort <= 65535
-        ? server.basePort
-        : 8787;
-    const int end = std::min(65535, start + 99);
-    for (const auto& name : appNames) {
-        auto appIt = server.apps.find(name);
-        if (appIt == server.apps.end()) {
-            plan.errors[name] = "app is not configured";
-            continue;
-        }
-        const ServerAppConfig& app = appIt->second;
-        if (app.port.has_value()) {
-            const int port = *app.port;
-            if (fixedPortCounts[port] > 1) {
-                plan.errors[name] = "configured port " + std::to_string(port) + " is also used by another app";
-            } else if (occupiedPorts.contains(port) || !portAvailable(port)) {
-                plan.errors[name] = "configured port " + std::to_string(port) + " is not available";
-            } else {
-                plan.ports[name] = port;
-                allocatedPorts.insert(port);
-            }
-            continue;
-        }
-
-        std::optional<int> selected;
-        for (int port = start; port <= end; ++port) {
-            if (reservedFixedPorts.contains(port) ||
-                occupiedPorts.contains(port) ||
-                allocatedPorts.contains(port) ||
-                !portAvailable(port)) {
-                continue;
-            }
-            selected = port;
-            break;
-        }
-        if (!selected.has_value()) {
-            plan.errors[name] = "no available port was found in " +
-                std::to_string(start) + "-" + std::to_string(end);
-            continue;
-        }
-        plan.ports[name] = *selected;
-        allocatedPorts.insert(*selected);
-    }
-    return plan;
+    return std::all_of(name.begin() + 1, name.end(), [&](unsigned char ch) {
+        return asciiAlphanumeric(ch) || ch == '.' || ch == '_' || ch == '-';
+    });
 }
 
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error) {
@@ -447,7 +399,16 @@ bool AppConfigExists() {
     return fs::exists(ConfigPath(), ec) && !ec;
 }
 
-AppConfig LoadAppConfig(std::string* error) {
+AppConfig LoadAppConfig(
+    std::string* error,
+    std::vector<std::string>* warnings
+) {
+    if (error) {
+        error->clear();
+    }
+    if (warnings) {
+        warnings->clear();
+    }
     AppConfig config = DefaultAppConfig();
     fs::path path = ConfigPath();
     std::error_code ec;
@@ -534,9 +495,14 @@ AppConfig LoadAppConfig(std::string* error) {
 
     if (auto server = parsed["server"].as_table()) {
         config.server.host = TomlString(*server, "host", config.server.host);
-        if (auto value = (*server)["base_port"].value<int64_t>()) {
-            if (*value > 0 && *value <= 65535) {
-                config.server.basePort = static_cast<int>(*value);
+        auto configuredPort = (*server)["port"].value<int64_t>();
+        if (!configuredPort.has_value()) {
+            configuredPort = (*server)["base_port"].value<int64_t>();
+        }
+        if (configuredPort.has_value()) {
+            const int64_t value = *configuredPort;
+            if (value > 0 && value <= 65535) {
+                config.server.port = static_cast<int>(value);
             }
         }
         config.server.authToken = TomlString(*server, "auth_token");
@@ -551,10 +517,13 @@ AppConfig LoadAppConfig(std::string* error) {
                 app.name = TomlKeyName(key);
                 app.displayName = TomlString(*table, "display_name", app.name);
                 app.path = TomlString(*table, "path");
-                if (auto value = (*table)["port"].value<int64_t>()) {
-                    if (*value > 0 && *value <= 65535) {
-                        app.port = static_cast<int>(*value);
-                    }
+                if (auto legacyPort = (*table)["port"].value<int64_t>();
+                    warnings && legacyPort.has_value()) {
+                    warnings->push_back(
+                        "server app '" + app.name + "' uses legacy per-app port " +
+                        std::to_string(*legacyPort) +
+                        "; it is ignored in shared-server mode. Update clients to /apps/" +
+                        app.name + " and save config to remove it.");
                 }
                 config.server.apps[app.name] = app;
             }
@@ -639,7 +608,7 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
     }
     out["server"] = {
         {"host", config.server.host},
-        {"basePort", config.server.basePort},
+        {"port", config.server.port},
         {"authToken", redactSecrets && !config.server.authToken.empty() ? "<redacted>" : config.server.authToken},
         {"allowedOrigins", config.server.allowedOrigins},
         {"apps", json::object()},
@@ -660,9 +629,6 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
             {"displayName", app.displayName},
             {"path", app.path},
         };
-        if (app.port.has_value()) {
-            item["port"] = *app.port;
-        }
         out["server"]["apps"][name] = item;
     }
     return out;
@@ -726,7 +692,7 @@ std::string AppConfigToToml(const AppConfig& config) {
 
     out << TomlTablePath({"server"}) << "\n";
     out << "host = " << TomlStringLiteral(config.server.host) << "\n";
-    out << "base_port = " << config.server.basePort << "\n";
+    out << "port = " << config.server.port << "\n";
     if (!config.server.authToken.empty()) {
         out << "auth_token = " << TomlStringLiteral(config.server.authToken) << "\n";
     }
@@ -740,9 +706,6 @@ std::string AppConfigToToml(const AppConfig& config) {
         out << TomlTablePath({"server", "apps", name}) << "\n";
         out << "display_name = " << TomlStringLiteral(app.displayName) << "\n";
         out << "path = " << TomlStringLiteral(app.path) << "\n";
-        if (app.port.has_value()) {
-            out << "port = " << *app.port << "\n";
-        }
         out << "\n";
     }
 
