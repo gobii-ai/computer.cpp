@@ -20,6 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -36,7 +37,14 @@
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -82,6 +90,113 @@ struct ScopedEnvVar {
 std::filesystem::path RepoRoot() {
     return std::filesystem::path(__FILE__).parent_path().parent_path();
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+struct TestHttpResponse {
+    int status = 0;
+    std::map<std::string, std::string> headers;
+    std::string body;
+};
+
+int FindAvailableTcpPort() {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    assert(::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    socklen_t size = sizeof(address);
+    assert(::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &size) == 0);
+    const int port = ntohs(address.sin_port);
+    ::close(fd);
+    return port;
+}
+
+TestHttpResponse SendTestHttpRequest(
+    int port,
+    const std::string& token,
+    const std::string& method,
+    const std::string& target,
+    const std::string& body = "",
+    const std::vector<std::pair<std::string, std::string>>& headers = {}
+) {
+    TestHttpResponse result;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return result;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(static_cast<uint16_t>(port));
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        ::close(fd);
+        return result;
+    }
+    std::ostringstream request;
+    request << method << " " << target << " HTTP/1.1\r\n"
+            << "Host: 127.0.0.1:" << port << "\r\n"
+            << "Connection: close\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Content-Length: " << body.size() << "\r\n";
+    if (!token.empty()) {
+        request << "Authorization: Bearer " << token << "\r\n";
+    }
+    for (const auto& [name, value] : headers) {
+        request << name << ": " << value << "\r\n";
+    }
+    request << "\r\n" << body;
+    const std::string wire = request.str();
+    size_t offset = 0;
+    while (offset < wire.size()) {
+        const ssize_t sent =
+            ::send(fd, wire.data() + offset, wire.size() - offset, 0);
+        if (sent <= 0) {
+            ::close(fd);
+            return result;
+        }
+        offset += static_cast<size_t>(sent);
+    }
+    std::string response;
+    std::array<char, 4096> buffer{};
+    while (true) {
+        const ssize_t count = ::recv(fd, buffer.data(), buffer.size(), 0);
+        if (count <= 0) {
+            break;
+        }
+        response.append(buffer.data(), static_cast<size_t>(count));
+    }
+    ::close(fd);
+    const size_t firstSpace = response.find(' ');
+    if (firstSpace != std::string::npos && firstSpace + 4 <= response.size()) {
+        result.status = std::atoi(response.substr(firstSpace + 1, 3).c_str());
+    }
+    const size_t bodyStart = response.find("\r\n\r\n");
+    if (bodyStart != std::string::npos) {
+        size_t lineStart = response.find("\r\n");
+        while (lineStart != std::string::npos && lineStart + 2 < bodyStart) {
+            lineStart += 2;
+            const size_t lineEnd = response.find("\r\n", lineStart);
+            if (lineEnd == std::string::npos || lineEnd > bodyStart) {
+                break;
+            }
+            const size_t colon = response.find(':', lineStart);
+            if (colon != std::string::npos && colon < lineEnd) {
+                size_t valueStart = colon + 1;
+                while (valueStart < lineEnd && response[valueStart] == ' ') {
+                    ++valueStart;
+                }
+                result.headers[response.substr(lineStart, colon - lineStart)] =
+                    response.substr(valueStart, lineEnd - valueStart);
+            }
+            lineStart = lineEnd;
+        }
+        result.body = response.substr(bodyStart + 4);
+    }
+    return result;
+}
+#endif
 
 struct CapturedConfigCommand {
     int exitCode = 0;
@@ -2076,6 +2191,407 @@ void TestTrayServeConfigNameValidation() {
     });
     assert(missingValue.exitCode == 2);
     assert(missingValue.stdoutText.find("--tray-config-name requires a value") != std::string::npos);
+
+    const auto configuredOverride = RunSemanticAppCommand({
+        "app",
+        "serve",
+        "--configured",
+        "--listen",
+        "127.0.0.1:9876",
+    });
+    assert(configuredOverride.exitCode == 2);
+    assert(configuredOverride.stdoutText.find("--listen is not allowed") != std::string::npos);
+}
+
+void TestConfiguredMultiAppServer() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (SkipLuaTestIfUnavailable("TestConfiguredMultiAppServer")) return;
+
+    std::string error;
+    const ComputerCpp::AppConfig original = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+
+    ComputerCpp::AppConfig config = original;
+    config.server.host = "127.0.0.1";
+    config.server.port = FindAvailableTcpPort();
+    config.server.authToken = "configured-server-test-token";
+    config.server.allowedOrigins.clear();
+    config.server.apps.clear();
+
+    ComputerCpp::ServerAppConfig primary;
+    primary.name = "primary";
+    primary.displayName = "Primary";
+    primary.path = (RepoRoot() / "tests/lua/app-basic.lua").string();
+    config.server.apps[primary.name] = primary;
+
+    ComputerCpp::ServerAppConfig secondary;
+    secondary.name = "secondary";
+    secondary.displayName = "Secondary";
+    secondary.path = (RepoRoot() / "tests/lua/app-secondary.lua").string();
+    config.server.apps[secondary.name] = secondary;
+
+    ComputerCpp::ServerAppConfig invalid;
+    invalid.name = "invalid";
+    invalid.displayName = "Invalid";
+    invalid.path = (RepoRoot() / "tests/lua/app-reserved-command.lua").string();
+    config.server.apps[invalid.name] = invalid;
+    assert(ComputerCpp::SaveAppConfig(config, &error));
+
+    const std::filesystem::path executable =
+        std::filesystem::path(ComputerCpp::CurrentExecutablePath()).parent_path() /
+        "computer.cpp";
+    assert(std::filesystem::exists(executable));
+
+    int occupiedFd = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(occupiedFd >= 0);
+    sockaddr_in occupiedAddress{};
+    occupiedAddress.sin_family = AF_INET;
+    occupiedAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    occupiedAddress.sin_port =
+        htons(static_cast<uint16_t>(config.server.port));
+    assert(::bind(
+        occupiedFd,
+        reinterpret_cast<sockaddr*>(&occupiedAddress),
+        sizeof(occupiedAddress)) == 0);
+    assert(::listen(occupiedFd, 1) == 0);
+    ComputerCpp::Cli::CliOptions occupiedOptions;
+    occupiedOptions.jsonOutput = true;
+    const auto occupiedResult = RunAppCommand(
+        occupiedOptions,
+        {"app", "serve", "--configured"},
+        executable.string());
+    assert(occupiedResult.exitCode == 1);
+    assert(occupiedResult.stdoutText.find("failed to bind") !=
+        std::string::npos);
+    ::close(occupiedFd);
+
+    pid_t serverPid = ::fork();
+    assert(serverPid >= 0);
+    if (serverPid == 0) {
+        int devNull = ::open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            ::dup2(devNull, STDIN_FILENO);
+            ::dup2(devNull, STDOUT_FILENO);
+            ::dup2(devNull, STDERR_FILENO);
+            if (devNull > STDERR_FILENO) {
+                ::close(devNull);
+            }
+        }
+        ::execl(
+            executable.c_str(),
+            executable.c_str(),
+            "app",
+            "serve",
+            "--configured",
+            static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    TestHttpResponse health;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        health = SendTestHttpRequest(
+            config.server.port,
+            config.server.authToken,
+            "GET",
+            "/health");
+        if (health.status == 200) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    assert(health.status == 200);
+    const nlohmann::json healthJson = nlohmann::json::parse(health.body);
+    assert(healthJson["status"] == "degraded");
+    assert(healthJson["apps"]["primary"]["status"] == "ready");
+    assert(healthJson["apps"]["secondary"]["status"] == "ready");
+    assert(healthJson["apps"]["invalid"]["status"] == "invalid");
+
+    const auto unauthorized = SendTestHttpRequest(
+        config.server.port,
+        "",
+        "GET",
+        "/health");
+    assert(unauthorized.status == 401);
+    const auto badOrigin = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/health",
+        "",
+        {{"Origin", "https://not-allowed.example"}});
+    assert(badOrigin.status == 403);
+    const auto badOriginRest = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/primary/schema",
+        "",
+        {{"Origin", "https://not-allowed.example"}});
+    assert(badOriginRest.status == 403);
+    const auto badOriginMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/secondary/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"Origin", "https://not-allowed.example"},
+        });
+    assert(badOriginMcp.status == 403);
+    assert(nlohmann::json::parse(badOriginMcp.body)["jsonrpc"] == "2.0");
+    const auto unauthorizedMcp = SendTestHttpRequest(
+        config.server.port,
+        "",
+        "POST",
+        "/apps/secondary/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(unauthorizedMcp.status == 401);
+    assert(nlohmann::json::parse(unauthorizedMcp.body)["jsonrpc"] == "2.0");
+
+    const auto apps = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps");
+    assert(apps.status == 200);
+    assert(nlohmann::json::parse(apps.body)["apps"].size() == 3);
+
+    const auto primarySchema = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/primary/schema");
+    const auto secondarySchema = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/secondary/schema");
+    assert(primarySchema.status == 200);
+    assert(secondarySchema.status == 200);
+    assert(nlohmann::json::parse(primarySchema.body)["title"] == "Unit App");
+    assert(nlohmann::json::parse(secondarySchema.body)["title"] == "Secondary App");
+
+    const auto secondaryEcho = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/secondary/commands/echo",
+        R"({"message":"hello"})");
+    assert(secondaryEcho.status == 200);
+    assert(nlohmann::json::parse(secondaryEcho.body)["source"] == "secondary");
+
+    const auto asyncStart = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/primary/commands/slow?async=true",
+        R"({"delay":0})");
+    assert(asyncStart.status == 202);
+    const nlohmann::json asyncJson = nlohmann::json::parse(asyncStart.body);
+    const std::string resultUrl =
+        asyncJson["result_url"].get<std::string>();
+    assert(resultUrl.rfind(
+        "/apps/primary/operations/",
+        0) == 0);
+    assert(asyncStart.headers.at("Location") == resultUrl);
+    TestHttpResponse asyncResult;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        asyncResult = SendTestHttpRequest(
+            config.server.port,
+            config.server.authToken,
+            "GET",
+            resultUrl + "?wait=1");
+        if (asyncResult.status != 202) {
+            break;
+        }
+    }
+    assert(asyncResult.status == 200);
+    assert(nlohmann::json::parse(asyncResult.body)["status"] == "succeeded");
+
+    const auto mcpTools = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/secondary/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "2025-11-25"},
+        });
+    assert(mcpTools.status == 200);
+    const nlohmann::json toolsJson = nlohmann::json::parse(mcpTools.body);
+    assert(toolsJson["result"]["tools"][0]["name"] == "echo");
+
+    const auto invalidApp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/invalid/schema");
+    assert(invalidApp.status == 503);
+    const auto invalidMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/invalid/mcp",
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(invalidMcp.status == 503);
+    assert(nlohmann::json::parse(invalidMcp.body)["error"].is_object());
+    const auto unknownApp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/missing/schema");
+    assert(unknownApp.status == 404);
+    const auto wrongCaseApp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/apps/Primary/schema");
+    assert(wrongCaseApp.status == 404);
+    const auto unknownMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/missing/mcp",
+        R"({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(unknownMcp.status == 404);
+    assert(nlohmann::json::parse(unknownMcp.body)["jsonrpc"] == "2.0");
+    assert(nlohmann::json::parse(unknownMcp.body)["error"].is_object());
+    const auto aggregateSchema = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/schema");
+    assert(aggregateSchema.status == 404);
+
+    const auto shutdown = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/shutdown");
+    assert(shutdown.status == 200);
+    int status = 0;
+    bool exited = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const pid_t waited = ::waitpid(serverPid, &status, WNOHANG);
+        if (waited == serverPid) {
+            exited = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!exited) {
+        ::kill(serverPid, SIGKILL);
+        ::waitpid(serverPid, &status, 0);
+    }
+    assert(exited);
+    assert(ComputerCpp::SaveAppConfig(original, &error));
+#endif
+}
+
+void TestSingleAppServerCompatibility() {
+#if defined(__unix__) || defined(__APPLE__)
+    if (SkipLuaTestIfUnavailable("TestSingleAppServerCompatibility")) return;
+
+    const std::filesystem::path executable =
+        std::filesystem::path(ComputerCpp::CurrentExecutablePath()).parent_path() /
+        "computer.cpp";
+    const std::string app =
+        (RepoRoot() / "tests/lua/app-basic.lua").string();
+    const int port = FindAvailableTcpPort();
+    const std::string listen = "127.0.0.1:" + std::to_string(port);
+    ScopedEnvVar tokenEnv("COMPUTER_CPP_TEST_SERVER_TOKEN");
+    tokenEnv.Set("single-app-test-token");
+
+    pid_t serverPid = ::fork();
+    assert(serverPid >= 0);
+    if (serverPid == 0) {
+        int devNull = ::open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            ::dup2(devNull, STDIN_FILENO);
+            ::dup2(devNull, STDOUT_FILENO);
+            ::dup2(devNull, STDERR_FILENO);
+            if (devNull > STDERR_FILENO) {
+                ::close(devNull);
+            }
+        }
+        ::execl(
+            executable.c_str(),
+            executable.c_str(),
+            "app",
+            "serve",
+            app.c_str(),
+            "--listen",
+            listen.c_str(),
+            "--auth-token-env",
+            "COMPUTER_CPP_TEST_SERVER_TOKEN",
+            static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    TestHttpResponse health;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        health = SendTestHttpRequest(
+            port,
+            "single-app-test-token",
+            "GET",
+            "/health");
+        if (health.status == 200) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    assert(health.status == 200);
+    const auto schema = SendTestHttpRequest(
+        port,
+        "single-app-test-token",
+        "GET",
+        "/schema");
+    assert(schema.status == 200);
+    assert(nlohmann::json::parse(schema.body)["title"] == "Unit App");
+    const auto mcp = SendTestHttpRequest(
+        port,
+        "single-app-test-token",
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "2025-11-25"},
+        });
+    assert(mcp.status == 200);
+    const auto namespaced = SendTestHttpRequest(
+        port,
+        "single-app-test-token",
+        "GET",
+        "/apps/primary/schema");
+    assert(namespaced.status == 404);
+
+    const auto shutdown = SendTestHttpRequest(
+        port,
+        "single-app-test-token",
+        "POST",
+        "/shutdown");
+    assert(shutdown.status == 200);
+    int status = 0;
+    bool exited = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        if (::waitpid(serverPid, &status, WNOHANG) == serverPid) {
+            exited = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!exited) {
+        ::kill(serverPid, SIGKILL);
+        ::waitpid(serverPid, &status, 0);
+    }
+    assert(exited);
+#endif
 }
 
 void TestConfigCliCanonicalFile() {
@@ -3128,6 +3644,8 @@ void RunCliTests() {
     TestSessionChildCommandParsing();
     TestLuaRunCommandParsing();
     TestTrayServeConfigNameValidation();
+    TestConfiguredMultiAppServer();
+    TestSingleAppServerCompatibility();
     TestConfigCliCanonicalFile();
     TestRecordingSurfaceMetadata();
     TestCliCommandRecordingMetadata();

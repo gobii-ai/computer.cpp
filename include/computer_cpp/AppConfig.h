@@ -3,10 +3,8 @@
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -35,27 +33,17 @@ struct ServerAppConfig {
     std::string name;
     std::string displayName;
     std::string path;
-    std::optional<int> port;
 };
 
 struct ServerConfig {
     std::string host = "0.0.0.0";
-    int basePort = 8787;
+    int port = 8787;
     std::string authToken;
     std::vector<std::string> allowedOrigins;
     std::map<std::string, ServerAppConfig> apps;
 };
 
-struct ServerPortPlan {
-    std::map<std::string, int> ports;
-    std::map<std::string, std::string> errors;
-};
-
-ServerPortPlan PlanServerPorts(
-    const ServerConfig& server,
-    const std::set<std::string>& appNames,
-    const std::set<int>& occupiedPorts,
-    const std::function<bool(int)>& portAvailable);
+bool IsValidServerAppName(const std::string& name);
 
 struct RecordingConfig {
     bool enabled = false;

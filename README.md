@@ -65,6 +65,7 @@ programmable.
   - [CLI](#cli)
   - [Local HTTP API](#local-http-api)
   - [MCP Server](#mcp-server)
+  - [Shared Multi-App Server](#shared-multi-app-server)
 - [Examples](#examples)
 - [Quick Start](#quick-start)
 - [Define An App API](#define-an-app-api)
@@ -369,52 +370,60 @@ computer.cpp app serve ./reminders.lua --listen 127.0.0.1:8787
 POST /mcp
 ```
 
-### Multiple Lua App Servers
+### Shared Multi-App Server
 
-The desktop tray can run every configured Lua app at the same time. Each app
-gets its own `computer.cpp app serve` process and port, so it can be restarted
-or stopped without affecting the others.
-
-Configure apps in **Settings > Server**. A blank app port is assigned
-automatically from `base_port`; a fixed port is reserved for that app and
-cannot be reused by another configured app. Automatic assignment checks at
-most 100 consecutive ports beginning at `base_port` (and never past 65535).
+The desktop tray serves every configured Lua app from one process and port.
+Each app has its own URL namespace, schema, command routes, MCP endpoint, app
+id, and operation storage.
 
 ```toml
 [server]
 host = "127.0.0.1"
-base_port = 8787
+port = 8787
 
 [server.apps.notes]
 display_name = "Notes"
 path = "/absolute/path/to/notes.lua"
-port = 8787
 
 [server.apps.reminders]
 display_name = "Reminders"
 path = "/absolute/path/to/reminders.lua"
-# No port: choose the first available non-reserved port from 8787.
 ```
 
-The tray menu shows the number of running servers, one-click **Start All
-Servers** and **Stop All Servers** actions, and a Start/Stop row for each app.
-Servers are not started automatically when ComputerCpp launches. Any healthy
-configured servers left by an interrupted tray process are adopted, and
-quitting ComputerCpp stops all managed servers.
+Run the same configured server without the tray with:
 
-Server processes keep independent Lua memory and operation storage, while
-top-level app commands share one desktop-control queue. If Notes and Reminders
-receive commands at the same time, one command holds exclusive mouse and
-keyboard control for its entire workflow and the other waits. The lease is
-renewed while a long command runs and released on success or failure. Health,
-schema, and operation-status requests do not acquire desktop control.
+```bash
+computer.cpp app serve --configured
+```
 
-With the example above, the MCP endpoints could be:
+Configured app endpoints are namespaced by their stable config name:
 
 ```text
-http://127.0.0.1:8787/mcp  # Notes
-http://127.0.0.1:8788/mcp  # Reminders
+http://127.0.0.1:8787/apps/notes/mcp
+http://127.0.0.1:8787/apps/reminders/mcp
+http://127.0.0.1:8787/apps/notes/schema
+http://127.0.0.1:8787/apps/notes/commands/create-note
 ```
+
+`GET /health` reports `ready` or `degraded` plus per-app status, and
+`GET /apps` returns the app catalog. An invalid path or schema marks only that
+app invalid; healthy apps remain available. Stable names must match
+`[A-Za-z0-9][A-Za-z0-9._-]*`.
+
+The tray exposes one **Start Server** or **Stop Server** action and
+non-actionable status rows for each app. A healthy configured server left by
+an interrupted tray process is adopted. Configuration edits require a server
+restart.
+
+Requests are handled sequentially. A synchronous workflow for Notes therefore
+blocks requests for Reminders until it finishes, matching the single physical
+mouse and keyboard being controlled. Desktop control leases remain in place
+for commands started through the CLI or detached async operations.
+
+Legacy `base_port` is accepted as a fallback when reading configuration.
+Saving configuration writes `port` and removes legacy per-app port values.
+Direct `computer.cpp app serve ./app.lua` remains a single-app server with its
+existing root `/mcp`, `/schema`, `/commands`, and `/operations` routes.
 
 The MCP server turns a Lua app definition into app-level tools such as:
 

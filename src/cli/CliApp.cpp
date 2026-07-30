@@ -889,7 +889,8 @@ json MakeInitialOperationRecord(
     const std::string& operationId,
     const std::string& commandName,
     bool recordingRequested,
-    const std::string& surface
+    const std::string& surface,
+    const std::string& routeBasePath
 ) {
     const std::string now = NowIsoUtc();
     json record = {
@@ -910,7 +911,7 @@ json MakeInitialOperationRecord(
         {"started_at", nullptr},
         {"finished_at", nullptr},
         {"progress", nullptr},
-        {"result_url", "/operations/" + operationId + "/result"},
+        {"result_url", routeBasePath + "/operations/" + operationId + "/result"},
         {"error", nullptr},
         {"approval", nullptr},
         {"cancel_requested", false},
@@ -1235,6 +1236,7 @@ std::optional<json> CreateAsyncOperation(
     const std::string& commandName,
     const json& input,
     const std::string& surface,
+    const std::string& routeBasePath,
     std::string& error
 ) {
     const std::string appId = AppIdFor(appPath, schema);
@@ -1253,7 +1255,8 @@ std::optional<json> CreateAsyncOperation(
         operationId,
         commandName,
         recordingRequested,
-        surface);
+        surface,
+        routeBasePath);
     if (!WriteJsonFile(paths.inputJson, input, error)) {
         return std::nullopt;
     }
@@ -1663,10 +1666,35 @@ struct AppServeOptions {
     int port = 8787;
     std::string authToken;
     std::set<std::string> allowedOrigins;
+    std::string routeBasePath;
+    std::string stableAppName;
+    bool configured = false;
     std::optional<fs::path> trayStateFile;
     std::string trayConfigName;
     std::string trayDisplayName;
 };
+
+json ServerAppLogFields(const AppServeOptions& options, json fields) {
+    if (!options.stableAppName.empty()) {
+        fields["app"] = options.stableAppName;
+    }
+    return fields;
+}
+
+struct ConfiguredServedApp {
+    std::string name;
+    std::string displayName;
+    fs::path appPath;
+    json schema = json::object();
+    std::string appId;
+    std::string error;
+
+    bool ready() const {
+        return error.empty();
+    }
+};
+
+using ConfiguredAppRegistry = std::map<std::string, ConfiguredServedApp>;
 
 struct HttpRequest {
     std::string method;
@@ -2064,6 +2092,11 @@ bool StartsWith(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
 }
 
+bool EndsWith(const std::string& value, const std::string& suffix) {
+    return value.size() >= suffix.size() &&
+        value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 bool IsSupportedMcpProtocolVersion(const std::string& version) {
     return version == "2025-11-25" || version == "2025-06-18" || version == "2025-03-26";
 }
@@ -2338,6 +2371,7 @@ bool HandleMcpJsonRpcRequest(
                 command,
                 commandArguments,
                 "mcp",
+                serveOptions.routeBasePath,
                 error);
             if (!operation) return sendOperationError("internal_error", error);
             return sendOperationSuccess(*operation);
@@ -2404,7 +2438,10 @@ bool HandleMcpJsonRpcRequest(
             return SendJsonRpcError(fd, 400, id, -32602, "Unknown tool: " + toolName);
         }
 
-        AppendRuntimeLog("server", "mcp_tool_start", {{"tool", toolName}});
+        AppendRuntimeLog(
+            "server",
+            "mcp_tool_start",
+            ServerAppLogFields(serveOptions, {{"tool", toolName}}));
         std::string error;
         json recording;
         auto payload = RunAppCommand(
@@ -2421,7 +2458,13 @@ bool HandleMcpJsonRpcRequest(
             &recording,
             error);
         if (!payload) {
-            AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"error", error.empty() ? "tool execution failed" : error}});
+            AppendRuntimeLog(
+                "server",
+                "mcp_tool_failed",
+                ServerAppLogFields(
+                    serveOptions,
+                    {{"tool", toolName},
+                     {"error", error.empty() ? "tool execution failed" : error}}));
             json errorData = McpRecordingErrorData(recording);
             return SendJsonRpcError(
                 fd,
@@ -2434,13 +2477,21 @@ bool HandleMcpJsonRpcRequest(
         if (!payload->value("ok", false)) {
             const std::string code = payload->value("code", "operation_failed");
             const std::string messageText = payload->value("error", "operation failed");
-            AppendRuntimeLog("server", "mcp_tool_failed", {{"tool", toolName}, {"code", code}, {"error", messageText}});
+            AppendRuntimeLog(
+                "server",
+                "mcp_tool_failed",
+                ServerAppLogFields(
+                    serveOptions,
+                    {{"tool", toolName}, {"code", code}, {"error", messageText}}));
             return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolErrorResult(code, messageText, recording)));
         }
 
         const json data = payload->value("data", json::object());
         const json result = data.value("result", json::object());
-        AppendRuntimeLog("server", "mcp_tool_done", {{"tool", toolName}});
+        AppendRuntimeLog(
+            "server",
+            "mcp_tool_done",
+            ServerAppLogFields(serveOptions, {{"tool", toolName}}));
         return SendJsonResponse(fd, 200, JsonRpcResult(id, McpToolSuccessResult(result, recording)));
     }
 
@@ -2522,18 +2573,33 @@ bool HandleHttpCommand(
     const std::string commandName = UrlDecode(request.path.substr(prefix.size()));
     const json commands = schema.value("commands", json::object());
     if (commandName.empty() || !commands.contains(commandName)) {
-        AppendRuntimeLog("server", "command_rejected", {{"command", commandName}, {"code", "unknown_command"}});
+        AppendRuntimeLog(
+            "server",
+            "command_rejected",
+            ServerAppLogFields(
+                serveOptions,
+                {{"command", commandName}, {"code", "unknown_command"}}));
         return SendJsonResponse(fd, 404, HttpErrorBody("unknown_command", "unknown command: " + commandName));
     }
     json input;
     std::string error;
     if (!ParseJsonObjectBody(request, input, error)) {
-        AppendRuntimeLog("server", "command_rejected", {{"command", commandName}, {"code", "invalid_input"}, {"error", error}});
+        AppendRuntimeLog(
+            "server",
+            "command_rejected",
+            ServerAppLogFields(
+                serveOptions,
+                {{"command", commandName},
+                 {"code", "invalid_input"},
+                 {"error", error}}));
         return SendJsonResponse(fd, 400, HttpErrorBody("invalid_input", error));
     }
 
     if (QueryFlagTrue(request.query, "async")) {
-        AppendRuntimeLog("server", "command_async_start", {{"command", commandName}});
+        AppendRuntimeLog(
+            "server",
+            "command_async_start",
+            ServerAppLogFields(serveOptions, {{"command", commandName}}));
         auto operation = CreateAsyncOperation(
             options,
             executablePath,
@@ -2542,15 +2608,24 @@ bool HandleHttpCommand(
             commandName,
             input,
             "http",
+            serveOptions.routeBasePath,
             error);
         if (!operation) {
-            AppendRuntimeLog("server", "command_async_failed", {{"command", commandName}, {"error", error}});
+            AppendRuntimeLog(
+                "server",
+                "command_async_failed",
+                ServerAppLogFields(
+                    serveOptions,
+                    {{"command", commandName}, {"error", error}}));
             return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error));
         }
-        AppendRuntimeLog("server", "command_async_created", {
-            {"command", commandName},
-            {"operation", operation->value("operation", "")}
-        });
+        AppendRuntimeLog(
+            "server",
+            "command_async_created",
+            ServerAppLogFields(serveOptions, {
+                {"command", commandName},
+                {"operation", operation->value("operation", "")}
+            }));
         auto headers = RecordingHeaders(operation->value("recording", json::object()));
         headers["Location"] = (*operation)["result_url"].get<std::string>();
         headers["Retry-After"] = "2";
@@ -2561,7 +2636,10 @@ bool HandleHttpCommand(
             headers);
     }
 
-    AppendRuntimeLog("server", "command_start", {{"command", commandName}});
+    AppendRuntimeLog(
+        "server",
+        "command_start",
+        ServerAppLogFields(serveOptions, {{"command", commandName}}));
     json recording;
     auto payload = RunAppCommand(
         options,
@@ -2577,21 +2655,38 @@ bool HandleHttpCommand(
         &recording,
         error);
     if (!payload) {
-        AppendRuntimeLog("server", "command_failed", {{"command", commandName}, {"code", "internal_error"}, {"error", error}});
+        AppendRuntimeLog(
+            "server",
+            "command_failed",
+            ServerAppLogFields(
+                serveOptions,
+                {{"command", commandName},
+                 {"code", "internal_error"},
+                 {"error", error}}));
         return SendJsonResponse(fd, 500, HttpErrorBody("internal_error", error), RecordingHeaders(recording));
     }
     if (!payload->value("ok", false)) {
         const std::string code = payload->value("code", "operation_failed");
         const json data = payload->value("data", json::object());
         const json details = data.is_object() ? data.value("error", json::object()) : json::object();
-        AppendRuntimeLog("server", "command_failed", {{"command", commandName}, {"code", code}, {"error", payload->value("error", "operation failed")}});
+        AppendRuntimeLog(
+            "server",
+            "command_failed",
+            ServerAppLogFields(
+                serveOptions,
+                {{"command", commandName},
+                 {"code", code},
+                 {"error", payload->value("error", "operation failed")}}));
         return SendJsonResponse(
             fd,
             HttpStatusForErrorCode(code),
             HttpErrorBody(code, payload->value("error", "operation failed"), details),
             RecordingHeaders(recording));
     }
-    AppendRuntimeLog("server", "command_done", {{"command", commandName}});
+    AppendRuntimeLog(
+        "server",
+        "command_done",
+        ServerAppLogFields(serveOptions, {{"command", commandName}}));
     return SendJsonResponse(fd, 200, (*payload)["data"]["result"], RecordingHeaders(recording));
 }
 
@@ -2599,7 +2694,8 @@ bool HandleHttpOperationResult(
     AppSocket fd,
     const std::string& operationId,
     const OperationPaths& paths,
-    const HttpRequest& request
+    const HttpRequest& request,
+    const std::string& routeBasePath
 ) {
     std::string error;
     const int64_t waitSeconds = QueryWaitSeconds(request.query);
@@ -2622,7 +2718,7 @@ bool HandleHttpOperationResult(
     }
     if (status == "pending" || status == "running" || status == "waiting_for_approval") {
         auto headers = recordingHeaders;
-        headers["Location"] = "/operations/" + operationId + "/result";
+        headers["Location"] = routeBasePath + "/operations/" + operationId + "/result";
         headers["Retry-After"] = "2";
         return SendJsonResponse(fd, 202, *view, headers);
     }
@@ -2641,7 +2737,8 @@ bool HandleHttpOperationResult(
 bool HandleHttpOperation(
     AppSocket fd,
     const std::string& appId,
-    const HttpRequest& request
+    const HttpRequest& request,
+    const std::string& routeBasePath
 ) {
     const std::string prefix = "/operations/";
     std::string rest = request.path.substr(prefix.size());
@@ -2719,7 +2816,7 @@ bool HandleHttpOperation(
     if (request.method == "GET" && rest.size() > resultSuffix.size() && rest.substr(rest.size() - resultSuffix.size()) == resultSuffix) {
         const std::string operationId = rest.substr(0, rest.size() - resultSuffix.size());
         OperationPaths paths = PathsForOperation(appId, operationId);
-        return HandleHttpOperationResult(fd, operationId, paths, request);
+        return HandleHttpOperationResult(fd, operationId, paths, request, routeBasePath);
     }
 
     if (request.method == "GET") {
@@ -2750,14 +2847,28 @@ bool HandleHttpRequest(
     const HttpRequest& request
 ) {
     if (!OriginAllowed(request, serveOptions)) {
-        AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "origin_not_allowed"}});
+        AppendRuntimeLog(
+            "server",
+            "request_rejected",
+            ServerAppLogFields(
+                serveOptions,
+                {{"method", request.method},
+                 {"path", request.path},
+                 {"code", "origin_not_allowed"}}));
         if (request.path == kMcpEndpointPath) {
             return SendJsonResponse(fd, 403, JsonRpcError(nullptr, -32000, "origin is not allowed"));
         }
         return SendJsonResponse(fd, 403, HttpErrorBody("permission_denied", "origin is not allowed"));
     }
     if (!Authorized(request, serveOptions)) {
-        AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "permission_denied"}});
+        AppendRuntimeLog(
+            "server",
+            "request_rejected",
+            ServerAppLogFields(
+                serveOptions,
+                {{"method", request.method},
+                 {"path", request.path},
+                 {"code", "permission_denied"}}));
         if (request.path == kMcpEndpointPath) {
             return SendJsonResponse(
                 fd,
@@ -2786,10 +2897,183 @@ bool HandleHttpRequest(
         return HandleHttpCommand(fd, options, executablePath, serveOptions, schema, request);
     }
     if (StartsWith(request.path, "/operations/")) {
-        return HandleHttpOperation(fd, appId, request);
+        return HandleHttpOperation(fd, appId, request, serveOptions.routeBasePath);
     }
-    AppendRuntimeLog("server", "request_rejected", {{"method", request.method}, {"path", request.path}, {"code", "not_found"}});
+    AppendRuntimeLog(
+        "server",
+        "request_rejected",
+        ServerAppLogFields(
+            serveOptions,
+            {{"method", request.method},
+             {"path", request.path},
+             {"code", "not_found"}}));
     return SendJsonResponse(fd, 404, HttpErrorBody("not_found", "unknown endpoint"));
+}
+
+json ConfiguredAppsHealth(const ConfiguredAppRegistry& apps) {
+    json result = json::object();
+    for (const auto& [name, app] : apps) {
+        result[name] = {
+            {"displayName", app.displayName},
+            {"status", app.ready() ? "ready" : "invalid"},
+            {"basePath", "/apps/" + name},
+            {"appId", app.ready() ? json(app.appId) : json(nullptr)},
+            {"path", app.appPath.string()},
+            {"error", app.ready() ? json(nullptr) : json(app.error)},
+        };
+    }
+    return result;
+}
+
+json ConfiguredServerHealth(const ConfiguredAppRegistry& apps) {
+    const bool degraded = std::any_of(
+        apps.begin(),
+        apps.end(),
+        [](const auto& item) { return !item.second.ready(); });
+    return {
+        {"ok", true},
+        {"status", degraded ? "degraded" : "ready"},
+        {"apps", ConfiguredAppsHealth(apps)},
+    };
+}
+
+bool IsConfiguredMcpPath(const std::string& path) {
+    return StartsWith(path, "/apps/") && EndsWith(path, "/mcp");
+}
+
+bool HandleConfiguredHttpRequest(
+    AppSocket fd,
+    const CliOptions& options,
+    const std::string& executablePath,
+    const AppServeOptions& serveOptions,
+    const ConfiguredAppRegistry& apps,
+    const HttpRequest& request
+) {
+    const bool mcpPath = IsConfiguredMcpPath(request.path);
+    if (!OriginAllowed(request, serveOptions)) {
+        AppendRuntimeLog("server", "request_rejected", {
+            {"method", request.method},
+            {"path", request.path},
+            {"code", "origin_not_allowed"},
+        });
+        return mcpPath
+            ? SendJsonResponse(fd, 403, JsonRpcError(nullptr, -32000, "origin is not allowed"))
+            : SendJsonResponse(fd, 403, HttpErrorBody("permission_denied", "origin is not allowed"));
+    }
+    if (!Authorized(request, serveOptions)) {
+        AppendRuntimeLog("server", "request_rejected", {
+            {"method", request.method},
+            {"path", request.path},
+            {"code", "permission_denied"},
+        });
+        return mcpPath
+            ? SendJsonResponse(
+                fd,
+                401,
+                JsonRpcError(nullptr, -32000, "missing or invalid bearer token"),
+                {{"WWW-Authenticate", "Bearer"}})
+            : SendJsonResponse(
+                fd,
+                401,
+                HttpErrorBody("permission_denied", "missing or invalid bearer token"));
+    }
+    if (request.method == "POST" && request.path == "/shutdown") {
+        AppendRuntimeLog("server", "shutdown_requested");
+        bool sent = SendJsonResponse(fd, 200, {{"ok", true}});
+        gAppServeStopRequested = true;
+        return sent;
+    }
+    if (request.method == "GET" && request.path == "/health") {
+        return SendJsonResponse(fd, 200, ConfiguredServerHealth(apps));
+    }
+    if (request.method == "GET" && request.path == "/apps") {
+        return SendJsonResponse(fd, 200, {{"apps", ConfiguredAppsHealth(apps)}});
+    }
+    if (!StartsWith(request.path, "/apps/")) {
+        return SendJsonResponse(
+            fd,
+            404,
+            HttpErrorBody(
+                "not_found",
+                "configured app endpoints are available under /apps/{name}"));
+    }
+
+    const size_t nameStart = std::string_view("/apps/").size();
+    const size_t nameEnd = request.path.find('/', nameStart);
+    const std::string encodedName = request.path.substr(
+        nameStart,
+        nameEnd == std::string::npos ? std::string::npos : nameEnd - nameStart);
+    const std::string appName = UrlDecode(encodedName);
+    auto appIt = apps.find(appName);
+    if (appName.empty() || appIt == apps.end()) {
+        const std::string message = "unknown configured app: " + appName;
+        return mcpPath
+            ? SendJsonResponse(fd, 404, JsonRpcError(nullptr, -32000, message))
+            : SendJsonResponse(
+                fd,
+                404,
+                HttpErrorBody("not_found", message));
+    }
+
+    const ConfiguredServedApp& app = appIt->second;
+    const std::string routePath =
+        nameEnd == std::string::npos ? std::string() : request.path.substr(nameEnd);
+    if (request.method == "GET" && routePath == "/health") {
+        if (!app.ready()) {
+            return SendJsonResponse(
+                fd,
+                503,
+                HttpErrorBody("invalid_app", app.error, {{"app", appName}}));
+        }
+        return SendJsonResponse(fd, 200, {
+            {"ok", true},
+            {"status", "ready"},
+            {"app", appName},
+        });
+    }
+
+    const bool supportedRoute =
+        routePath == "/schema" ||
+        routePath == kMcpEndpointPath ||
+        StartsWith(routePath, "/commands/") ||
+        StartsWith(routePath, "/operations/");
+    if (!supportedRoute) {
+        return SendJsonResponse(fd, 404, HttpErrorBody("not_found", "unknown app endpoint"));
+    }
+    if (!app.ready()) {
+        AppendRuntimeLog("server", "request_rejected", {
+            {"app", appName},
+            {"method", request.method},
+            {"path", request.path},
+            {"code", "invalid_app"},
+        });
+        return routePath == kMcpEndpointPath
+            ? SendJsonResponse(fd, 503, JsonRpcError(nullptr, -32000, app.error))
+            : SendJsonResponse(
+                fd,
+                503,
+                HttpErrorBody("invalid_app", app.error, {{"app", appName}}));
+    }
+
+    HttpRequest routedRequest = request;
+    routedRequest.path = routePath;
+    AppServeOptions routedOptions = serveOptions;
+    routedOptions.appPath = app.appPath;
+    routedOptions.routeBasePath = "/apps/" + appName;
+    routedOptions.stableAppName = appName;
+    AppendRuntimeLog("server", "request_routed", {
+        {"app", appName},
+        {"method", request.method},
+        {"path", request.path},
+    });
+    return HandleHttpRequest(
+        fd,
+        options,
+        executablePath,
+        routedOptions,
+        app.schema,
+        app.appId,
+        routedRequest);
 }
 
 bool ParseListen(const std::string& value, std::string& host, int& port) {
@@ -2812,18 +3096,45 @@ bool IsLocalBindHost(const std::string& host) {
 
 std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>& args, std::string& error) {
     if (args.size() < 3) {
-        error = "app serve requires <app.lua>";
+        error = "app serve requires <app.lua> or --configured";
         return std::nullopt;
     }
     AppServeOptions serve;
-    serve.appPath = args[2];
+    serve.configured = args[2] == "--configured";
+    if (serve.configured) {
+        const AppConfig config = LoadAppConfig(&error);
+        if (!error.empty()) {
+            return std::nullopt;
+        }
+        serve.host = config.server.host;
+        serve.port = config.server.port;
+        serve.authToken = config.server.authToken;
+        for (const auto& origin : config.server.allowedOrigins) {
+            auto normalized = NormalizeOrigin(origin);
+            if (!normalized) {
+                error = "configured server allowed origin is invalid: " + origin;
+                return std::nullopt;
+            }
+            serve.allowedOrigins.insert(*normalized);
+        }
+    } else {
+        serve.appPath = args[2];
+    }
     for (size_t i = 3; i < args.size(); ++i) {
         if (args[i] == "--listen") {
+            if (serve.configured) {
+                error = "app serve --configured uses server.host and server.port from config; --listen is not allowed";
+                return std::nullopt;
+            }
             if (i + 1 >= args.size() || !ParseListen(args[++i], serve.host, serve.port)) {
                 error = "app serve --listen requires host:port";
                 return std::nullopt;
             }
         } else if (args[i] == "--auth-token-env") {
+            if (serve.configured) {
+                error = "app serve --configured uses server.auth_token from config; --auth-token-env is not allowed";
+                return std::nullopt;
+            }
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --auth-token-env requires an environment variable name";
                 return std::nullopt;
@@ -2833,6 +3144,10 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
                 serve.authToken = token;
             }
         } else if (args[i] == "--allowed-origin") {
+            if (serve.configured) {
+                error = "app serve --configured uses server.allowed_origins from config; --allowed-origin is not allowed";
+                return std::nullopt;
+            }
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --allowed-origin requires an origin";
                 return std::nullopt;
@@ -2850,12 +3165,20 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
             }
             serve.trayStateFile = args[++i];
         } else if (args[i] == "--tray-config-name") {
+            if (serve.configured) {
+                error = "app serve --configured does not accept --tray-config-name";
+                return std::nullopt;
+            }
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --tray-config-name requires a value";
                 return std::nullopt;
             }
             serve.trayConfigName = args[++i];
         } else if (args[i] == "--tray-display-name") {
+            if (serve.configured) {
+                error = "app serve --configured does not accept --tray-display-name";
+                return std::nullopt;
+            }
             if (i + 1 >= args.size() || IsBlank(args[i + 1])) {
                 error = "app serve --tray-display-name requires a value";
                 return std::nullopt;
@@ -2874,7 +3197,9 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
         }
     }
     if (!IsLocalBindHost(serve.host) && serve.authToken.empty()) {
-        error = "app serve requires --auth-token-env when binding outside 127.0.0.1";
+        error = serve.configured
+            ? "app serve --configured requires server.auth_token when binding outside 127.0.0.1"
+            : "app serve requires --auth-token-env when binding outside 127.0.0.1";
         return std::nullopt;
     }
     AddDefaultAllowedOrigins(serve);
@@ -2886,7 +3211,8 @@ int RunHttpServer(
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
     const json& schema,
-    const std::string& appId
+    const std::string& appId,
+    const ConfiguredAppRegistry* configuredApps
 ) {
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
     gAppServeStopRequested = false;
@@ -2946,15 +3272,27 @@ int RunHttpServer(
 #if defined(__unix__) || defined(__APPLE__)
     ScopedAppServeSignals signals(serverFd);
 #endif
-    std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port
-              << " (MCP endpoint: /mcp)\n";
-    AppendRuntimeLog("server", "listening", {
-        {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)},
-        {"app", fs::absolute(serveOptions.appPath).string()}
-    });
+    std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port;
+    if (serveOptions.configured) {
+        std::cerr << " (" << (configuredApps ? configuredApps->size() : 0)
+                  << " configured apps under /apps/{name})\n";
+        AppendRuntimeLog("server", "listening", {
+            {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)},
+            {"configured", "true"},
+            {"apps", std::to_string(configuredApps ? configuredApps->size() : 0)},
+        });
+    } else {
+        std::cerr << " (MCP endpoint: /mcp)\n";
+        AppendRuntimeLog("server", "listening", {
+            {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)},
+            {"app", fs::absolute(serveOptions.appPath).string()},
+        });
+    }
 
     if (serveOptions.trayStateFile.has_value()) {
         TrayAppServerState state;
+        state.version = serveOptions.configured ? 2 : 1;
+        state.configured = serveOptions.configured;
 #if defined(_WIN32)
         state.pid = static_cast<long>(GetCurrentProcessId());
 #else
@@ -2963,7 +3301,9 @@ int RunHttpServer(
         state.host = bindHost;
         state.port = serveOptions.port;
         state.url = "http://" + bindHost + ":" + std::to_string(serveOptions.port);
-        state.appPath = fs::absolute(serveOptions.appPath).string();
+        state.appPath = serveOptions.configured
+            ? ""
+            : fs::absolute(serveOptions.appPath).string();
         state.appId = appId;
         state.configName = serveOptions.trayConfigName;
         state.displayName = serveOptions.trayDisplayName;
@@ -2990,7 +3330,24 @@ int RunHttpServer(
             AppendRuntimeLog("server", "request_rejected", {{"code", "invalid_input"}, {"error", error}});
             SendJsonResponse(clientFd, 400, HttpErrorBody("invalid_input", error));
         } else {
-            HandleHttpRequest(clientFd, options, executablePath, serveOptions, schema, appId, request);
+            if (serveOptions.configured && configuredApps != nullptr) {
+                HandleConfiguredHttpRequest(
+                    clientFd,
+                    options,
+                    executablePath,
+                    serveOptions,
+                    *configuredApps,
+                    request);
+            } else {
+                HandleHttpRequest(
+                    clientFd,
+                    options,
+                    executablePath,
+                    serveOptions,
+                    schema,
+                    appId,
+                    request);
+            }
         }
         CloseAppSocket(clientFd);
     }
@@ -3022,6 +3379,7 @@ int RunHttpServer(
     (void)serveOptions;
     (void)schema;
     (void)appId;
+    (void)configuredApps;
     return ErrorExit(options, "HTTP server is not implemented on this platform", 1, "internal_error");
 #endif
 }
@@ -3036,12 +3394,71 @@ int HandleAppServe(
     if (!serveOptions) {
         return ErrorExit(options, error, 2, "invalid_input");
     }
+    if (serveOptions->configured) {
+        const AppConfig config = LoadAppConfig(&error);
+        if (!error.empty()) {
+            return ErrorExit(options, error, 1, "invalid_config");
+        }
+        if (config.server.apps.empty()) {
+            return ErrorExit(
+                options,
+                "app serve --configured requires at least one server app",
+                2,
+                "invalid_input");
+        }
+        ConfiguredAppRegistry apps;
+        for (const auto& [name, appConfig] : config.server.apps) {
+            ConfiguredServedApp app;
+            app.name = name;
+            app.displayName =
+                appConfig.displayName.empty() ? name : appConfig.displayName;
+            std::error_code absoluteError;
+            app.appPath = fs::absolute(appConfig.path, absoluteError).lexically_normal();
+            if (absoluteError) {
+                app.appPath = appConfig.path;
+            }
+            if (!IsValidServerAppName(name)) {
+                app.error =
+                    "stable app name must match [A-Za-z0-9][A-Za-z0-9._-]*";
+            } else {
+                std::string schemaError;
+                auto appSchema = LoadAppSchema(
+                    options,
+                    executablePath,
+                    app.appPath,
+                    schemaError);
+                if (!appSchema) {
+                    app.error = schemaError.empty()
+                        ? "failed to load app schema"
+                        : schemaError;
+                } else {
+                    app.schema = std::move(*appSchema);
+                    app.appId = AppIdFor(app.appPath, app.schema);
+                }
+            }
+            apps[name] = std::move(app);
+        }
+        return RunHttpServer(
+            options,
+            executablePath,
+            *serveOptions,
+            json::object(),
+            "",
+            &apps);
+    }
+
     auto schema = LoadAppSchema(options, executablePath, serveOptions->appPath, error);
     if (!schema) {
         return ErrorExit(options, error, 1, "invalid_app");
     }
     const std::string appId = AppIdFor(serveOptions->appPath, *schema);
-    return RunHttpServer(options, executablePath, *serveOptions, *schema, appId);
+    return RunHttpServer(
+        options,
+        executablePath,
+        *serveOptions,
+        *schema,
+        appId,
+        nullptr);
 }
 
 int HandleAppRun(
@@ -3088,6 +3505,7 @@ int HandleAppRun(
             commandName,
             parsedArgs->input,
             "cli",
+            "",
             error);
         if (!operation) {
             return ErrorExit(options, error, 1, "internal_error");

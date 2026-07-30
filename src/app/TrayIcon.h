@@ -7,7 +7,6 @@
 #include <filesystem>
 #include <map>
 #include <memory>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,11 +17,6 @@ class wxProcess;
 class wxProcessEvent;
 class wxTimer;
 class wxTimerEvent;
-
-namespace ComputerCpp {
-struct ServerAppConfig;
-struct ServerConfig;
-}
 
 namespace ComputerCpp::App {
 
@@ -44,9 +38,6 @@ private:
     };
 
     struct ManagedServer {
-        std::string configName;
-        std::string displayName;
-        std::string appPath;
         std::string host;
         std::string url;
         std::filesystem::path statePath;
@@ -56,16 +47,16 @@ private:
         ServerStatus status = ServerStatus::Stopped;
         std::chrono::steady_clock::time_point deadline;
         int shutdownStage = 0;
-        bool configured = false;
-        bool batchMember = false;
         std::string failure;
+        std::string configSignature;
         std::chrono::steady_clock::time_point nextHealthProbe;
     };
 
-    enum class ServerBatchAction {
-        None,
-        Start,
-        Stop,
+    struct ConfiguredAppStatus {
+        std::string displayName;
+        std::string path;
+        std::string status = "configured";
+        std::string error;
     };
 
     void OnPermissions(wxCommandEvent& event);
@@ -83,23 +74,17 @@ private:
     void OnTaskbarRightUp(wxTaskBarIconEvent& event);
     void OnQuit(wxCommandEvent& event);
     void StartOwnedDaemon();
-    void RefreshConfiguredServers(bool force = false);
-    void AdoptExistingServers(bool removeInvalidState);
-    std::set<int> OccupiedServerPorts(const std::string& excludedConfigName = {}) const;
-    void ToggleServer(const std::string& configName);
-    void StartOneServer(
-        const ComputerCpp::ServerConfig& server,
-        const ComputerCpp::ServerAppConfig& app,
-        int port,
-        bool batchMember);
-    void StopOneServer(const std::string& configName, bool batchMember);
-    void PollServers();
-    void CompleteServerAction(const std::string& configName, bool success, const std::string& error = {});
-    void FinishBatchIfReady();
+    void RefreshConfiguredServer(bool force = false);
+    void AdoptExistingServer(bool removeInvalidState);
+    void StartConfiguredServer();
+    void StopConfiguredServer();
+    void PollServer();
+    void ApplyServerHealth(const std::string& responseBody);
+    void CleanupLegacyServers();
     void QueueServerNotification(std::string message);
     void ShowPendingServerNotifications();
     void ReleaseServerProcess(ManagedServer& server);
-    void StopAllServersBlocking();
+    void StopServerBlocking();
 
     bool daemonStarted_ = false;
 #ifdef __APPLE__
@@ -109,17 +94,15 @@ private:
     wxDialog* settingsDialog_ = nullptr;
     std::unique_ptr<TrayUpdateFlow> updateFlow_;
     std::unique_ptr<wxTimer> serverTimer_;
-    std::map<std::string, ManagedServer> servers_;
+    ManagedServer server_;
+    std::map<std::string, ConfiguredAppStatus> configuredApps_;
     std::string serverAuthToken_;
-    ServerBatchAction serverBatchAction_ = ServerBatchAction::None;
-    std::set<std::string> serverBatchPending_;
-    std::vector<std::string> serverBatchFailures_;
+    bool serverRestartRequired_ = false;
     std::vector<std::string> pendingServerNotifications_;
     bool serverNotificationScheduled_ = false;
     bool serverNotificationShowing_ = false;
-    std::string lastHealthProbeConfigName_;
     std::thread daemonThread_;
-    std::chrono::steady_clock::time_point configuredServersRefreshedAt_;
+    std::chrono::steady_clock::time_point configuredServerRefreshedAt_;
     size_t cachedActiveRecordingCount_ = 0;
     std::chrono::steady_clock::time_point activeRecordingCountRefreshedAt_;
 
