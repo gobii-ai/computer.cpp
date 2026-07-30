@@ -18,6 +18,10 @@ class wxProcessEvent;
 class wxTimer;
 class wxTimerEvent;
 
+namespace ComputerCpp {
+struct TrayAppServerState;
+}
+
 namespace ComputerCpp::App {
 
 class TrayIcon : public wxTaskBarIcon {
@@ -84,6 +88,8 @@ private:
     void QueueServerNotification(std::string message);
     void ShowPendingServerNotifications();
     void ReleaseServerProcess(ManagedServer& server);
+    TrayAppServerState CurrentServerState() const;
+    void ClearServerProcess();
     void StopServerBlocking();
 
     bool daemonStarted_ = false;

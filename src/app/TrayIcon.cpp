@@ -518,26 +518,7 @@ std::string AbsolutePathString(const std::string& path) {
 }
 
 std::string ServerConfigSignature(const AppConfig& config) {
-    std::vector<std::string> allowedOrigins = config.server.allowedOrigins;
-    std::sort(allowedOrigins.begin(), allowedOrigins.end());
-    json apps = json::object();
-    for (const auto& [name, app] : config.server.apps) {
-        std::string appPath = AbsolutePathString(app.path);
-        if (appPath.empty()) {
-            appPath = app.path;
-        }
-        apps[name] = {
-            {"displayName", app.displayName.empty() ? name : app.displayName},
-            {"path", appPath},
-        };
-    }
-    return json({
-        {"host", NormalizeBindHost(config.server.host)},
-        {"port", config.server.port},
-        {"authToken", config.server.authToken},
-        {"allowedOrigins", allowedOrigins},
-        {"apps", std::move(apps)},
-    }).dump();
+    return AppConfigToJson(config, false)["server"].dump();
 }
 
 bool ProcessHasExited(long pid, bool reapChild) {
@@ -2822,10 +2803,7 @@ void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
     }
     const ServerStatus previous = server_.status;
     RemoveTrayAppServerStateForPid(server_.statePath, server_.pid, nullptr);
-    ReleaseServerProcess(server_);
-    server_.pid = 0;
-    server_.port = 0;
-    server_.url.clear();
+    ClearServerProcess();
     if (previous == ServerStatus::Stopping) {
         server_.status = server_.failure.empty()
             ? ServerStatus::Stopped
@@ -3174,13 +3152,7 @@ void TrayIcon::StopConfiguredServer() {
         "server",
         "stop_requested configured pid=" + std::to_string(server_.pid));
 
-    TrayAppServerState state;
-    state.version = 2;
-    state.configured = true;
-    state.pid = server_.pid;
-    state.host = server_.host;
-    state.port = server_.port;
-    state.url = server_.url;
+    const TrayAppServerState state = CurrentServerState();
     const bool shutdownRequested = server_.pid > 0 &&
         RequestServerShutdown(state, serverAuthToken_);
     server_.shutdownStage = shutdownRequested ? 0 : 1;
@@ -3205,23 +3177,14 @@ void TrayIcon::PollServer() {
                 server_.statePath,
                 server_.pid,
                 nullptr);
-            ReleaseServerProcess(server_);
-            server_.pid = 0;
-            server_.port = 0;
-            server_.url.clear();
+            ClearServerProcess();
             server_.status = ServerStatus::Failed;
             server_.failure = "server exited before becoming healthy";
             QueueServerNotification(server_.failure);
         } else if (now >= server_.nextHealthProbe) {
             server_.nextHealthProbe =
                 now + std::chrono::milliseconds(500);
-            TrayAppServerState state;
-            state.version = 2;
-            state.configured = true;
-            state.pid = server_.pid;
-            state.host = server_.host;
-            state.port = server_.port;
-            state.url = server_.url;
+            const TrayAppServerState state = CurrentServerState();
             std::string healthBody;
             if (HttpHealthOk(
                     state,
@@ -3256,10 +3219,7 @@ void TrayIcon::PollServer() {
                 server_.statePath,
                 server_.pid,
                 nullptr);
-            ReleaseServerProcess(server_);
-            server_.pid = 0;
-            server_.port = 0;
-            server_.url.clear();
+            ClearServerProcess();
             server_.status = failure.empty()
                 ? ServerStatus::Stopped
                 : ServerStatus::Failed;
@@ -3348,6 +3308,24 @@ void TrayIcon::ReleaseServerProcess(ManagedServer& server) {
     server.process = nullptr;
 }
 
+TrayAppServerState TrayIcon::CurrentServerState() const {
+    TrayAppServerState state;
+    state.version = 2;
+    state.configured = true;
+    state.pid = server_.pid;
+    state.host = server_.host;
+    state.port = server_.port;
+    state.url = server_.url;
+    return state;
+}
+
+void TrayIcon::ClearServerProcess() {
+    ReleaseServerProcess(server_);
+    server_.pid = 0;
+    server_.port = 0;
+    server_.url.clear();
+}
+
 void TrayIcon::StopServerBlocking() {
     std::string configError;
     const AppConfig config = LoadAppConfig(&configError);
@@ -3358,13 +3336,7 @@ void TrayIcon::StopServerBlocking() {
         ReleaseServerProcess(server_);
         return;
     }
-    TrayAppServerState state;
-    state.version = 2;
-    state.configured = true;
-    state.pid = server_.pid;
-    state.host = server_.host;
-    state.port = server_.port;
-    state.url = server_.url;
+    const TrayAppServerState state = CurrentServerState();
     if (!RequestServerShutdown(state, token)) {
         SignalServerProcess(
             server_.pid,
@@ -3382,10 +3354,7 @@ void TrayIcon::StopServerBlocking() {
         server_.statePath,
         server_.pid,
         nullptr);
-    ReleaseServerProcess(server_);
-    server_.pid = 0;
-    server_.port = 0;
-    server_.url.clear();
+    ClearServerProcess();
     server_.status = ServerStatus::Stopped;
     server_.configSignature.clear();
     serverRestartRequired_ = false;
