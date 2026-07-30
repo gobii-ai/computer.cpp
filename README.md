@@ -374,7 +374,8 @@ POST /mcp
 
 The desktop tray serves every configured Lua app from one process and port.
 Each app has its own URL namespace, schema, command routes, MCP endpoint, app
-id, and operation storage.
+id, and operation storage. Configured mode also combines every ready app into
+one MCP endpoint at `/mcp`.
 
 ```toml
 [server]
@@ -396,7 +397,25 @@ Run the same configured server without the tray with:
 computer.cpp app serve --configured
 ```
 
-Configured app endpoints are namespaced by their stable config name:
+Use the root MCP endpoint when one client should discover every configured app:
+
+```text
+http://127.0.0.1:8787/mcp
+```
+
+Aggregate tool names are always prefixed by stable app name, so apps may define
+the same command without colliding:
+
+```text
+notes__create-note
+reminders__create-reminder
+notes__computer_cpp_operation_start
+```
+
+An underscore in a stable app name is escaped as `_u` in aggregate tool names.
+For example, `team_notes` exposes `team_unotes__create-note`.
+
+Use the namespaced endpoints when a client should see only one app:
 
 ```text
 http://127.0.0.1:8787/apps/notes/mcp

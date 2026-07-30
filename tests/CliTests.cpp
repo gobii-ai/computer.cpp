@@ -30,6 +30,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -2274,7 +2275,7 @@ void TestConfiguredMultiAppServer() {
     config.server.apps[primary.name] = primary;
 
     ComputerCpp::ServerAppConfig secondary;
-    secondary.name = "secondary";
+    secondary.name = "secondary_app";
     secondary.displayName = "Secondary";
     secondary.path = (RepoRoot() / "tests/lua/app-secondary.lua").string();
     config.server.apps[secondary.name] = secondary;
@@ -2338,7 +2339,7 @@ void TestConfiguredMultiAppServer() {
     const nlohmann::json healthJson = nlohmann::json::parse(health.body);
     assert(healthJson["status"] == "degraded");
     assert(healthJson["apps"]["primary"]["status"] == "ready");
-    assert(healthJson["apps"]["secondary"]["status"] == "ready");
+    assert(healthJson["apps"]["secondary_app"]["status"] == "ready");
     assert(healthJson["apps"]["invalid"]["status"] == "invalid");
 
     const auto unauthorized = SendTestHttpRequest(
@@ -2367,7 +2368,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary/mcp",
+        "/apps/secondary_app/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {
             {"Accept", "application/json, text/event-stream"},
@@ -2379,7 +2380,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary/nested/mcp",
+        "/apps/secondary_app/nested/mcp",
         "{}",
         {{"Origin", "https://not-allowed.example"}});
     assert(badOriginNestedMcp.status == 403);
@@ -2388,11 +2389,34 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         "",
         "POST",
-        "/apps/secondary/mcp",
+        "/apps/secondary_app/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {{"Accept", "application/json, text/event-stream"}});
     assert(unauthorizedMcp.status == 401);
     assert(nlohmann::json::parse(unauthorizedMcp.body)["jsonrpc"] == "2.0");
+    const auto badOriginAggregateMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"Origin", "https://not-allowed.example"},
+        });
+    assert(badOriginAggregateMcp.status == 403);
+    assert(nlohmann::json::parse(
+        badOriginAggregateMcp.body)["jsonrpc"] == "2.0");
+    const auto unauthorizedAggregateMcp = SendTestHttpRequest(
+        config.server.port,
+        "",
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(unauthorizedAggregateMcp.status == 401);
+    assert(nlohmann::json::parse(
+        unauthorizedAggregateMcp.body)["jsonrpc"] == "2.0");
 
     const auto apps = SendTestHttpRequest(
         config.server.port,
@@ -2411,7 +2435,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "GET",
-        "/apps/secondary/schema");
+        "/apps/secondary_app/schema");
     assert(primarySchema.status == 200);
     assert(secondarySchema.status == 200);
     assert(nlohmann::json::parse(primarySchema.body)["title"] == "Unit App");
@@ -2421,7 +2445,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary/commands/echo",
+        "/apps/secondary_app/commands/echo",
         R"({"message":"hello"})");
     assert(secondaryEcho.status == 200);
     assert(nlohmann::json::parse(secondaryEcho.body)["source"] == "secondary");
@@ -2458,7 +2482,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary/mcp",
+        "/apps/secondary_app/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {
             {"Accept", "application/json, text/event-stream"},
@@ -2467,6 +2491,220 @@ void TestConfiguredMultiAppServer() {
     assert(mcpTools.status == 200);
     const nlohmann::json toolsJson = nlohmann::json::parse(mcpTools.body);
     assert(toolsJson["result"]["tools"][0]["name"] == "echo");
+
+    int aggregateMcpId = 10;
+    const auto aggregateMcp = [&](const nlohmann::json& message) {
+        return SendTestHttpRequest(
+            config.server.port,
+            config.server.authToken,
+            "POST",
+            "/mcp",
+            message.dump(),
+            {
+                {"Accept", "application/json, text/event-stream"},
+                {"MCP-Protocol-Version", "2025-11-25"},
+            });
+    };
+    const auto initialize = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "initialize"},
+        {"params", {{"protocolVersion", "2025-11-25"}}},
+    });
+    assert(initialize.status == 200);
+    const nlohmann::json initializeJson =
+        nlohmann::json::parse(initialize.body);
+    assert(initializeJson["result"]["serverInfo"]["name"] ==
+        "computer.cpp-configured");
+
+    const auto aggregateTools = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/list"},
+        {"params", nlohmann::json::object()},
+    });
+    assert(aggregateTools.status == 200);
+    const nlohmann::json aggregateToolsJson =
+        nlohmann::json::parse(aggregateTools.body);
+    std::set<std::string> aggregateToolNames;
+    for (const auto& tool :
+         aggregateToolsJson["result"]["tools"]) {
+        aggregateToolNames.insert(tool["name"].get<std::string>());
+    }
+    assert(aggregateToolNames.contains("primary__echo"));
+    assert(aggregateToolNames.contains("secondary_uapp__echo"));
+    assert(aggregateToolNames.contains(
+        "primary__computer_cpp_operation_start"));
+    assert(aggregateToolNames.contains(
+        "primary__computer_cpp_operation_status"));
+    assert(aggregateToolNames.contains(
+        "primary__computer_cpp_operation_respond"));
+    assert(aggregateToolNames.contains(
+        "primary__computer_cpp_operation_cancel"));
+    assert(std::none_of(
+        aggregateToolNames.begin(),
+        aggregateToolNames.end(),
+        [](const std::string& name) {
+            return name.rfind("invalid__", 0) == 0;
+        }));
+
+    const auto primaryMcpEcho = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__echo"},
+            {"arguments", {{"message", "from primary"}}},
+        }},
+    });
+    assert(primaryMcpEcho.status == 200);
+    assert(nlohmann::json::parse(primaryMcpEcho.body)
+        ["result"]["structuredContent"]["message"] == "from primary");
+    const auto secondaryMcpEcho = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "secondary_uapp__echo"},
+            {"arguments", {{"message", "from secondary"}}},
+        }},
+    });
+    assert(secondaryMcpEcho.status == 200);
+    assert(nlohmann::json::parse(secondaryMcpEcho.body)
+        ["result"]["structuredContent"]["source"] == "secondary");
+
+    const auto statusStart = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__computer_cpp_operation_start"},
+            {"arguments", {
+                {"command", "slow"},
+                {"arguments", {{"delay", 0}}},
+            }},
+        }},
+    });
+    assert(statusStart.status == 200);
+    const nlohmann::json statusOperation =
+        nlohmann::json::parse(statusStart.body)
+            ["result"]["structuredContent"];
+    const std::string statusOperationId =
+        statusOperation["operation"].get<std::string>();
+    assert(statusOperation["result_url"].get<std::string>().rfind(
+        "/apps/primary/operations/",
+        0) == 0);
+    const auto completedStatus = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__computer_cpp_operation_status"},
+            {"arguments", {
+                {"operation", statusOperationId},
+                {"waitSeconds", 10},
+            }},
+        }},
+    });
+    assert(completedStatus.status == 200);
+    assert(nlohmann::json::parse(completedStatus.body)
+        ["result"]["structuredContent"]["status"] == "succeeded");
+
+    const auto cancelCompleted = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__computer_cpp_operation_cancel"},
+            {"arguments", {{"operation", statusOperationId}}},
+        }},
+    });
+    assert(cancelCompleted.status == 200);
+    const nlohmann::json cancelCompletedJson =
+        nlohmann::json::parse(cancelCompleted.body);
+    assert(cancelCompletedJson["result"]["structuredContent"]["status"] ==
+        "succeeded");
+    const auto respondToCompleted = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__computer_cpp_operation_respond"},
+            {"arguments", {
+                {"operation", statusOperationId},
+                {"approvalId", "missing-approval"},
+                {"decision", "approve"},
+            }},
+        }},
+    });
+    assert(respondToCompleted.status == 200);
+    assert(nlohmann::json::parse(
+        respondToCompleted.body)["result"]["isError"] == true);
+
+    const auto unknownAggregateTool = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "echo"},
+            {"arguments", {{"message", "unprefixed"}}},
+        }},
+    });
+    assert(unknownAggregateTool.status == 400);
+    assert(nlohmann::json::parse(
+        unknownAggregateTool.body)["error"]["code"] == -32602);
+    const auto malformedAggregateMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        "{",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(malformedAggregateMcp.status == 400);
+    assert(nlohmann::json::parse(
+        malformedAggregateMcp.body)["error"]["code"] == -32700);
+    const auto unsupportedAggregateProtocol = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":50,"method":"ping","params":{}})",
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "1900-01-01"},
+        });
+    assert(unsupportedAggregateProtocol.status == 400);
+    assert(nlohmann::json::parse(
+        unsupportedAggregateProtocol.body)["jsonrpc"] == "2.0");
+    const auto aggregateSse = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "GET",
+        "/mcp",
+        "",
+        {{"Accept", "text/event-stream"}});
+    assert(aggregateSse.status == 405);
+    assert(nlohmann::json::parse(
+        aggregateSse.body)["jsonrpc"] == "2.0");
+    const auto aggregateDelete = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "DELETE",
+        "/mcp",
+        "",
+        {{"Accept", "application/json, text/event-stream"}});
+    assert(aggregateDelete.status == 405);
+    assert(nlohmann::json::parse(
+        aggregateDelete.body)["jsonrpc"] == "2.0");
+    const auto unsupportedAggregateMethod = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "resources/list"},
+        {"params", nlohmann::json::object()},
+    });
+    assert(unsupportedAggregateMethod.status == 404);
+    assert(nlohmann::json::parse(
+        unsupportedAggregateMethod.body)["error"]["code"] == -32601);
 
     const auto invalidApp = SendTestHttpRequest(
         config.server.port,
