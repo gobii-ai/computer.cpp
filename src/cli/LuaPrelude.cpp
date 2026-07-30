@@ -1229,6 +1229,30 @@ local function write_json_file(path, value)
   file:close()
 end
 
+local function write_bytes_file(path, value)
+  local file = assert(io.open(path, "wb"))
+  file:write(value)
+  file:close()
+end
+
+local function file_exists(path)
+  local file = io.open(path, "rb")
+  if not file then return false end
+  file:close()
+  return true
+end
+
+local function artifact_filename(value)
+  local name = tostring(value or "")
+  name = name:gsub("[/\\]", "-")
+  name = name:gsub("[^%w%._%-]", "-")
+  name = name:gsub("^%.+", "")
+  name = name:gsub("%-+", "-")
+  if name == "" then name = "artifact.bin" end
+  if #name > 180 then name = name:sub(1, 180) end
+  return name
+end
+
 local function read_json_file(path)
   local file = io.open(path, "r")
   if not file then return nil end
@@ -1244,6 +1268,9 @@ end
     out << R"LUA(
 local function make_app_context(command_name, input)
   local operation_dir = context.vars and context.vars.__ac_operation_dir or nil
+  local artifacts_dir = operation_dir and operation_dir ~= ""
+    and (operation_dir .. "/artifacts")
+    or (context.vars and context.vars.__ac_artifacts_dir or nil)
   local ctx = {
     command = command_name,
     input = input,
@@ -1264,7 +1291,27 @@ local function make_app_context(command_name, input)
     return value
   end
   function ctx:artifact(path_or_bytes, metadata)
-    local entry = { path = tostring(path_or_bytes or ""), metadata = metadata or {} }
+    metadata = type(metadata) == "table" and metadata or {}
+    local path = tostring(path_or_bytes or "")
+    local filename = artifact_filename(metadata.filename)
+    if artifacts_dir and artifacts_dir ~= "" and metadata.filename ~= nil then
+      local output_path = artifacts_dir .. "/" .. filename
+      local stem, extension = filename:match("^(.*)(%.[^%.]+)$")
+      stem = stem or filename
+      extension = extension or ""
+      local suffix = 2
+      while file_exists(output_path) do
+        output_path = artifacts_dir .. "/" .. stem .. "-" .. tostring(suffix) .. extension
+        suffix = suffix + 1
+      end
+      local ok, write_error = pcall(write_bytes_file, output_path, path)
+      if ok then
+        path = output_path
+      else
+        metadata.writeError = tostring(write_error)
+      end
+    end
+    local entry = { path = path, metadata = metadata }
     trace[#trace + 1] = { kind = "artifact", value = redacted(entry) }
     return entry
   end

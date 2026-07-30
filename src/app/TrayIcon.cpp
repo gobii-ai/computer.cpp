@@ -818,15 +818,6 @@ std::filesystem::path PermissionSetupMarkerPath() {
     return ComputerCpp::AppDataDir() / "permission-setup-active";
 }
 
-bool PermissionSetupWasActive() {
-    try {
-        std::error_code ec;
-        return std::filesystem::exists(PermissionSetupMarkerPath(), ec) && !ec;
-    } catch (...) {
-        return false;
-    }
-}
-
 void MarkPermissionSetupActive() {
     try {
         std::ofstream marker(PermissionSetupMarkerPath());
@@ -2704,7 +2695,9 @@ TrayIcon::TrayIcon() {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
                               " bundle_path=" + ComputerCppBundlePath());
-        if (!status.accessibility || !status.screenCapture || PermissionSetupWasActive()) {
+        if (status.accessibility && status.screenCapture) {
+            ClearPermissionSetupActive();
+        } else {
             SetUpPermissionsIfNeeded(false);
         }
     });

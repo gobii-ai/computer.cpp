@@ -2618,6 +2618,45 @@ void TestLuaApprovalContextDryRun() {
     assert(resumed);
 }
 
+void TestLuaArtifactContextWritesBytes() {
+    if (SkipLuaTestIfUnavailable("TestLuaArtifactContextWritesBytes")) {
+        return;
+    }
+
+    const auto root = std::filesystem::temp_directory_path() /
+        ("computer-cpp-artifact-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "artifacts");
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/app-artifact.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+    options.vars["__ac_app_mode"] = "run";
+    options.vars["__ac_app_command"] = "write";
+    options.vars["__ac_app_input_json"] = "{}";
+    options.vars["__ac_operation_dir"] = root.string();
+
+    auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    const auto payload = nlohmann::json::parse(result.stdoutText);
+    const std::filesystem::path artifactPath =
+        payload["data"]["result"]["path"].get<std::string>();
+    const std::filesystem::path secondArtifactPath =
+        payload["data"]["result"]["secondPath"].get<std::string>();
+    assert(artifactPath.parent_path() == root / "artifacts");
+    assert(secondArtifactPath.parent_path() == root / "artifacts");
+    assert(secondArtifactPath != artifactPath);
+    assert(std::filesystem::exists(artifactPath));
+    assert(std::filesystem::exists(secondArtifactPath));
+    std::ifstream artifact(artifactPath, std::ios::binary);
+    const std::string contents(
+        (std::istreambuf_iterator<char>(artifact)),
+        std::istreambuf_iterator<char>());
+    assert(contents == "<html><body>diagnostic DOM</body></html>");
+    std::filesystem::remove_all(root);
+}
+
 void TestCliApprovalLifecycle() {
 #if defined(__unix__) || defined(__APPLE__)
     if (SkipLuaTestIfUnavailable("TestCliApprovalLifecycle")) return;
@@ -3035,6 +3074,7 @@ void RunCliTests() {
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();
+    TestLuaArtifactContextWritesBytes();
     TestCliApprovalLifecycle();
     TestReservedAppCommandRejected();
     TestLuaAppErrorsAreUserFacing();
