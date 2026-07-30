@@ -413,7 +413,8 @@ notes__computer_cpp_operation_start
 ```
 
 An underscore in a stable app name is escaped as `_u` in aggregate tool names.
-For example, `team_notes` exposes `team_unotes__create-note`.
+For example, `team_notes` exposes `team_unotes__create-note`. Periods and
+hyphens are preserved.
 
 Use the namespaced endpoints when a client should see only one app:
 

@@ -2275,7 +2275,7 @@ void TestConfiguredMultiAppServer() {
     config.server.apps[primary.name] = primary;
 
     ComputerCpp::ServerAppConfig secondary;
-    secondary.name = "secondary_app";
+    secondary.name = "secondary.app_name";
     secondary.displayName = "Secondary";
     secondary.path = (RepoRoot() / "tests/lua/app-secondary.lua").string();
     config.server.apps[secondary.name] = secondary;
@@ -2315,6 +2315,13 @@ void TestConfiguredMultiAppServer() {
         std::string::npos);
     ::close(occupiedFd);
 
+    ScopedEnvVar logFileEnv("COMPUTER_CPP_LOG_FILE");
+    ScopedEnvVar logFlagEnv("COMPUTER_CPP_LOG");
+    const std::filesystem::path serverLog =
+        ComputerCpp::Tests::MakeTempHome() / "configured-server.log";
+    logFileEnv.Set(serverLog.string());
+    logFlagEnv.Set("1");
+
     const pid_t serverPid = SpawnSupervisedTestProcess({
         executable.string(),
         "app",
@@ -2339,7 +2346,7 @@ void TestConfiguredMultiAppServer() {
     const nlohmann::json healthJson = nlohmann::json::parse(health.body);
     assert(healthJson["status"] == "degraded");
     assert(healthJson["apps"]["primary"]["status"] == "ready");
-    assert(healthJson["apps"]["secondary_app"]["status"] == "ready");
+    assert(healthJson["apps"]["secondary.app_name"]["status"] == "ready");
     assert(healthJson["apps"]["invalid"]["status"] == "invalid");
 
     const auto unauthorized = SendTestHttpRequest(
@@ -2368,7 +2375,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary_app/mcp",
+        "/apps/secondary.app_name/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {
             {"Accept", "application/json, text/event-stream"},
@@ -2380,7 +2387,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary_app/nested/mcp",
+        "/apps/secondary.app_name/nested/mcp",
         "{}",
         {{"Origin", "https://not-allowed.example"}});
     assert(badOriginNestedMcp.status == 403);
@@ -2389,7 +2396,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         "",
         "POST",
-        "/apps/secondary_app/mcp",
+        "/apps/secondary.app_name/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {{"Accept", "application/json, text/event-stream"}});
     assert(unauthorizedMcp.status == 401);
@@ -2435,7 +2442,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "GET",
-        "/apps/secondary_app/schema");
+        "/apps/secondary.app_name/schema");
     assert(primarySchema.status == 200);
     assert(secondarySchema.status == 200);
     assert(nlohmann::json::parse(primarySchema.body)["title"] == "Unit App");
@@ -2445,7 +2452,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary_app/commands/echo",
+        "/apps/secondary.app_name/commands/echo",
         R"({"message":"hello"})");
     assert(secondaryEcho.status == 200);
     assert(nlohmann::json::parse(secondaryEcho.body)["source"] == "secondary");
@@ -2482,7 +2489,7 @@ void TestConfiguredMultiAppServer() {
         config.server.port,
         config.server.authToken,
         "POST",
-        "/apps/secondary_app/mcp",
+        "/apps/secondary.app_name/mcp",
         R"({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})",
         {
             {"Accept", "application/json, text/event-stream"},
@@ -2527,12 +2534,20 @@ void TestConfiguredMultiAppServer() {
     const nlohmann::json aggregateToolsJson =
         nlohmann::json::parse(aggregateTools.body);
     std::set<std::string> aggregateToolNames;
+    std::string undescribedToolDescription;
     for (const auto& tool :
          aggregateToolsJson["result"]["tools"]) {
-        aggregateToolNames.insert(tool["name"].get<std::string>());
+        const std::string name = tool["name"].get<std::string>();
+        aggregateToolNames.insert(name);
+        if (name == "secondary.app_uname__undescribed") {
+            undescribedToolDescription =
+                tool["description"].get<std::string>();
+        }
     }
     assert(aggregateToolNames.contains("primary__echo"));
-    assert(aggregateToolNames.contains("secondary_uapp__echo"));
+    assert(aggregateToolNames.contains("secondary.app_uname__echo"));
+    assert(undescribedToolDescription ==
+        "[Secondary] secondary.app_name command: undescribed");
     assert(aggregateToolNames.contains(
         "primary__computer_cpp_operation_start"));
     assert(aggregateToolNames.contains(
@@ -2565,7 +2580,7 @@ void TestConfiguredMultiAppServer() {
         {"id", aggregateMcpId++},
         {"method", "tools/call"},
         {"params", {
-            {"name", "secondary_uapp__echo"},
+            {"name", "secondary.app_uname__echo"},
             {"arguments", {{"message", "from secondary"}}},
         }},
     });
@@ -2771,6 +2786,10 @@ void TestConfiguredMultiAppServer() {
         ::waitpid(serverPid, &status, 0);
     }
     assert(exited);
+    const std::string log = ReadTextFile(serverLog);
+    assert(log.find("mcp_aggregate_app_skipped") != std::string::npos);
+    assert(log.find("app=\"invalid\"") != std::string::npos);
+    assert(log.find("reserved computer_cpp_ prefix") != std::string::npos);
     assert(ComputerCpp::SaveAppConfig(original, &error));
 #endif
 }

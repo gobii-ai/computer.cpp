@@ -1703,6 +1703,11 @@ struct ConfiguredMcpCatalog {
     std::map<std::string, ConfiguredMcpTool> entries;
 };
 
+struct ConfiguredServerContext {
+    const ConfiguredAppRegistry& apps;
+    const ConfiguredMcpCatalog& mcpCatalog;
+};
+
 struct HttpRequest {
     std::string method;
     std::string target;
@@ -2344,9 +2349,10 @@ ConfiguredMcpCatalog MakeConfiguredMcpCatalog(
             const std::string exposedName = prefix + underlyingName;
             const std::string description = tool.value("description", "");
             tool["name"] = exposedName;
-            tool["description"] =
-                "[" + app.displayName + "]" +
-                (description.empty() ? "" : " " + description);
+            tool["description"] = description.empty()
+                ? "[" + app.displayName + "] " + appName +
+                    " command: " + underlyingName
+                : "[" + app.displayName + "] " + description;
             catalog.tools.push_back(tool);
             catalog.entries.emplace(
                 exposedName,
@@ -2398,8 +2404,7 @@ bool HandleMcpJsonRpcRequest(
     const AppServeOptions& serveOptions,
     const json& schema,
     const json& message,
-    const ConfiguredAppRegistry* configuredApps = nullptr,
-    const ConfiguredMcpCatalog* configuredCatalog = nullptr
+    const ConfiguredServerContext* configured = nullptr
 ) {
     const json id = JsonRpcIdOrNull(message);
     const std::string method = message.value("method", "");
@@ -2414,7 +2419,7 @@ bool HandleMcpJsonRpcRequest(
             200,
             JsonRpcResult(
                 id,
-                configuredCatalog
+                configured
                     ? ConfiguredMcpInitializeResult(params)
                     : McpInitializeResult(schema, params)));
     }
@@ -2427,8 +2432,8 @@ bool HandleMcpJsonRpcRequest(
             200,
             JsonRpcResult(
                 id,
-                configuredCatalog
-                    ? json({{"tools", configuredCatalog->tools}})
+                configured
+                    ? json({{"tools", configured->mcpCatalog.tools}})
                     : MakeMcpToolsList(schema)));
     }
     if (method == "tools/call") {
@@ -2436,9 +2441,9 @@ bool HandleMcpJsonRpcRequest(
         if (toolName.empty()) {
             return SendJsonRpcError(fd, 400, id, -32602, "tools/call requires params.name");
         }
-        if (configuredApps && configuredCatalog) {
-            auto toolIt = configuredCatalog->entries.find(toolName);
-            if (toolIt == configuredCatalog->entries.end()) {
+        if (configured) {
+            auto toolIt = configured->mcpCatalog.entries.find(toolName);
+            if (toolIt == configured->mcpCatalog.entries.end()) {
                 return SendJsonRpcError(
                     fd,
                     400,
@@ -2447,16 +2452,8 @@ bool HandleMcpJsonRpcRequest(
                     "Unknown tool: " + toolName);
             }
             const ConfiguredMcpTool& tool = toolIt->second;
-            auto appIt = configuredApps->find(tool.appName);
-            if (appIt == configuredApps->end() || !appIt->second.ready()) {
-                return SendJsonRpcError(
-                    fd,
-                    503,
-                    id,
-                    -32000,
-                    "configured app is unavailable: " + tool.appName);
-            }
-            const ConfiguredServedApp& app = appIt->second;
+            const ConfiguredServedApp& app =
+                configured->apps.at(tool.appName);
             AppServeOptions routedOptions = serveOptions;
             routedOptions.appPath = app.appPath;
             routedOptions.routeBasePath = "/apps/" + tool.appName;
@@ -2729,8 +2726,7 @@ bool HandleConfiguredMcpRequest(
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
-    const ConfiguredAppRegistry& apps,
-    const ConfiguredMcpCatalog& catalog,
+    const ConfiguredServerContext& configured,
     const HttpRequest& request
 ) {
     return HandleMcpTransportRequest(
@@ -2744,8 +2740,7 @@ bool HandleConfiguredMcpRequest(
                 serveOptions,
                 json::object(),
                 message,
-                &apps,
-                &catalog);
+                &configured);
         });
 }
 
@@ -3072,10 +3067,10 @@ bool HandleConfiguredHttpRequest(
     const CliOptions& options,
     const std::string& executablePath,
     const AppServeOptions& serveOptions,
-    const ConfiguredAppRegistry& apps,
-    const ConfiguredMcpCatalog& mcpCatalog,
+    const ConfiguredServerContext& configured,
     const HttpRequest& request
 ) {
+    const ConfiguredAppRegistry& apps = configured.apps;
     const bool mcpPath = IsConfiguredMcpPath(request.path);
     if (request.method == "GET" && request.path == "/health") {
         return SendJsonResponse(fd, 200, ConfiguredServerHealth(apps));
@@ -3089,8 +3084,7 @@ bool HandleConfiguredHttpRequest(
             options,
             executablePath,
             serveOptions,
-            apps,
-            mcpCatalog,
+            configured,
             request);
     }
     if (!StartsWith(request.path, "/apps/")) {
@@ -3310,9 +3304,15 @@ int RunHttpServer(
     const AppServeOptions& serveOptions,
     const json& schema,
     const std::string& appId,
-    const ConfiguredAppRegistry* configuredApps,
-    const ConfiguredMcpCatalog* configuredMcpCatalog
+    const ConfiguredServerContext* configured
 ) {
+    if (serveOptions.configured != (configured != nullptr)) {
+        return ErrorExit(
+            options,
+            "configured server context does not match serve mode",
+            1,
+            "internal_error");
+    }
 #if defined(__unix__) || defined(__APPLE__) || defined(_WIN32)
     gAppServeStopRequested = false;
 #if defined(_WIN32)
@@ -3373,14 +3373,22 @@ int RunHttpServer(
 #endif
     std::cerr << "computer.cpp app server listening on http://" << bindHost << ":" << serveOptions.port;
     if (serveOptions.configured) {
-        std::cerr << " (" << (configuredApps ? configuredApps->size() : 0)
+        std::cerr << " (" << configured->apps.size()
                   << " configured apps; aggregate MCP: /mcp; app routes: /apps/{name})\n";
         AppendRuntimeLog("server", "listening", {
             {"url", "http://" + bindHost + ":" + std::to_string(serveOptions.port)},
             {"configured", "true"},
-            {"apps", std::to_string(configuredApps ? configuredApps->size() : 0)},
+            {"apps", std::to_string(configured->apps.size())},
             {"mcp", "/mcp"},
         });
+        for (const auto& [name, app] : configured->apps) {
+            if (!app.ready()) {
+                AppendRuntimeLog("server", "mcp_aggregate_app_skipped", {
+                    {"app", name},
+                    {"error", app.error},
+                });
+            }
+        }
     } else {
         std::cerr << " (MCP endpoint: /mcp)\n";
         AppendRuntimeLog("server", "listening", {
@@ -3436,16 +3444,13 @@ int RunHttpServer(
                        serveOptions.configured
                            ? IsConfiguredMcpPath(request.path)
                            : request.path == kMcpEndpointPath)) {
-            if (serveOptions.configured &&
-                configuredApps != nullptr &&
-                configuredMcpCatalog != nullptr) {
+            if (serveOptions.configured) {
                 HandleConfiguredHttpRequest(
                     clientFd,
                     options,
                     executablePath,
                     serveOptions,
-                    *configuredApps,
-                    *configuredMcpCatalog,
+                    *configured,
                     request);
             } else {
                 HandleHttpRequest(
@@ -3488,8 +3493,7 @@ int RunHttpServer(
     (void)serveOptions;
     (void)schema;
     (void)appId;
-    (void)configuredApps;
-    (void)configuredMcpCatalog;
+    (void)configured;
     return ErrorExit(options, "HTTP server is not implemented on this platform", 1, "internal_error");
 #endif
 }
@@ -3547,14 +3551,14 @@ int HandleAppServe(
         }
         const ConfiguredMcpCatalog mcpCatalog =
             MakeConfiguredMcpCatalog(apps);
+        const ConfiguredServerContext configured = {apps, mcpCatalog};
         return RunHttpServer(
             options,
             executablePath,
             *serveOptions,
             json::object(),
             "",
-            &apps,
-            &mcpCatalog);
+            &configured);
     }
 
     auto schema = LoadAppSchema(options, executablePath, serveOptions->appPath, error);
@@ -3568,7 +3572,6 @@ int HandleAppServe(
         *serveOptions,
         *schema,
         appId,
-        nullptr,
         nullptr);
 }
 

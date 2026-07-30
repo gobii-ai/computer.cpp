@@ -23,4 +23,14 @@ app:command("echo", {
   end,
 })
 
+app:command("undescribed", {
+  input = {},
+  output = {
+    source = { type = "string" },
+  },
+  handler = function()
+    return { source = "secondary" }
+  end,
+})
+
 return app
