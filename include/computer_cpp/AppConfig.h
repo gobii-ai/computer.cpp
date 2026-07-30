@@ -60,7 +60,9 @@ struct AppConfig {
 };
 
 AppConfig DefaultAppConfig();
-AppConfig LoadAppConfig(std::string* error = nullptr);
+AppConfig LoadAppConfig(
+    std::string* error = nullptr,
+    std::vector<std::string>* warnings = nullptr);
 bool SaveAppConfig(const AppConfig& config, std::string* error = nullptr);
 bool AppConfigExists();
 

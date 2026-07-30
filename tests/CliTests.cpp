@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -195,6 +196,54 @@ TestHttpResponse SendTestHttpRequest(
         result.body = response.substr(bodyStart + 4);
     }
     return result;
+}
+
+pid_t SpawnSupervisedTestProcess(const std::vector<std::string>& command) {
+    const pid_t supervisorPid = ::fork();
+    if (supervisorPid != 0) {
+        return supervisorPid;
+    }
+    if (::setpgid(0, 0) != 0) {
+        _exit(127);
+    }
+    const pid_t testPid = ::getppid();
+    const pid_t childPid = ::fork();
+    if (childPid == 0) {
+        int devNull = ::open("/dev/null", O_RDWR);
+        if (devNull >= 0) {
+            ::dup2(devNull, STDIN_FILENO);
+            ::dup2(devNull, STDOUT_FILENO);
+            ::dup2(devNull, STDERR_FILENO);
+            if (devNull > STDERR_FILENO) {
+                ::close(devNull);
+            }
+        }
+        std::vector<char*> argv;
+        argv.reserve(command.size() + 1);
+        for (const auto& arg : command) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+        ::execv(command.front().c_str(), argv.data());
+        _exit(127);
+    }
+    if (childPid < 0) {
+        _exit(127);
+    }
+    while (true) {
+        int status = 0;
+        const pid_t waited = ::waitpid(childPid, &status, WNOHANG);
+        if (waited == childPid) {
+            _exit(WIFEXITED(status) ? WEXITSTATUS(status) : 1);
+        }
+        if (::getppid() != testPid) {
+            ::kill(childPid, SIGKILL);
+            while (::waitpid(childPid, &status, 0) < 0 && errno == EINTR) {
+            }
+            _exit(1);
+        }
+        ::usleep(20000);
+    }
 }
 #endif
 
@@ -2265,27 +2314,13 @@ void TestConfiguredMultiAppServer() {
         std::string::npos);
     ::close(occupiedFd);
 
-    pid_t serverPid = ::fork();
+    const pid_t serverPid = SpawnSupervisedTestProcess({
+        executable.string(),
+        "app",
+        "serve",
+        "--configured",
+    });
     assert(serverPid >= 0);
-    if (serverPid == 0) {
-        int devNull = ::open("/dev/null", O_RDWR);
-        if (devNull >= 0) {
-            ::dup2(devNull, STDIN_FILENO);
-            ::dup2(devNull, STDOUT_FILENO);
-            ::dup2(devNull, STDERR_FILENO);
-            if (devNull > STDERR_FILENO) {
-                ::close(devNull);
-            }
-        }
-        ::execl(
-            executable.c_str(),
-            executable.c_str(),
-            "app",
-            "serve",
-            "--configured",
-            static_cast<char*>(nullptr));
-        _exit(127);
-    }
 
     TestHttpResponse health;
     for (int attempt = 0; attempt < 100; ++attempt) {
@@ -2340,6 +2375,15 @@ void TestConfiguredMultiAppServer() {
         });
     assert(badOriginMcp.status == 403);
     assert(nlohmann::json::parse(badOriginMcp.body)["jsonrpc"] == "2.0");
+    const auto badOriginNestedMcp = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/apps/secondary/nested/mcp",
+        "{}",
+        {{"Origin", "https://not-allowed.example"}});
+    assert(badOriginNestedMcp.status == 403);
+    assert(!nlohmann::json::parse(badOriginNestedMcp.body).contains("jsonrpc"));
     const auto unauthorizedMcp = SendTestHttpRequest(
         config.server.port,
         "",
@@ -2485,7 +2529,7 @@ void TestConfiguredMultiAppServer() {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (!exited) {
-        ::kill(serverPid, SIGKILL);
+        ::kill(-serverPid, SIGKILL);
         ::waitpid(serverPid, &status, 0);
     }
     assert(exited);
@@ -2507,31 +2551,17 @@ void TestSingleAppServerCompatibility() {
     ScopedEnvVar tokenEnv("COMPUTER_CPP_TEST_SERVER_TOKEN");
     tokenEnv.Set("single-app-test-token");
 
-    pid_t serverPid = ::fork();
+    const pid_t serverPid = SpawnSupervisedTestProcess({
+        executable.string(),
+        "app",
+        "serve",
+        app,
+        "--listen",
+        listen,
+        "--auth-token-env",
+        "COMPUTER_CPP_TEST_SERVER_TOKEN",
+    });
     assert(serverPid >= 0);
-    if (serverPid == 0) {
-        int devNull = ::open("/dev/null", O_RDWR);
-        if (devNull >= 0) {
-            ::dup2(devNull, STDIN_FILENO);
-            ::dup2(devNull, STDOUT_FILENO);
-            ::dup2(devNull, STDERR_FILENO);
-            if (devNull > STDERR_FILENO) {
-                ::close(devNull);
-            }
-        }
-        ::execl(
-            executable.c_str(),
-            executable.c_str(),
-            "app",
-            "serve",
-            app.c_str(),
-            "--listen",
-            listen.c_str(),
-            "--auth-token-env",
-            "COMPUTER_CPP_TEST_SERVER_TOKEN",
-            static_cast<char*>(nullptr));
-        _exit(127);
-    }
 
     TestHttpResponse health;
     for (int attempt = 0; attempt < 100; ++attempt) {
@@ -2587,7 +2617,7 @@ void TestSingleAppServerCompatibility() {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (!exited) {
-        ::kill(serverPid, SIGKILL);
+        ::kill(-serverPid, SIGKILL);
         ::waitpid(serverPid, &status, 0);
     }
     assert(exited);

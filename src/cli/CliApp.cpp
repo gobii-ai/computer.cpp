@@ -2891,13 +2891,20 @@ json ConfiguredServerHealth(const ConfiguredAppRegistry& apps) {
 }
 
 bool IsConfiguredMcpPath(const std::string& path) {
-    return StartsWith(path, "/apps/") && path.ends_with("/mcp");
+    if (!StartsWith(path, "/apps/")) {
+        return false;
+    }
+    const size_t nameEnd =
+        path.find('/', std::string_view("/apps/").size());
+    return nameEnd != std::string::npos &&
+        path.substr(nameEnd) == kMcpEndpointPath;
 }
 
 bool HandleConfiguredHttpRequest(
     AppSocket fd,
     const CliOptions& options,
     const std::string& executablePath,
+    const AppServeOptions& serveOptions,
     const ConfiguredAppRegistry& apps,
     const HttpRequest& request
 ) {
@@ -2976,7 +2983,7 @@ bool HandleConfiguredHttpRequest(
 
     HttpRequest routedRequest = request;
     routedRequest.path = routePath;
-    AppServeOptions routedOptions;
+    AppServeOptions routedOptions = serveOptions;
     routedOptions.appPath = app.appPath;
     routedOptions.routeBasePath = "/apps/" + appName;
     routedOptions.stableAppName = appName;
@@ -3021,9 +3028,13 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
     AppServeOptions serve;
     serve.configured = args[2] == "--configured";
     if (serve.configured) {
-        const AppConfig config = LoadAppConfig(&error);
+        std::vector<std::string> warnings;
+        const AppConfig config = LoadAppConfig(&error, &warnings);
         if (!error.empty()) {
             return std::nullopt;
+        }
+        for (const auto& warning : warnings) {
+            std::cerr << "Warning: " << warning << "\n";
         }
         serve.configuredServer = config.server;
         serve.host = config.server.host;
@@ -3250,6 +3261,7 @@ int RunHttpServer(
                     clientFd,
                     options,
                     executablePath,
+                    serveOptions,
                     *configuredApps,
                     request);
             } else {

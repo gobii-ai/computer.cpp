@@ -166,10 +166,14 @@ void TestServerPortConfigMigration() {
                << "path = \"/tmp/legacy.lua\"\n"
                << "port = 8899\n";
     }
-    auto legacy = ComputerCpp::LoadAppConfig(&error);
+    std::vector<std::string> warnings;
+    auto legacy = ComputerCpp::LoadAppConfig(&error, &warnings);
     assert(error.empty());
     assert(legacy.server.port == 8891);
     assert(legacy.server.apps.contains("legacy"));
+    assert(warnings.size() == 1);
+    assert(warnings.front().find("legacy per-app port 8899") !=
+        std::string::npos);
     std::string migrated = ComputerCpp::AppConfigToToml(legacy);
     assert(migrated.find("port = 8891") != std::string::npos);
     assert(migrated.find("base_port") == std::string::npos);
@@ -182,9 +186,10 @@ void TestServerPortConfigMigration() {
                << "port = 8892\n"
                << "base_port = 8891\n";
     }
-    auto preferred = ComputerCpp::LoadAppConfig(&error);
+    auto preferred = ComputerCpp::LoadAppConfig(&error, &warnings);
     assert(error.empty());
     assert(preferred.server.port == 8892);
+    assert(warnings.empty());
     assert(ComputerCpp::SaveAppConfig(original, &error));
 }
 

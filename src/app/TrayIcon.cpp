@@ -287,16 +287,24 @@ bool HttpServerRequestOk(
     int timeoutMs = 1000,
     std::string* responseBody = nullptr
 ) {
-#if defined(__unix__) || defined(__APPLE__)
     if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
         return false;
     }
+    timeoutMs = std::max(1, timeoutMs);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    const auto remainingTimeoutMs = [&] {
+        return static_cast<int>(std::max<int64_t>(
+            0,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count()));
+    };
+#if defined(__unix__) || defined(__APPLE__)
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return false;
     }
 
-    timeoutMs = std::max(1, timeoutMs);
     timeval timeout {};
     timeout.tv_sec = timeoutMs / 1000;
     timeout.tv_usec = (timeoutMs % 1000) * 1000;
@@ -327,7 +335,7 @@ bool HttpServerRequestOk(
         descriptor.events = POLLOUT;
         int ready = 0;
         do {
-            ready = ::poll(&descriptor, 1, timeoutMs);
+            ready = ::poll(&descriptor, 1, remainingTimeoutMs());
         } while (ready < 0 && errno == EINTR);
         int socketError = 0;
         socklen_t socketErrorSize = sizeof(socketError);
@@ -363,11 +371,24 @@ bool HttpServerRequestOk(
     std::string response;
     std::array<char, 4096> buffer{};
     while (response.size() < 1024 * 1024) {
+        const int remainingMs = remainingTimeoutMs();
+        if (remainingMs <= 0) {
+            break;
+        }
+        timeout.tv_sec = remainingMs / 1000;
+        timeout.tv_usec = (remainingMs % 1000) * 1000;
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         ssize_t read = ::recv(fd, buffer.data(), buffer.size(), 0);
         if (read == 0) {
             break;
         }
         if (read < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
             ::close(fd);
             return false;
         }
@@ -389,17 +410,15 @@ bool HttpServerRequestOk(
     }
     return statusOk;
 #else
-    if (bearerToken.empty() || state.port <= 0 || state.port > 65535) {
-        return false;
-    }
     wxSocketClient socket;
-    timeoutMs = std::max(1, timeoutMs);
     socket.SetTimeout(std::max(1, (timeoutMs + 999) / 1000));
     wxIPV4address addr;
     addr.Hostname(HealthConnectHost(state.host));
     addr.Service(state.port);
     socket.Connect(addr, false);
-    if (!socket.WaitOnConnect(timeoutMs / 1000, timeoutMs % 1000) ||
+    int remainingMs = remainingTimeoutMs();
+    if (remainingMs <= 0 ||
+        !socket.WaitOnConnect(remainingMs / 1000, remainingMs % 1000) ||
         !socket.IsConnected()) {
         return false;
     }
@@ -409,7 +428,9 @@ bool HttpServerRequestOk(
         "\r\nAuthorization: Bearer " + bearerToken +
         "\r\nContent-Length: 0" +
         "\r\nConnection: close\r\n\r\n";
-    if (!socket.WaitForWrite(timeoutMs / 1000, timeoutMs % 1000)) {
+    remainingMs = remainingTimeoutMs();
+    if (remainingMs <= 0 ||
+        !socket.WaitForWrite(remainingMs / 1000, remainingMs % 1000)) {
         socket.Close();
         return false;
     }
@@ -420,8 +441,12 @@ bool HttpServerRequestOk(
     }
     std::string response;
     std::array<char, 4096> buffer{};
-    while (response.size() < 1024 * 1024 &&
-           socket.WaitForRead(timeoutMs / 1000, timeoutMs % 1000)) {
+    while (response.size() < 1024 * 1024) {
+        remainingMs = remainingTimeoutMs();
+        if (remainingMs <= 0 ||
+            !socket.WaitForRead(remainingMs / 1000, remainingMs % 1000)) {
+            break;
+        }
         socket.Read(buffer.data(), buffer.size());
         const size_t read = socket.LastCount();
         if (read == 0) {
@@ -492,6 +517,20 @@ std::string ProcessCommandLine(long pid) {
 #else
     (void)pid;
     return {};
+#endif
+}
+
+bool LooksLikeConfiguredServerProcess(long pid) {
+#if defined(_WIN32)
+    (void)pid;
+    return true;
+#else
+    const std::string command = ProcessCommandLine(pid);
+    return command.find("computer.cpp") != std::string::npos &&
+        command.find("app") != std::string::npos &&
+        command.find("serve") != std::string::npos &&
+        command.find("--configured") != std::string::npos &&
+        command.find("--tray-state-file") != std::string::npos;
 #endif
 }
 
@@ -1333,8 +1372,9 @@ private:
 
     void LoadConfig() {
         std::string error;
-        config_ = LoadAppConfig(&error);
-        std::string loadStatus;
+        std::vector<std::string> warnings;
+        config_ = LoadAppConfig(&error, &warnings);
+        std::string loadStatus = ComputerCpp::Join(warnings, "\n");
         if (!error.empty()) {
             config_ = DefaultAppConfig();
             loadStatus = error;
@@ -2932,11 +2972,9 @@ void TrayIcon::AdoptExistingServer(bool removeInvalidState) {
         }
         return;
     }
-    const std::string command = ProcessCommandLine(state->pid);
     const bool validCommand =
         state->configured &&
-        command.find("computer.cpp") != std::string::npos &&
-        command.find("app serve --configured") != std::string::npos;
+        LooksLikeConfiguredServerProcess(state->pid);
     const bool validListener =
         NormalizeBindHost(state->host) == NormalizeBindHost(config.server.host) &&
         state->port == config.server.port;
@@ -3009,10 +3047,14 @@ void TrayIcon::StartConfiguredServer() {
         return;
     }
     std::string error;
-    AppConfig config = LoadAppConfig(&error);
+    std::vector<std::string> warnings;
+    AppConfig config = LoadAppConfig(&error, &warnings);
     if (!error.empty()) {
         wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
         return;
+    }
+    for (const auto& warning : warnings) {
+        AppendAppLog("server", "config_migration_warning " + warning);
     }
     if (EnsureServerAuthToken(config)) {
         if (!SaveAppConfig(config, &error)) {
@@ -3042,14 +3084,43 @@ void TrayIcon::StartConfiguredServer() {
         LoadTrayAppServerState(singletonStatePath, nullptr);
     if (existingState && existingState->configured) {
         if (IsProcessAlive(existingState->pid)) {
-            server_.status = ServerStatus::Failed;
-            server_.failure =
-                "an existing configured server process (pid " +
-                std::to_string(existingState->pid) +
-                ") could not be adopted because its command line, "
-                "listener, or authenticated health response did not match";
-            QueueServerNotification(server_.failure);
-            return;
+            std::string existingHealthBody;
+            const bool healthMatches = HttpHealthOk(
+                *existingState,
+                serverAuthToken_,
+                1000,
+                &existingHealthBody);
+#if defined(_WIN32)
+            const bool verifiedProcess = healthMatches;
+#else
+            const bool verifiedProcess =
+                LooksLikeConfiguredServerProcess(existingState->pid);
+#endif
+            if (!verifiedProcess) {
+                RemoveTrayAppServerStateForPid(
+                    singletonStatePath,
+                    existingState->pid,
+                    nullptr);
+            } else {
+                server_.host = existingState->host;
+                server_.port = existingState->port;
+                server_.pid = existingState->pid;
+                server_.url = existingState->url;
+                server_.process = nullptr;
+                server_.statePath = singletonStatePath;
+                server_.status = ServerStatus::Failed;
+                server_.configSignature.clear();
+                serverRestartRequired_ = true;
+                if (healthMatches) {
+                    ApplyServerHealth(existingHealthBody);
+                }
+                server_.failure =
+                    "The existing configured server on port " +
+                    std::to_string(server_.port) +
+                    " no longer matches Settings. Stop it, then start the server again.";
+                QueueServerNotification(server_.failure);
+                return;
+            }
         }
         RemoveTrayAppServerStateForPid(
             singletonStatePath,

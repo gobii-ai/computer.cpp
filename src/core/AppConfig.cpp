@@ -399,7 +399,16 @@ bool AppConfigExists() {
     return fs::exists(ConfigPath(), ec) && !ec;
 }
 
-AppConfig LoadAppConfig(std::string* error) {
+AppConfig LoadAppConfig(
+    std::string* error,
+    std::vector<std::string>* warnings
+) {
+    if (error) {
+        error->clear();
+    }
+    if (warnings) {
+        warnings->clear();
+    }
     AppConfig config = DefaultAppConfig();
     fs::path path = ConfigPath();
     std::error_code ec;
@@ -508,6 +517,14 @@ AppConfig LoadAppConfig(std::string* error) {
                 app.name = TomlKeyName(key);
                 app.displayName = TomlString(*table, "display_name", app.name);
                 app.path = TomlString(*table, "path");
+                if (auto legacyPort = (*table)["port"].value<int64_t>();
+                    warnings && legacyPort.has_value()) {
+                    warnings->push_back(
+                        "server app '" + app.name + "' uses legacy per-app port " +
+                        std::to_string(*legacyPort) +
+                        "; it is ignored in shared-server mode. Update clients to /apps/" +
+                        app.name + " and save config to remove it.");
+                }
                 config.server.apps[app.name] = app;
             }
         }
