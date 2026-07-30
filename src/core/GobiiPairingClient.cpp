@@ -63,16 +63,10 @@ bool ParseToken(
         error = "relay access token is already expired";
         return false;
     }
-    if (token.relayUrl.rfind("wss://", 0) != 0) {
-#if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
-        if (token.relayUrl.rfind("ws://", 0) != 0) {
-            error = "relay_url must use wss";
-            return false;
-        }
-#else
+    if (!IsGobiiEndpointUrlAllowed(
+            token.relayUrl, "wss", "ws")) {
         error = "relay_url must use wss";
         return false;
-#endif
     }
     if (!value.contains("agent") || !value["agent"].is_object() ||
         !RequiredString(value["agent"], "id", token.agentId, error) ||
@@ -187,7 +181,10 @@ bool GobiiPairingClient::CreatePairing(
         error = "pairing response contains invalid timing values";
         return false;
     }
-    if (session.verificationUriComplete.rfind("https://", 0) != 0) {
+    if (!IsGobiiEndpointUrlAllowed(
+            session.verificationUriComplete,
+            "https",
+            "http")) {
         error = "verification_uri_complete must use https";
         return false;
     }

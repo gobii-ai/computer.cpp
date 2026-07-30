@@ -2720,7 +2720,7 @@ TrayIcon::TrayIcon() {
     StartOwnedDaemon();
     RefreshConfiguredServer(true);
     AdoptExistingServer(true);
-#if defined(COMPUTER_CPP_ENABLE_GOBII_BETA)
+#if defined(__APPLE__) || defined(_WIN32)
     configuredServerController_ =
         std::make_unique<TrayConfiguredServerController>(*this);
     auto http = CreateCurlGobiiHttpTransport();
@@ -2822,7 +2822,7 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     RefreshConfiguredServer();
 
     wxMenu* menu = new wxMenu;
-#if defined(COMPUTER_CPP_ENABLE_GOBII_BETA)
+#if defined(__APPLE__) || defined(_WIN32)
     if (gobiiController_) {
         const GobiiConnectionStatus status =
             gobiiController_->Status();

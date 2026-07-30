@@ -24,6 +24,27 @@ agent. Refresh uses `POST /api/computers/token/refresh/`; revoke uses
 `POST /api/computers/revoke/`. Both authenticate with the device refresh
 token. Pairing secrets and access tokens are never persisted.
 
+### Local platform development
+
+Configure a non-Release build with
+`COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT=ON`, then set the platform endpoint:
+
+```sh
+cmake -S . -B build/gobii-local -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCOMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT=ON \
+  -DCOMPUTER_CPP_GOBII_DEV_INLINE_IMAGES=ON
+cmake --build build/gobii-local
+build/gobii-local/computer.cpp config set-gobii \
+  --base-url http://127.0.0.1:8001
+```
+
+This mode permits insecure `http` pairing/browser URLs and `ws` relay URLs
+only when their host is `127.0.0.1`, `localhost`, or `[::1]`. Remote insecure
+hosts remain rejected. CMake rejects local-development mode in Release
+builds. Inline images are controlled independently; enable the capped
+development mode as shown when testing tools that return screenshots.
+
 ## Relay handshake and control
 
 The WebSocket upgrade includes the relay bearer token, subprotocol, and
@@ -129,6 +150,8 @@ executed twice. Socket loss does not cancel or replay an in-flight action.
 
 Ordinary local MCP clients receive standard MCP image content. Relay delivery
 must replace image bodies with authenticated Gobii artifact references.
-Until that external upload contract exists, production Gobii builds remain
-disabled. Development builds may retain inline images only when their encoded
-body is at most 128 KiB.
+The Gobii connection is available in supported production builds, but relay
+responses containing images fail with `artifact_upload_unavailable` until the
+authenticated upload contract is implemented. Development builds may retain
+inline images only when explicitly enabled and when their encoded body is at
+most 128 KiB. Release builds reject that development option.

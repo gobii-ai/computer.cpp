@@ -483,8 +483,14 @@ jobs:
           if (-not $diagnosis.gobiiDesktopAppFound) {
             throw "Gobii Desktop resource was not found in the portable package"
           }
-          if ($diagnosis.betaEnabled) {
-            throw "Production package unexpectedly enabled the gated Gobii beta"
+          if (-not $diagnosis.connectionAvailable) {
+            throw "Packaged Gobii connection is unexpectedly unavailable"
+          }
+          if ($diagnosis.developmentInlineImages) {
+            throw "Production package unexpectedly enabled inline Gobii images"
+          }
+          if ($diagnosis.localDevelopment) {
+            throw "Production package unexpectedly enabled local Gobii development mode"
           }
           & $cli.FullName open
           & $cli.FullName ping

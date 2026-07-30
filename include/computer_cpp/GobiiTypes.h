@@ -3,6 +3,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace ComputerCpp {
 
@@ -36,6 +37,13 @@ struct GobiiConnectionStatus {
 };
 
 const char* GobiiConnectionStateName(GobiiConnectionState state);
+bool IsGobiiLoopbackUrl(
+    std::string_view value,
+    std::string_view scheme);
+bool IsGobiiEndpointUrlAllowed(
+    std::string_view value,
+    std::string_view secureScheme,
+    std::string_view localDevelopmentScheme);
 std::optional<std::chrono::system_clock::time_point>
 ParseGobiiTimestamp(const std::string& value);
 

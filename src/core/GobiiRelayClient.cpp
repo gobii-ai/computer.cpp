@@ -2,6 +2,7 @@
 
 #include "computer_cpp/GobiiApiClient.h"
 #include "computer_cpp/GobiiRelayProtocol.h"
+#include "computer_cpp/GobiiTypes.h"
 
 #include "CurlHandle.h"
 
@@ -29,16 +30,10 @@ bool GobiiRelayClient::Start(
     if (!GobiiWebSocketRuntimeSupported(&error)) {
         return false;
     }
-    if (options.url.rfind("wss://", 0) != 0) {
-#if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
-        if (options.url.rfind("ws://", 0) != 0) {
-            error = "relay URL must use wss";
-            return false;
-        }
-#else
+    if (!IsGobiiEndpointUrlAllowed(
+            options.url, "wss", "ws")) {
         error = "relay URL must use wss";
         return false;
-#endif
     }
     {
         std::lock_guard lock(mutex_);

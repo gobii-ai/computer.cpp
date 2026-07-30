@@ -1,6 +1,7 @@
 #include "computer_cpp/GobiiTypes.h"
 
 #include <ctime>
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 
@@ -20,6 +21,85 @@ const char* GobiiConnectionStateName(GobiiConnectionState state) {
         case GobiiConnectionState::Error: return "error";
     }
     return "error";
+}
+
+bool IsGobiiLoopbackUrl(
+    std::string_view value,
+    std::string_view scheme
+) {
+    const std::string prefix = std::string(scheme) + "://";
+    if (!value.starts_with(prefix)) {
+        return false;
+    }
+    std::string_view authority = value.substr(prefix.size());
+    const size_t path = authority.find_first_of("/?#");
+    if (path != std::string_view::npos) {
+        authority = authority.substr(0, path);
+    }
+    if (authority.empty() ||
+        authority.find('@') != std::string_view::npos) {
+        return false;
+    }
+    std::string_view host;
+    std::string_view port;
+    if (authority.front() == '[') {
+        const size_t close = authority.find(']');
+        if (close == std::string_view::npos) {
+            return false;
+        }
+        host = authority.substr(1, close - 1);
+        const std::string_view remainder =
+            authority.substr(close + 1);
+        if (!remainder.empty()) {
+            if (remainder.front() != ':') {
+                return false;
+            }
+            port = remainder.substr(1);
+        }
+    } else {
+        const size_t colon = authority.rfind(':');
+        if (colon == std::string_view::npos) {
+            host = authority;
+        } else {
+            host = authority.substr(0, colon);
+            port = authority.substr(colon + 1);
+        }
+    }
+    if (host != "127.0.0.1" &&
+        host != "localhost" &&
+        host != "::1") {
+        return false;
+    }
+    if (!port.empty()) {
+        for (const unsigned char ch : port) {
+            if (!std::isdigit(ch)) {
+                return false;
+            }
+        }
+    } else if (authority.ends_with(':')) {
+        return false;
+    }
+    return true;
+}
+
+bool IsGobiiEndpointUrlAllowed(
+    std::string_view value,
+    std::string_view secureScheme,
+    std::string_view localDevelopmentScheme
+) {
+    const std::string securePrefix =
+        std::string(secureScheme) + "://";
+    if (value.starts_with(securePrefix) &&
+        value.size() > securePrefix.size()) {
+        return true;
+    }
+#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
+    return IsGobiiLoopbackUrl(
+        value, localDevelopmentScheme);
+#else
+    (void)localDevelopmentScheme;
+    return false;
+#endif
 }
 
 std::optional<std::chrono::system_clock::time_point>

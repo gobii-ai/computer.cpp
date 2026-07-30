@@ -37,6 +37,7 @@ Daemon:
   config show                         Show redacted model/provider config
   config set-provider <name> ...      Configure an LLM endpoint and API key
   config set-profile <name> ...       Configure model and sampling defaults
+  config set-gobii --base-url url     Configure the Gobii platform endpoint
   config import-env                   One-time import from legacy LLM env vars
   config test [profile] [--live]      Validate or test configured inference
   gobii diagnose                      Read-only Gobii runtime, credential, and resource checks

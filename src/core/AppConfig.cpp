@@ -1,6 +1,7 @@
 #include "computer_cpp/AppConfig.h"
 
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/GobiiTypes.h"
 #include "computer_cpp/StringUtils.h"
 
 #include <toml++/toml.hpp>
@@ -560,17 +561,12 @@ AppConfig LoadAppConfig(
         config.gobii.paused = (*gobii)["paused"].value_or(false);
     }
 
-    const bool secureGobiiUrl =
-        config.gobii.baseUrl.rfind("https://", 0) == 0;
-#if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
-    const bool developmentGobiiUrl =
-        config.gobii.baseUrl.rfind("http://", 0) == 0;
-#else
-    const bool developmentGobiiUrl = false;
-#endif
-    if (!secureGobiiUrl && !developmentGobiiUrl) {
+    if (!IsGobiiEndpointUrlAllowed(
+            config.gobii.baseUrl, "https", "http")) {
         if (error) {
-            *error = "gobii.base_url must use https";
+            *error =
+                "gobii.base_url must use https; a local-development "
+                "build also permits loopback http";
         }
         return {};
     }

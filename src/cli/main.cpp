@@ -175,8 +175,8 @@ int main(int argc, char** argv) {
                 false
 #endif
             },
-            {"betaEnabled",
-#if defined(COMPUTER_CPP_ENABLE_GOBII_BETA)
+            {"connectionAvailable",
+#if defined(__APPLE__) || defined(_WIN32)
                 true
 #else
                 false
@@ -184,6 +184,13 @@ int main(int argc, char** argv) {
             },
             {"developmentInlineImages",
 #if defined(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
+                true
+#else
+                false
+#endif
+            },
+            {"localDevelopment",
+#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
                 true
 #else
                 false
@@ -200,12 +207,12 @@ int main(int argc, char** argv) {
         };
         diagnosis["ready"] =
             diagnosis["platformSupported"].get<bool>() &&
-            diagnosis["betaEnabled"].get<bool>() &&
+            diagnosis["connectionAvailable"].get<bool>() &&
             websocket &&
             credentialStore &&
             !app.empty() &&
-            diagnosis["artifactUploadsAvailable"].get<bool>() &&
-            !diagnosis["developmentInlineImages"].get<bool>();
+            (diagnosis["artifactUploadsAvailable"].get<bool>() ||
+             diagnosis["developmentInlineImages"].get<bool>());
         std::cout << diagnosis.dump(
             options.jsonOutput ? 2 : -1) << "\n";
         return diagnosis["ready"].get<bool>() ? 0 : 1;
