@@ -187,9 +187,10 @@ jobs:
           set -euo pipefail
 
           DIST_ROOT="dist"
-          ASSET_BASENAME="computer.cpp-${NEW_VERSION}-macos-arm64"
-          DIST_DIR="${DIST_ROOT}/${ASSET_BASENAME}"
-          NOTARY_ZIP="${RUNNER_TEMP}/${ASSET_BASENAME}-notary.zip"
+          PACKAGE_ROOT="computer.cpp-${NEW_VERSION}-macos-arm64"
+          RELEASE_ASSET="computer.cpp-macos-arm64.zip"
+          DIST_DIR="${DIST_ROOT}/${PACKAGE_ROOT}"
+          NOTARY_ZIP="${RUNNER_TEMP}/${PACKAGE_ROOT}-notary.zip"
 
           rm -rf "$DIST_ROOT"
           mkdir -p "$DIST_DIR"
@@ -270,7 +271,7 @@ jobs:
           codesign --verify --deep --strict --verbose=4 "$DIST_DIR/ComputerCpp.app"
           codesign --verify --strict --verbose=4 "$DIST_DIR/computer.cpp"
 
-          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$ASSET_BASENAME" "$NOTARY_ZIP")
+          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_ROOT" "$NOTARY_ZIP")
           xcrun notarytool submit "$NOTARY_ZIP" \
             --key "$NOTARY_KEY_PATH" \
             --key-id "$MACOS_NOTARY_KEY_ID" \
@@ -281,7 +282,7 @@ jobs:
           xcrun stapler validate "$DIST_DIR/ComputerCpp.app"
           spctl --assess --type execute --verbose=4 "$DIST_DIR/ComputerCpp.app"
 
-          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$ASSET_BASENAME" "${ASSET_BASENAME}.zip")
+          (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_ROOT" "$RELEASE_ASSET")
 
       - name: Commit version bump
         run: |
@@ -301,7 +302,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-release-assets
-          path: dist/computer.cpp-${{ steps.bump_version.outputs.new_version }}-macos-arm64.zip
+          path: dist/computer.cpp-macos-arm64.zip
           if-no-files-found: error
 
   windows:
@@ -312,7 +313,6 @@ jobs:
       BUILD_DIR: build/windows-release
       VCPKG_DEFAULT_TRIPLET: x64-windows
       VCPKG_BINARY_SOURCES: clear;nuget,GitHub,readwrite
-      NEW_VERSION: ${{ needs.macos.outputs.new_version }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
@@ -415,7 +415,7 @@ jobs:
       - name: Smoke packaged portable zip
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dist -Filter "computer.cpp-$env:NEW_VERSION-windows-x64.zip" | Select-Object -First 1
+          $zip = Get-ChildItem dist -Filter "computer.cpp-windows-x64.zip" | Select-Object -First 1
           if (-not $zip) { throw "portable zip not found" }
           $extract = Join-Path $env:RUNNER_TEMP "computer-cpp-portable"
           Expand-Archive $zip.FullName -DestinationPath $extract
@@ -431,8 +431,8 @@ jobs:
         with:
           name: windows-release-assets
           path: |
-            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.zip
-            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.msi
+            dist/computer.cpp-windows-x64.zip
+            dist/computer.cpp-windows-x64.msi
           if-no-files-found: error
 
   publish:
@@ -506,9 +506,9 @@ jobs:
           fi
 
           gh release create "${NEW_VERSION}" \
-            "artifacts/macos/computer.cpp-${NEW_VERSION}-macos-arm64.zip#computer.cpp-${NEW_VERSION}-macos-arm64.zip" \
-            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.zip#computer.cpp-${NEW_VERSION}-windows-x64.zip" \
-            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.msi#computer.cpp-${NEW_VERSION}-windows-x64.msi" \
+            "artifacts/macos/computer.cpp-macos-arm64.zip#computer.cpp-macos-arm64.zip" \
+            "artifacts/windows/computer.cpp-windows-x64.zip#computer.cpp-windows-x64.zip" \
+            "artifacts/windows/computer.cpp-windows-x64.msi#computer.cpp-windows-x64.msi" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "$RELEASE_TITLE" \
             --notes-file release-notes.md

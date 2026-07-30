@@ -268,19 +268,19 @@ std::string LatestReleaseApiUrl() {
     return "https://api.github.com/repos/" + GitHubRepository() + "/releases/latest";
 }
 
-std::string CompatibleMacAssetName(std::string_view version) {
-    return "computer.cpp-" + std::string(version) + "-macos-arm64.zip";
+std::string CompatibleMacAssetName() {
+    return "computer.cpp-macos-arm64.zip";
 }
 
-std::string CompatibleWindowsAssetName(std::string_view version) {
-    return "computer.cpp-" + std::string(version) + "-windows-x64.msi";
+std::string CompatibleWindowsAssetName() {
+    return "computer.cpp-windows-x64.msi";
 }
 
-std::string CompatibleAssetName(std::string_view version) {
+std::string CompatibleAssetName() {
 #if defined(_WIN32) && defined(_WIN64)
-    return CompatibleWindowsAssetName(version);
+    return CompatibleWindowsAssetName();
 #else
-    return CompatibleMacAssetName(version);
+    return CompatibleMacAssetName();
 #endif
 }
 
@@ -386,7 +386,7 @@ CheckResult ParseGitHubLatestRelease(const json& release, std::string_view curre
         return result;
     }
 
-    std::string expectedAssetName = CompatibleAssetName(latest->normalized);
+    std::string expectedAssetName = CompatibleAssetName();
     if (!release.contains("assets") || !release["assets"].is_array()) {
         result.status = CheckStatus::NoCompatibleAsset;
         result.message = "GitHub release has no assets.";

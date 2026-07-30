@@ -673,9 +673,9 @@ void TestUpdaterVersionParsing() {
 }
 
 void TestUpdaterReleaseParsing() {
-    assert(ComputerCpp::Updater::CompatibleMacAssetName("0.3.0") == "computer.cpp-0.3.0-macos-arm64.zip");
-    assert(ComputerCpp::Updater::CompatibleWindowsAssetName("0.3.0") == "computer.cpp-0.3.0-windows-x64.msi");
-    std::string compatibleAssetName = ComputerCpp::Updater::CompatibleAssetName("0.3.0");
+    assert(ComputerCpp::Updater::CompatibleMacAssetName() == "computer.cpp-macos-arm64.zip");
+    assert(ComputerCpp::Updater::CompatibleWindowsAssetName() == "computer.cpp-windows-x64.msi");
+    std::string compatibleAssetName = ComputerCpp::Updater::CompatibleAssetName();
 
     nlohmann::json release = {
         {"tag_name", "v0.3.0"},
@@ -838,7 +838,7 @@ ComputerCpp::Updater::ReleaseInfo TestReleaseInfo(const std::string& version) {
     release.tagName = version;
     release.version = version;
     release.hasCompatibleAsset = true;
-    release.asset.name = ComputerCpp::Updater::CompatibleMacAssetName(version);
+    release.asset.name = ComputerCpp::Updater::CompatibleMacAssetName();
     release.asset.browserDownloadUrl = "https://example.test/" + release.asset.name;
     return release;
 }

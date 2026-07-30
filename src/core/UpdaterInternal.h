@@ -20,9 +20,9 @@ struct SemVersion {
 
 std::string GitHubRepository();
 std::string LatestReleaseApiUrl();
-std::string CompatibleMacAssetName(std::string_view version);
-std::string CompatibleWindowsAssetName(std::string_view version);
-std::string CompatibleAssetName(std::string_view version);
+std::string CompatibleMacAssetName();
+std::string CompatibleWindowsAssetName();
+std::string CompatibleAssetName();
 std::string ShellQuote(std::string_view value);
 
 std::optional<SemVersion> ParseSemVersion(std::string_view value);
