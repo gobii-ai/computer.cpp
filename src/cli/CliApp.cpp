@@ -837,6 +837,17 @@ std::optional<json> RunAppCommand(
     }
     lua.vars["__ac_app_command"] = commandName;
     lua.vars["__ac_app_input_json"] = input.dump();
+    lua.vars["__ac_artifact_namespace"] = NewOperationId();
+    if (operationDir.has_value()) {
+        lua.vars["__ac_artifacts_dir"] =
+            (*operationDir / "artifacts").string();
+    } else {
+        try {
+            lua.vars["__ac_artifacts_dir"] = DefaultArtifactDir().string();
+        } catch (const std::exception& ex) {
+            lua.vars["__ac_artifacts_dir_error"] = ex.what();
+        }
+    }
     if (operationDir.has_value()) {
         lua.vars["__ac_operation_dir"] = operationDir->string();
     }

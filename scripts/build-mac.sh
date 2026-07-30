@@ -13,6 +13,7 @@ RECONFIGURE=0
 LAUNCH=0
 VERIFY=0
 RELEASE=0
+BUILD_DIR_EXPLICIT=0
 
 usage() {
   cat >&2 <<EOF
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       BUILD_DIR="$2"
+      BUILD_DIR_EXPLICIT=1
       shift
       ;;
     --config)
@@ -78,6 +80,10 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "${RELEASE}" == "1" && "${BUILD_DIR_EXPLICIT}" == "0" ]]; then
+  BUILD_DIR="${PROJECT_DIR}/build/release-ninja"
+fi
+
 cd "${PROJECT_DIR}"
 
 require_command cmake "brew install cmake"
@@ -99,31 +105,30 @@ fi
 
 prepare_build_dir "${BUILD_DIR}" "${RECONFIGURE}" "Ninja"
 
-if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
-  BREW_PREFIX="$(brew --prefix)"
-
-  CMAKE_ARGS=(
-    -S "${PROJECT_DIR}"
-    -B "${BUILD_DIR}"
-    -G Ninja
-    -DCMAKE_BUILD_TYPE="${CONFIG}"
-    -DBUILD_TESTING="${BUILD_TESTING}"
-    -DCMAKE_PREFIX_PATH="${BREW_PREFIX}"
-    -DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}"
-    -DCOMPUTER_CPP_CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY}"
-  )
-
-  if command -v ccache >/dev/null 2>&1; then
-    CMAKE_ARGS+=(
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
-    )
-  fi
-
-  cmake "${CMAKE_ARGS[@]}"
-else
+if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   print_existing_build_dir_message "${BUILD_DIR}"
 fi
+
+BREW_PREFIX="$(brew --prefix)"
+CMAKE_ARGS=(
+  -S "${PROJECT_DIR}"
+  -B "${BUILD_DIR}"
+  -G Ninja
+  -DCMAKE_BUILD_TYPE="${CONFIG}"
+  -DBUILD_TESTING="${BUILD_TESTING}"
+  -DCMAKE_PREFIX_PATH="${BREW_PREFIX}"
+  -DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}"
+  -DCOMPUTER_CPP_CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY}"
+)
+
+if command -v ccache >/dev/null 2>&1; then
+  CMAKE_ARGS+=(
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+  )
+fi
+
+cmake "${CMAKE_ARGS[@]}"
 
 if [[ "${VERIFY}" == "1" ]]; then
   cmake --build "${BUILD_DIR}" --target all --config "${CONFIG}"

@@ -729,6 +729,12 @@ app:command("create-note", {
 return app
 ```
 
+App commands can attach existing files to their trace with
+`ctx:artifact(path, metadata)`. To persist inline content, use the explicit
+`ctx:artifact_bytes(bytes, { filename = "...", contentType = "..." })` API.
+Byte artifacts are written under the command's artifact directory and the
+returned `path` points to the persisted file.
+
 Run a command from the CLI:
 
 ```bash

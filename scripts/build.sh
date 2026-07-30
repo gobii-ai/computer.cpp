@@ -85,37 +85,37 @@ require_command cmake
 
 prepare_build_dir "${BUILD_DIR}" "${RECONFIGURE}" "${GENERATOR}"
 
-if [[ ! -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
-  CMAKE_ARGS=(
-    -S "${PROJECT_DIR}"
-    -B "${BUILD_DIR}"
-    -DCMAKE_BUILD_TYPE="${CONFIG}"
-    -DBUILD_TESTING="${BUILD_TESTING}"
-  )
-
-  if [[ -n "${GENERATOR}" ]]; then
-    CMAKE_ARGS+=(-G "${GENERATOR}")
-  fi
-
-  if [[ -n "${CODE_SIGN_APP}" ]]; then
-    CMAKE_ARGS+=(-DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}")
-  fi
-
-  if [[ -n "${BUILD_GUI}" ]]; then
-    CMAKE_ARGS+=(-DCOMPUTER_CPP_BUILD_GUI="${BUILD_GUI}")
-  fi
-
-  if command -v ccache >/dev/null 2>&1; then
-    CMAKE_ARGS+=(
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-      -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
-    )
-  fi
-
-  cmake "${CMAKE_ARGS[@]}"
-else
+if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   print_existing_build_dir_message "${BUILD_DIR}"
 fi
+
+CMAKE_ARGS=(
+  -S "${PROJECT_DIR}"
+  -B "${BUILD_DIR}"
+  -DCMAKE_BUILD_TYPE="${CONFIG}"
+  -DBUILD_TESTING="${BUILD_TESTING}"
+)
+
+if [[ -n "${GENERATOR}" ]]; then
+  CMAKE_ARGS+=(-G "${GENERATOR}")
+fi
+
+if [[ -n "${CODE_SIGN_APP}" ]]; then
+  CMAKE_ARGS+=(-DCOMPUTER_CPP_CODE_SIGN_APP="${CODE_SIGN_APP}")
+fi
+
+if [[ -n "${BUILD_GUI}" ]]; then
+  CMAKE_ARGS+=(-DCOMPUTER_CPP_BUILD_GUI="${BUILD_GUI}")
+fi
+
+if command -v ccache >/dev/null 2>&1; then
+  CMAKE_ARGS+=(
+    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+  )
+fi
+
+cmake "${CMAKE_ARGS[@]}"
 
 cmake --build "${BUILD_DIR}" --target all --config "${CONFIG}"
 

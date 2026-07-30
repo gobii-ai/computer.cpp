@@ -2618,6 +2618,106 @@ void TestLuaApprovalContextDryRun() {
     assert(resumed);
 }
 
+void TestLuaArtifactContextWritesBytes() {
+    if (SkipLuaTestIfUnavailable("TestLuaArtifactContextWritesBytes")) {
+        return;
+    }
+
+    const auto root = ComputerCpp::Tests::MakeTempHome();
+    ScopedEnvVar home("COMPUTER_CPP_HOME");
+    home.Set(root.string());
+
+    ComputerCpp::Cli::CliOptions cliOptions;
+    cliOptions.jsonOutput = true;
+    cliOptions.controlSessionToken = "unit-control-token";
+    const auto commandResult = RunAppCommand(
+        cliOptions,
+        {
+            "app",
+            "run",
+            (RepoRoot() / "tests/lua/app-artifact.lua").string(),
+            "write",
+        },
+        "");
+    const auto payload =
+        nlohmann::json::parse(commandResult.stdoutText, nullptr, false);
+    const auto appResult = payload.is_object()
+        ? payload.value("data", nlohmann::json::object())
+            .value("result", nlohmann::json::object())
+        : nlohmann::json::object();
+    const std::filesystem::path artifactPath =
+        appResult.value("path", "");
+    const std::filesystem::path secondArtifactPath =
+        appResult.value("secondPath", "");
+    const std::filesystem::path deviceArtifactPath =
+        appResult.value("devicePath", "");
+    const std::string contents = ReadTextFile(artifactPath);
+    const std::string secondContents = ReadTextFile(secondArtifactPath);
+    const std::string deviceContents = ReadTextFile(deviceArtifactPath);
+    size_t artifactCount = 0;
+    std::error_code iterateError;
+    for (std::filesystem::directory_iterator it(
+             root / "artifacts",
+             iterateError);
+         !iterateError && it != std::filesystem::directory_iterator();
+         it.increment(iterateError)) {
+        if (it->is_regular_file()) {
+            ++artifactCount;
+        }
+    }
+
+    const std::filesystem::path invalidArtifactsDir = root / "not-a-directory";
+    {
+        std::ofstream file(invalidArtifactsDir);
+        file << "occupied";
+    }
+    ComputerCpp::LuaRunOptions failureOptions;
+    failureOptions.scriptPath = RepoRoot() / "tests/lua/app-artifact.lua";
+    failureOptions.dryRun = true;
+    failureOptions.jsonOutput = true;
+    failureOptions.vars["__ac_app_mode"] = "run";
+    failureOptions.vars["__ac_app_command"] = "write";
+    failureOptions.vars["__ac_app_input_json"] = "{}";
+    failureOptions.vars["__ac_artifacts_dir"] = invalidArtifactsDir.string();
+    failureOptions.vars["__ac_artifact_namespace"] = "failure-test";
+    auto failureResult = ComputerCpp::RunLuaScriptCapture(failureOptions);
+    const auto failurePayload =
+        nlohmann::json::parse(failureResult.stdoutText, nullptr, false);
+    const auto failedAppResult = failurePayload.is_object()
+        ? failurePayload.value("data", nlohmann::json::object())
+            .value("result", nlohmann::json::object())
+        : nlohmann::json::object();
+    const bool failurePayloadLeaked =
+        failureResult.stdoutText.find("diagnostic DOM") != std::string::npos;
+
+    std::filesystem::remove_all(root);
+
+    assert(commandResult.exitCode == 0);
+    assert(payload.is_object() && payload.value("ok", false));
+    assert(artifactPath.parent_path() == root / "artifacts");
+    assert(secondArtifactPath.parent_path() == root / "artifacts");
+    assert(deviceArtifactPath.parent_path() == root / "artifacts");
+    assert(artifactPath != secondArtifactPath);
+    assert(artifactPath.extension() == ".html");
+    assert(secondArtifactPath.extension() == ".html");
+    assert(artifactPath.filename().string().size() <= 180);
+    assert(secondArtifactPath.filename().string().size() <= 180);
+    assert(deviceArtifactPath.filename().string().rfind("_NUL-", 0) == 0);
+    assert(contents == "<html><body>diagnostic DOM</body></html>");
+    assert(secondContents == "second artifact");
+    assert(deviceContents == "reserved device test");
+    assert(artifactCount == 3);
+    assert(appResult.value("legacyPath", "") == "/tmp/existing-screenshot.png");
+    assert(appResult.value("plainLegacyPath", "") == "/tmp/plain-artifact.png");
+    assert(appResult.value("legacyKind", "") == "original");
+    assert(appResult.value("writeError", "").empty());
+    assert(failureResult.exitCode == 0);
+    assert(failurePayload.is_object() && failurePayload.value("ok", false));
+    assert(failedAppResult.value("path", "").empty());
+    assert(!failedAppResult.value("writeError", "").empty());
+    assert(!failurePayloadLeaked);
+}
+
 void TestCliApprovalLifecycle() {
 #if defined(__unix__) || defined(__APPLE__)
     if (SkipLuaTestIfUnavailable("TestCliApprovalLifecycle")) return;
@@ -3035,6 +3135,7 @@ void RunCliTests() {
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();
+    TestLuaArtifactContextWritesBytes();
     TestCliApprovalLifecycle();
     TestReservedAppCommandRejected();
     TestLuaAppErrorsAreUserFacing();
