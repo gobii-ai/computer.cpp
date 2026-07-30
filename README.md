@@ -384,6 +384,7 @@ most 100 consecutive ports beginning at `base_port` (and never past 65535).
 [server]
 host = "127.0.0.1"
 base_port = 8787
+auth_token_storage = "system"
 
 [server.apps.notes]
 display_name = "Notes"
@@ -401,6 +402,14 @@ Servers** and **Stop All Servers** actions, and a Start/Stop row for each app.
 Servers are not started automatically when ComputerCpp launches. Any healthy
 configured servers left by an interrupted tray process are adopted, and
 quitting ComputerCpp stops all managed servers.
+
+The shared server bearer token is stored in macOS Keychain, Windows Credential
+Manager, or Linux Secret Service. `config.toml` contains only
+`auth_token_storage = "system"`; it never contains the token itself. Existing
+version 1 configs with a plaintext `auth_token` are migrated without rotating
+the token after the credential write has been verified. If the credential
+store is locked, unavailable, or missing an expected token, server startup
+fails instead of falling back to plaintext or silently generating a new token.
 
 Server processes keep independent Lua memory and operation storage, while
 top-level app commands share one desktop-control queue. If Notes and Reminders
@@ -547,6 +556,9 @@ generator explicitly, so Ninja users can run:
 ```bash
 ./scripts/build.sh --verify --generator Ninja --build-dir build/debug-ninja
 ```
+
+Linux builds also require the `libsecret-1` development package so server
+bearer tokens can be stored through the desktop Secret Service.
 
 If CMake was already configured with another generator, add `--reconfigure` to
 recreate the build directory.
@@ -1030,7 +1042,7 @@ owner-read/write only.
 A minimal OpenRouter config looks like this:
 
 ```toml
-version = 1
+version = 2
 default_profile = "openrouter"
 
 [providers.openrouter]
@@ -1189,7 +1201,12 @@ Do not expose the HTTP server broadly without authentication and a proper networ
 Screenshots and traces may contain sensitive data.
 Desktop recordings may contain anything visible on the captured display.
 Model-backed commands may send screenshots or text to a configured model provider.
+Server bearer tokens are stored in the current user's OS credential store.
 ```
+
+Config version 2 requires a credential-store-aware build. Downgrading to an
+older build is unsupported because an older build may recreate plaintext
+server-token storage.
 
 The tool is powerful because it can operate the real desktop. Use it with the
 same care you would use for any local automation system that can click, type,

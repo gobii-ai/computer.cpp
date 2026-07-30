@@ -1,6 +1,7 @@
 #include "computer_cpp/AppConfig.h"
 
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/CredentialStore.h"
 #include "computer_cpp/StringUtils.h"
 
 #include <toml++/toml.hpp>
@@ -11,16 +12,17 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <random>
 #include <sstream>
 #include <string_view>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/stat.h>
+#elif defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -30,6 +32,8 @@ namespace ComputerCpp {
 namespace {
 
 constexpr std::string_view kOpenRouterBaseUrl = "https://openrouter.ai/api/v1";
+constexpr int kCurrentConfigVersion = 2;
+constexpr std::string_view kSystemTokenStorage = "system";
 
 std::string EnvFirst(std::initializer_list<const char*> names) {
     for (const char* name : names) {
@@ -241,21 +245,42 @@ bool WriteConfigFile(const fs::path& path, const std::string& text, std::string*
             return false;
         }
         out << text;
+        out.flush();
+        if (!out) {
+            if (error) {
+                *error = "could not write " + temp.string();
+            }
+            return false;
+        }
     }
     RestrictConfigFilePermissions(temp);
+#if defined(_WIN32)
+    if (!MoveFileExW(
+            temp.c_str(),
+            path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code moveError(
+            static_cast<int>(GetLastError()),
+            std::system_category());
+        std::error_code cleanupError;
+        fs::remove(temp, cleanupError);
+        if (error) {
+            *error = "could not replace " + path.string() + ": " + moveError.message();
+        }
+        return false;
+    }
+#else
     std::error_code ec;
     fs::rename(temp, path, ec);
     if (ec) {
-        fs::remove(path, ec);
-        ec.clear();
-        fs::rename(temp, path, ec);
-    }
-    if (ec) {
+        std::error_code cleanupError;
+        fs::remove(temp, cleanupError);
         if (error) {
             *error = "could not replace " + path.string() + ": " + ec.message();
         }
         return false;
     }
+#endif
     RestrictConfigFilePermissions(path);
     return true;
 }
@@ -284,44 +309,69 @@ std::optional<double> ParseDouble(const std::string& raw) {
 
 } // namespace
 
-std::string GenerateServerAuthToken() {
+bool GenerateServerAuthToken(std::string& token, std::string* error) {
     std::array<unsigned char, 32> bytes {};
-    bool filled = false;
-    {
-        std::ifstream random("/dev/urandom", std::ios::binary);
-        if (random.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
-            filled = true;
-        }
-    }
-    if (!filled) {
-        try {
-            std::random_device random;
-            for (unsigned char& byte : bytes) {
-                byte = static_cast<unsigned char>(random() & 0xFF);
-            }
-        } catch (...) {
-            std::mt19937 gen(static_cast<unsigned int>(std::time(nullptr)));
-            for (unsigned char& byte : bytes) {
-                byte = static_cast<unsigned char>(gen() & 0xFF);
-            }
-        }
+    if (!FillSecureRandom(bytes.data(), bytes.size(), error)) {
+        token.clear();
+        return false;
     }
 
     static constexpr char hex[] = "0123456789abcdef";
-    std::string token;
+    token.clear();
     token.reserve(bytes.size() * 2);
     for (unsigned char byte : bytes) {
         token.push_back(hex[(byte >> 4) & 0x0F]);
         token.push_back(hex[byte & 0x0F]);
     }
-    return token;
+    return true;
 }
 
-bool EnsureServerAuthToken(AppConfig& config) {
-    if (!Trim(config.server.authToken).empty()) {
+bool EnsureServerAuthToken(
+    AppConfig& config,
+    std::string* error,
+    CredentialStore* credentialStore
+) {
+    CredentialStore& store = credentialStore != nullptr ? *credentialStore : SystemCredentialStore();
+    if (config.server.authTokenStorage == ServerAuthTokenStorage::System) {
+        if (!Trim(config.server.authToken).empty()) {
+            return true;
+        }
+        CredentialStoreResult read = store.Read(ServerAuthCredentialKey());
+        if (!read.ok()) {
+            if (error) {
+                if (read.status == CredentialStoreStatus::NotFound) {
+                    *error =
+                        "the server bearer token is marked as stored in the OS credential store, "
+                        "but the credential is missing; regenerate the token in Settings";
+                } else {
+                    *error = "could not read the server bearer token from the OS credential store: " + read.error;
+                }
+            }
+            return false;
+        }
+        if (Trim(read.value).empty()) {
+            if (error) {
+                *error = "the server bearer token in the OS credential store is empty; regenerate it in Settings";
+            }
+            return false;
+        }
+        config.server.authToken = std::move(read.value);
+        config.server.authTokenDirty = false;
+        return true;
+    }
+
+    if (Trim(config.server.authToken).empty()) {
+        if (!GenerateServerAuthToken(config.server.authToken, error)) {
+            return false;
+        }
+        config.server.authTokenDirty = true;
+    }
+    if (!SaveAppConfig(config, error, &store)) {
         return false;
     }
-    config.server.authToken = GenerateServerAuthToken();
+    config.version = std::max(config.version, 2);
+    config.server.authTokenStorage = ServerAuthTokenStorage::System;
+    config.server.authTokenDirty = false;
     return true;
 }
 
@@ -471,6 +521,14 @@ AppConfig LoadAppConfig(std::string* error) {
     config.server = ServerConfig{};
     config.recording = RecordingConfig{};
     config.version = static_cast<int>(parsed["version"].value_or<int64_t>(1));
+    if (config.version < 1 || config.version > kCurrentConfigVersion) {
+        if (error) {
+            *error =
+                "unsupported config version " + std::to_string(config.version) +
+                "; this build supports versions 1-" + std::to_string(kCurrentConfigVersion);
+        }
+        return {};
+    }
     config.defaultProfile = parsed["default_profile"].value_or("main");
 
     if (auto providers = parsed["providers"].as_table()) {
@@ -540,6 +598,26 @@ AppConfig LoadAppConfig(std::string* error) {
             }
         }
         config.server.authToken = TomlString(*server, "auth_token");
+        std::string tokenStorage = Lowercase(Trim(TomlString(*server, "auth_token_storage")));
+        if (!config.server.authToken.empty() && !tokenStorage.empty()) {
+            if (error) {
+                *error = "server auth_token and auth_token_storage cannot both be configured";
+            }
+            return {};
+        }
+        if (!config.server.authToken.empty()) {
+            config.server.authTokenStorage = ServerAuthTokenStorage::LegacyPlaintext;
+            config.server.authTokenDirty = true;
+        } else if (tokenStorage.empty()) {
+            config.server.authTokenStorage = ServerAuthTokenStorage::None;
+        } else if (tokenStorage == kSystemTokenStorage) {
+            config.server.authTokenStorage = ServerAuthTokenStorage::System;
+        } else {
+            if (error) {
+                *error = "server auth_token_storage must be \"system\"";
+            }
+            return {};
+        }
         config.server.allowedOrigins = TomlStringArray(*server, "allowed_origins");
         if (auto apps = (*server)["apps"].as_table()) {
             for (const auto& [key, node] : *apps) {
@@ -601,8 +679,51 @@ AppConfig LoadAppConfig(std::string* error) {
     return config;
 }
 
-bool SaveAppConfig(const AppConfig& config, std::string* error) {
-    return WriteConfigFile(ConfigPath(), AppConfigToToml(config), error);
+bool SaveAppConfig(
+    const AppConfig& config,
+    std::string* error,
+    CredentialStore* credentialStore
+) {
+    AppConfig persisted = config;
+    const bool tokenConfigured = !Trim(config.server.authToken).empty();
+    const bool mustStoreToken =
+        config.server.authTokenDirty ||
+        config.server.authTokenStorage == ServerAuthTokenStorage::LegacyPlaintext ||
+        (config.server.authTokenStorage == ServerAuthTokenStorage::None && tokenConfigured);
+    if (mustStoreToken) {
+        if (!tokenConfigured) {
+            if (error) {
+                *error = "cannot store an empty server bearer token";
+            }
+            return false;
+        }
+        CredentialStore& store = credentialStore != nullptr ? *credentialStore : SystemCredentialStore();
+        const std::string key = ServerAuthCredentialKey();
+        CredentialStoreResult write = store.Write(key, config.server.authToken);
+        if (!write.ok()) {
+            if (error) {
+                *error = "could not store the server bearer token in the OS credential store: " + write.error;
+            }
+            return false;
+        }
+        CredentialStoreResult verify = store.Read(key);
+        if (!verify.ok()) {
+            if (error) {
+                *error = "could not verify the server bearer token in the OS credential store: " + verify.error;
+            }
+            return false;
+        }
+        if (verify.value != config.server.authToken) {
+            if (error) {
+                *error = "the OS credential store returned different data while verifying the server bearer token";
+            }
+            return false;
+        }
+        persisted.version = std::max(persisted.version, kCurrentConfigVersion);
+        persisted.server.authTokenStorage = ServerAuthTokenStorage::System;
+        persisted.server.authTokenDirty = false;
+    }
+    return WriteConfigFile(ConfigPath(), AppConfigToToml(persisted), error);
 }
 
 json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
@@ -637,10 +758,14 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
         }
         out["profiles"][name] = item;
     }
+    const bool tokenConfigured =
+        config.server.authTokenStorage != ServerAuthTokenStorage::None ||
+        !config.server.authToken.empty();
     out["server"] = {
         {"host", config.server.host},
         {"basePort", config.server.basePort},
-        {"authToken", redactSecrets && !config.server.authToken.empty() ? "<redacted>" : config.server.authToken},
+        {"authToken", tokenConfigured ? "<redacted>" : ""},
+        {"authTokenStorage", tokenConfigured ? "system" : "none"},
         {"allowedOrigins", config.server.allowedOrigins},
         {"apps", json::object()},
     };
@@ -673,7 +798,13 @@ std::string AppConfigToToml(const AppConfig& config) {
     out << "# computer.cpp user configuration\n";
     out << "# The tray settings UI and `computer.cpp config` commands both edit this file.\n";
     out << "# Keep this file private; it may contain provider API keys.\n\n";
-    out << "version = " << config.version << "\n";
+    const bool tokenConfigured =
+        config.server.authTokenStorage != ServerAuthTokenStorage::None ||
+        !config.server.authToken.empty();
+    const int serializedVersion = tokenConfigured
+        ? std::max(config.version, kCurrentConfigVersion)
+        : config.version;
+    out << "version = " << serializedVersion << "\n";
     out << "default_profile = " << TomlStringLiteral(config.defaultProfile) << "\n\n";
 
     for (const auto& [name, provider] : config.providers) {
@@ -727,8 +858,8 @@ std::string AppConfigToToml(const AppConfig& config) {
     out << TomlTablePath({"server"}) << "\n";
     out << "host = " << TomlStringLiteral(config.server.host) << "\n";
     out << "base_port = " << config.server.basePort << "\n";
-    if (!config.server.authToken.empty()) {
-        out << "auth_token = " << TomlStringLiteral(config.server.authToken) << "\n";
+    if (tokenConfigured) {
+        out << "auth_token_storage = " << TomlStringLiteral(std::string(kSystemTokenStorage)) << "\n";
     }
     out << "allowed_origins = " << JsonToTomlValue(config.server.allowedOrigins) << "\n\n";
 

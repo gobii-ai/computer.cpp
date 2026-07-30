@@ -2,9 +2,11 @@
 
 #include "UpdateFlow.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -20,6 +22,7 @@ class wxTimer;
 class wxTimerEvent;
 
 namespace ComputerCpp {
+struct AppConfig;
 struct ServerAppConfig;
 struct ServerConfig;
 }
@@ -49,6 +52,7 @@ private:
         std::string appPath;
         std::string host;
         std::string url;
+        std::string authToken;
         std::filesystem::path statePath;
         int port = 0;
         long pid = 0;
@@ -85,6 +89,12 @@ private:
     void StartOwnedDaemon();
     void RefreshConfiguredServers(bool force = false);
     void AdoptExistingServers(bool removeInvalidState);
+    void ResolveServerConfigAsync(
+        std::function<void(ComputerCpp::AppConfig, std::string)> completion);
+    void StartAllServersWithConfig(ComputerCpp::AppConfig config);
+    void StartConfiguredServerWithConfig(
+        const std::string& configName,
+        ComputerCpp::AppConfig config);
     std::set<int> OccupiedServerPorts(const std::string& excludedConfigName = {}) const;
     void ToggleServer(const std::string& configName);
     void StartOneServer(
@@ -111,6 +121,8 @@ private:
     std::unique_ptr<wxTimer> serverTimer_;
     std::map<std::string, ManagedServer> servers_;
     std::string serverAuthToken_;
+    std::shared_ptr<std::atomic_bool> alive_ = std::make_shared<std::atomic_bool>(true);
+    bool serverCredentialBusy_ = false;
     ServerBatchAction serverBatchAction_ = ServerBatchAction::None;
     std::set<std::string> serverBatchPending_;
     std::vector<std::string> serverBatchFailures_;

@@ -30,6 +30,34 @@ jobs:
         run: |
           scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-code-sign --no-gui
 
+  linux:
+    name: Linux Tests
+    runs-on: ubuntu-latest
+    env:
+      BUILD_DIR: build/linux
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            libcurl4-openssl-dev \
+            libsecret-1-dev \
+            libsqlite3-dev \
+            libx11-dev \
+            libxtst-dev \
+            lua5.4 \
+            ninja-build \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Build and test
+        run: |
+          scripts/build.sh --verify --build-dir "$BUILD_DIR" --generator Ninja --no-gui
+
   windows:
     name: Windows Tests
     runs-on: windows-latest

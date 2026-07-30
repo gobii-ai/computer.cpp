@@ -99,6 +99,7 @@ string(TIMESTAMP COMPUTER_CPP_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
 add_library(computer_cpp_core
     src/core/AppPaths.cpp
     src/core/AppConfig.cpp
+    src/core/CredentialStore.cpp
     src/core/Image.cpp
     src/core/ControlSessionAcquire.cpp
     src/core/ControlSession.cpp
@@ -194,6 +195,7 @@ if(APPLE)
     find_library(IMAGEIO_LIBRARY ImageIO REQUIRED)
     find_library(IOKIT_LIBRARY IOKit REQUIRED)
     find_library(SCREENCAPTUREKIT_LIBRARY ScreenCaptureKit REQUIRED)
+    find_library(SECURITY_LIBRARY Security REQUIRED)
 
     target_link_libraries(computer_cpp_core
         PUBLIC
@@ -207,6 +209,7 @@ if(APPLE)
             ${IMAGEIO_LIBRARY}
             ${IOKIT_LIBRARY}
             ${SCREENCAPTUREKIT_LIBRARY}
+            ${SECURITY_LIBRARY}
     )
 elseif(WIN32)
     target_sources(computer_cpp_core PRIVATE
@@ -215,6 +218,8 @@ elseif(WIN32)
     )
     target_link_libraries(computer_cpp_core
         PUBLIC
+            advapi32
+            bcrypt
             comctl32
             gdi32
             mf
@@ -236,7 +241,10 @@ elseif(UNIX)
         src/platform/linux/ScreenRecordingLinux.cpp
     )
     find_package(X11 REQUIRED COMPONENTS Xtst)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
     target_link_libraries(computer_cpp_core PUBLIC ${X11_LIBRARIES} ${X11_Xtst_LIB})
+    target_link_libraries(computer_cpp_core PUBLIC PkgConfig::LIBSECRET)
     target_include_directories(computer_cpp_core PUBLIC ${X11_INCLUDE_DIR})
 
     if(PkgConfig_FOUND)

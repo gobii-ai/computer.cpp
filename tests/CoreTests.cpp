@@ -1,6 +1,7 @@
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
+#include "computer_cpp/CredentialStore.h"
 #include "computer_cpp/HumanInput.h"
 #include "computer_cpp/Image.h"
 #include "computer_cpp/LuaRunner.h"
@@ -16,11 +17,13 @@
 #include "UpdaterInternal.h"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <sqlite3.h>
@@ -44,6 +47,58 @@ using ComputerCpp::Tests::MakeTempHome;
 
 namespace {
 
+void SetEnvValue(const char* name, const std::string& value);
+void ClearEnvValue(const char* name);
+
+class MemoryCredentialStore final : public ComputerCpp::CredentialStore {
+public:
+    ComputerCpp::CredentialStoreResult Read(const std::string& key) override {
+        if (readStatus != ComputerCpp::CredentialStoreStatus::Success) {
+            return {readStatus, {}, "in-memory read failure"};
+        }
+        auto it = values.find(key);
+        if (it == values.end()) {
+            return {
+                ComputerCpp::CredentialStoreStatus::NotFound,
+                {},
+                "in-memory credential was not found",
+            };
+        }
+        return {
+            ComputerCpp::CredentialStoreStatus::Success,
+            readOverride.has_value() ? *readOverride : it->second,
+            {},
+        };
+    }
+
+    ComputerCpp::CredentialStoreResult Write(
+        const std::string& key,
+        const std::string& value
+    ) override {
+        if (writeStatus != ComputerCpp::CredentialStoreStatus::Success) {
+            return {writeStatus, {}, "in-memory write failure"};
+        }
+        values[key] = value;
+        return {ComputerCpp::CredentialStoreStatus::Success, {}, {}};
+    }
+
+    ComputerCpp::CredentialStoreResult Remove(const std::string& key) override {
+        if (values.erase(key) == 0) {
+            return {
+                ComputerCpp::CredentialStoreStatus::NotFound,
+                {},
+                "in-memory credential was not found",
+            };
+        }
+        return {ComputerCpp::CredentialStoreStatus::Success, {}, {}};
+    }
+
+    std::map<std::string, std::string> values;
+    ComputerCpp::CredentialStoreStatus readStatus = ComputerCpp::CredentialStoreStatus::Success;
+    ComputerCpp::CredentialStoreStatus writeStatus = ComputerCpp::CredentialStoreStatus::Success;
+    std::optional<std::string> readOverride;
+};
+
 void ExecSql(sqlite3* db, const std::string& sql) {
     char* error = nullptr;
     if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
@@ -66,6 +121,7 @@ void TestStringUtils() {
 }
 
 void TestAppConfigServerRoundTrip() {
+    MemoryCredentialStore credentials;
     std::string missingError;
     ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
     assert(missingError.empty());
@@ -97,18 +153,21 @@ void TestAppConfigServerRoundTrip() {
     std::string toml = ComputerCpp::AppConfigToToml(config);
     assert(toml.find("[server]") != std::string::npos);
     assert(toml.find("[server.apps.linkedin]") != std::string::npos);
-    assert(toml.find("auth_token = \"test-token\"") != std::string::npos);
+    assert(toml.find("auth_token_storage = \"system\"") != std::string::npos);
+    assert(toml.find("test-token") == std::string::npos);
     assert(toml.find("[recording]") != std::string::npos);
     assert(toml.find("enabled = true") != std::string::npos);
     assert(toml.find("retention_days = 14") != std::string::npos);
 
     std::string error;
-    assert(ComputerCpp::SaveAppConfig(config, &error));
+    assert(ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    assert(credentials.values[ComputerCpp::ServerAuthCredentialKey()] == "test-token");
     ComputerCpp::AppConfig loaded = ComputerCpp::LoadAppConfig(&error);
     assert(error.empty());
     assert(loaded.server.host == "0.0.0.0");
     assert(loaded.server.basePort == 8790);
-    assert(loaded.server.authToken == "test-token");
+    assert(loaded.server.authToken.empty());
+    assert(loaded.server.authTokenStorage == ComputerCpp::ServerAuthTokenStorage::System);
     assert(loaded.server.allowedOrigins.size() == 2);
     assert(loaded.server.apps.contains("linkedin"));
     assert(loaded.server.apps["linkedin"].displayName == "LinkedIn Recruiter");
@@ -120,7 +179,12 @@ void TestAppConfigServerRoundTrip() {
     auto redacted = ComputerCpp::AppConfigToJson(loaded);
     assert(redacted["server"]["authToken"] == "<redacted>");
     auto visible = ComputerCpp::AppConfigToJson(loaded, false);
-    assert(visible["server"]["authToken"] == "test-token");
+    assert(visible["server"]["authToken"] == "<redacted>");
+    assert(ComputerCpp::EnsureServerAuthToken(loaded, &error, &credentials));
+    assert(error.empty());
+    visible = ComputerCpp::AppConfigToJson(loaded, false);
+    assert(visible["server"]["authToken"] == "<redacted>");
+    assert(visible.dump().find("test-token") == std::string::npos);
     assert(visible["recording"]["enabled"] == true);
     assert(visible["recording"]["retentionDays"] == 14);
     assert(visible["recording"]["directory"] == ComputerCpp::RecordingDir().string());
@@ -128,14 +192,158 @@ void TestAppConfigServerRoundTrip() {
         ComputerCpp::DefaultArtifactDir().parent_path());
 
     ComputerCpp::AppConfig tokenConfig = ComputerCpp::DefaultAppConfig();
-    assert(ComputerCpp::EnsureServerAuthToken(tokenConfig));
+    assert(ComputerCpp::EnsureServerAuthToken(tokenConfig, &error, &credentials));
     assert(tokenConfig.server.authToken.size() >= 32);
     std::string generated = tokenConfig.server.authToken;
-    assert(!ComputerCpp::EnsureServerAuthToken(tokenConfig));
+    assert(ComputerCpp::EnsureServerAuthToken(tokenConfig, &error, &credentials));
     assert(tokenConfig.server.authToken == generated);
 
     loaded.recording.enabled = false;
-    assert(ComputerCpp::SaveAppConfig(loaded, &error));
+    assert(ComputerCpp::SaveAppConfig(loaded, &error, &credentials));
+}
+
+void TestServerCredentialMigrationAndFailures() {
+    MemoryCredentialStore credentials;
+    ComputerCpp::AppConfig config = ComputerCpp::DefaultAppConfig();
+    config.server.authToken = "legacy-token";
+    config.server.authTokenStorage = ComputerCpp::ServerAuthTokenStorage::LegacyPlaintext;
+    config.server.authTokenDirty = true;
+
+    std::string error;
+    std::string legacyToml = ComputerCpp::AppConfigToToml(config);
+    size_t version = legacyToml.find("version = 2");
+    assert(version != std::string::npos);
+    legacyToml.replace(version, std::string("version = 2").size(), "version = 1");
+    size_t storage = legacyToml.find("auth_token_storage = \"system\"");
+    assert(storage != std::string::npos);
+    legacyToml.replace(
+        storage,
+        std::string("auth_token_storage = \"system\"").size(),
+        "auth_token = \"legacy-token\"");
+    {
+        std::ofstream legacyFile(ComputerCpp::ConfigPath(), std::ios::trunc);
+        legacyFile << legacyToml;
+    }
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(config.version == 1);
+    assert(config.server.authToken == "legacy-token");
+    assert(config.server.authTokenStorage == ComputerCpp::ServerAuthTokenStorage::LegacyPlaintext);
+
+    credentials.writeStatus = ComputerCpp::CredentialStoreStatus::Unavailable;
+    assert(!ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    assert(error.find("OS credential store") != std::string::npos);
+    assert(error.find("legacy-token") == std::string::npos);
+    assert(credentials.values.empty());
+    {
+        std::ifstream legacyFile(ComputerCpp::ConfigPath());
+        std::string unchanged((std::istreambuf_iterator<char>(legacyFile)), std::istreambuf_iterator<char>());
+        assert(unchanged.find("auth_token = \"legacy-token\"") != std::string::npos);
+    }
+
+    credentials.writeStatus = ComputerCpp::CredentialStoreStatus::Success;
+    credentials.readStatus = ComputerCpp::CredentialStoreStatus::AccessDenied;
+    assert(!ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    assert(error.find("verify") != std::string::npos);
+    assert(error.find("legacy-token") == std::string::npos);
+
+    credentials.readStatus = ComputerCpp::CredentialStoreStatus::Success;
+    credentials.readOverride = "different-value";
+    assert(!ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    assert(error.find("different data") != std::string::npos);
+    assert(error.find("legacy-token") == std::string::npos);
+    credentials.readOverride.reset();
+
+    fs::path blockedTemp = ComputerCpp::ConfigPath();
+    blockedTemp += ".tmp";
+    fs::create_directory(blockedTemp);
+    assert(!ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    assert(error.find("could not write") != std::string::npos);
+    {
+        std::ifstream legacyFile(ComputerCpp::ConfigPath());
+        std::string unchanged((std::istreambuf_iterator<char>(legacyFile)), std::istreambuf_iterator<char>());
+        assert(unchanged.find("auth_token = \"legacy-token\"") != std::string::npos);
+    }
+    fs::remove(blockedTemp);
+
+    assert(ComputerCpp::SaveAppConfig(config, &error, &credentials));
+    std::ifstream savedFile(ComputerCpp::ConfigPath());
+    std::string saved((std::istreambuf_iterator<char>(savedFile)), std::istreambuf_iterator<char>());
+    assert(saved.find("legacy-token") == std::string::npos);
+    assert(saved.find("auth_token =") == std::string::npos);
+    assert(saved.find("auth_token_storage = \"system\"") != std::string::npos);
+    assert(saved.find("version = 2") != std::string::npos);
+
+    error.clear();
+    ComputerCpp::AppConfig loaded = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    credentials.values.clear();
+    assert(!ComputerCpp::EnsureServerAuthToken(loaded, &error, &credentials));
+    assert(error.find("credential is missing") != std::string::npos);
+    assert(loaded.server.authToken.empty());
+
+    loaded.recording.enabled = true;
+    credentials.readStatus = ComputerCpp::CredentialStoreStatus::Unavailable;
+    error.clear();
+    assert(ComputerCpp::SaveAppConfig(loaded, &error, &credentials));
+    assert(error.empty());
+
+    loaded.server.authToken = "rotated-token";
+    loaded.server.authTokenDirty = true;
+    std::ifstream beforeRotationFile(ComputerCpp::ConfigPath());
+    std::string beforeRotation(
+        (std::istreambuf_iterator<char>(beforeRotationFile)),
+        std::istreambuf_iterator<char>());
+    credentials.writeStatus = ComputerCpp::CredentialStoreStatus::Unavailable;
+    assert(!ComputerCpp::SaveAppConfig(loaded, &error, &credentials));
+    std::ifstream afterRotationFile(ComputerCpp::ConfigPath());
+    std::string afterRotation(
+        (std::istreambuf_iterator<char>(afterRotationFile)),
+        std::istreambuf_iterator<char>());
+    assert(afterRotation == beforeRotation);
+    credentials.writeStatus = ComputerCpp::CredentialStoreStatus::Success;
+    credentials.readStatus = ComputerCpp::CredentialStoreStatus::Success;
+    assert(ComputerCpp::SaveAppConfig(loaded, &error, &credentials));
+    assert(credentials.values[ComputerCpp::ServerAuthCredentialKey()] == "rotated-token");
+    std::ifstream rotatedConfigFile(ComputerCpp::ConfigPath());
+    std::string rotatedConfig(
+        (std::istreambuf_iterator<char>(rotatedConfigFile)),
+        std::istreambuf_iterator<char>());
+    assert(rotatedConfig.find("rotated-token") == std::string::npos);
+
+    std::string firstKey = ComputerCpp::ServerAuthCredentialKey();
+    fs::path alternateHome = MakeTempHome();
+    const char* originalHome = std::getenv("COMPUTER_CPP_HOME");
+    std::string originalValue = originalHome ? originalHome : "";
+    SetEnvValue("COMPUTER_CPP_HOME", alternateHome.string());
+    std::string secondKey = ComputerCpp::ServerAuthCredentialKey();
+    if (originalHome) {
+        SetEnvValue("COMPUTER_CPP_HOME", originalValue);
+    } else {
+        ClearEnvValue("COMPUTER_CPP_HOME");
+    }
+    assert(firstKey != secondKey);
+}
+
+void TestNativeCredentialStoreSmoke() {
+    const std::string key =
+        "native-smoke:" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    ComputerCpp::CredentialStore& store = ComputerCpp::SystemCredentialStore();
+    auto write = store.Write(key, "first-value");
+    assert(write.ok());
+    auto read = store.Read(key);
+    assert(read.ok());
+    assert(read.value == "first-value");
+    auto update = store.Write(key, "second-value");
+    assert(update.ok());
+    read = store.Read(key);
+    assert(read.ok());
+    assert(read.value == "second-value");
+    auto remove = store.Remove(key);
+    assert(remove.ok());
+    read = store.Read(key);
+    assert(read.status == ComputerCpp::CredentialStoreStatus::NotFound);
 }
 
 void TestServerPortPlanning() {
@@ -757,6 +965,14 @@ void SetEnvValue(const char* name, const std::string& value) {
 #endif
 }
 
+void ClearEnvValue(const char* name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
 void RestoreEnvValue(const char* name, const std::optional<std::string>& value) {
     if (value.has_value()) {
         SetEnvValue(name, *value);
@@ -1085,6 +1301,10 @@ int main() {
 
     RunTest("StringUtils", TestStringUtils);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
+    RunTest("ServerCredentialMigrationAndFailures", TestServerCredentialMigrationAndFailures);
+    if (std::getenv("COMPUTER_CPP_RUN_CREDENTIAL_STORE_TESTS") != nullptr) {
+        RunTest("NativeCredentialStoreSmoke", TestNativeCredentialStoreSmoke);
+    }
     RunTest("ServerPortPlanning", TestServerPortPlanning);
     RunTest("CommandRecordingLifecycle", TestCommandRecordingLifecycle);
     RunTest("NativeCommandRecordingSmoke", TestNativeCommandRecordingSmoke);

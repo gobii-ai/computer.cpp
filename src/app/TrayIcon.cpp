@@ -11,6 +11,7 @@
 #include "computer_cpp/TrayServerState.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -30,6 +31,7 @@
 #include <vector>
 #include <wx/clipbrd.h>
 #include <wx/dcmemory.h>
+#include <wx/evtloop.h>
 #include <wx/filedlg.h>
 #include <wx/graphics.h>
 #include <wx/icon.h>
@@ -971,7 +973,6 @@ public:
 
         SetSizer(root);
         SetEscapeId(wxID_CANCEL);
-        LoadConfig();
         CentreOnScreen();
 
         save_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnSave, this);
@@ -979,6 +980,11 @@ public:
         openConfig_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnOpenConfig, this);
         close_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Close(); });
         Bind(wxEVT_CLOSE_WINDOW, &LlmSettingsDialog::OnCloseWindow, this);
+        LoadConfig();
+    }
+
+    ~LlmSettingsDialog() override {
+        alive_->store(false);
     }
 
 private:
@@ -1287,14 +1293,14 @@ private:
         serverGrid->AddGrowableCol(1, 1);
         serverHost_ = AddTextField(detailPane, serverGrid, "Host");
         serverBasePort_ = AddTextField(detailPane, serverGrid, "Base Port");
-        serverAuthToken_ = AddTextField(detailPane, serverGrid, "Bearer Token");
+        serverAuthToken_ = AddTextField(detailPane, serverGrid, "Bearer Token", wxTE_PASSWORD);
         serverAllowedOrigins_ = AddTextField(detailPane, serverGrid, "Allowed Origins", wxTE_MULTILINE, 64);
         serverBox->Add(serverGrid, 0, wxALL | wxEXPAND, 12);
         auto* tokenButtons = new wxBoxSizer(wxHORIZONTAL);
         regenerateServerToken_ = new wxButton(detailPane, wxID_ANY, "Regenerate Token");
-        auto* copyToken = new wxButton(detailPane, wxID_ANY, "Copy Token");
+        copyServerToken_ = new wxButton(detailPane, wxID_ANY, "Copy Token");
         tokenButtons->Add(regenerateServerToken_, 0, wxRIGHT, 8);
-        tokenButtons->Add(copyToken, 0);
+        tokenButtons->Add(copyServerToken_, 0);
         tokenButtons->AddStretchSpacer();
         serverBox->Add(tokenButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
         detail->Add(serverBox, 0, wxEXPAND | wxBOTTOM, 12);
@@ -1322,7 +1328,7 @@ private:
         remove->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnDeleteServerApp, this);
         browseServerApp_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnBrowseServerApp, this);
         regenerateServerToken_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnRegenerateServerToken, this);
-        copyToken->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnCopyServerTokenFromSettings, this);
+        copyServerToken_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnCopyServerTokenFromSettings, this);
 
         BindDirty(serverHost_);
         BindDirty(serverBasePort_);
@@ -1445,22 +1451,48 @@ private:
     }
 
     void LoadConfig() {
-        std::string error;
-        config_ = LoadAppConfig(&error);
-        std::string loadStatus;
-        if (!error.empty()) {
+        if (credentialBusy_) {
+            return;
+        }
+        credentialBusy_ = true;
+        save_->Enable(false);
+        reload_->Enable(false);
+        regenerateServerToken_->Enable(false);
+        copyServerToken_->Enable(false);
+        auto alive = alive_;
+        std::thread([this, alive] {
+            std::string error;
+            AppConfig loaded = LoadAppConfig(&error);
+            std::string loadStatus = error;
+            if (error.empty()) {
+                std::string tokenError;
+                if (!ComputerCpp::EnsureServerAuthToken(loaded, &tokenError)) {
+                    loadStatus = tokenError;
+                }
+            }
+            wxTheApp->CallAfter([this, alive, loaded = std::move(loaded), loadStatus = std::move(loadStatus)]() mutable {
+                if (!alive->load()) {
+                    return;
+                }
+                ApplyLoadedConfig(std::move(loaded), std::move(loadStatus));
+            });
+        }).detach();
+    }
+
+    void ApplyLoadedConfig(AppConfig loaded, std::string loadStatus) {
+        credentialBusy_ = false;
+        reload_->Enable(true);
+        regenerateServerToken_->Enable(true);
+        copyServerToken_->Enable(true);
+        config_ = std::move(loaded);
+        if (!loadStatus.empty() && config_.providers.empty() && config_.profiles.empty()) {
             config_ = DefaultAppConfig();
-            loadStatus = error;
         }
         if (config_.providers.empty()) {
             config_.providers = DefaultAppConfig().providers;
         }
         if (config_.profiles.empty()) {
             config_.profiles = DefaultAppConfig().profiles;
-        }
-        if (ComputerCpp::EnsureServerAuthToken(config_)) {
-            std::string saveError;
-            SaveAppConfig(config_, &saveError);
         }
         if (configPath_) {
             configPath_->ChangeValue(ConfigPath().string());
@@ -1796,11 +1828,26 @@ private:
 
         config_.server.host = host;
         config_.server.basePort = *basePort;
-        config_.server.authToken = FieldValue(serverAuthToken_);
-        if (config_.server.authToken.empty()) {
-            config_.server.authToken = GenerateServerAuthToken();
-            serverAuthToken_->ChangeValue(config_.server.authToken);
+        std::string token = FieldValue(serverAuthToken_);
+        if (token.empty()) {
+            if (config_.server.authTokenStorage == ServerAuthTokenStorage::System) {
+                if (!config_.server.authToken.empty() || config_.server.authTokenDirty) {
+                    SetStatus("A stored bearer token cannot be cleared. Use Regenerate Token to replace it.");
+                    return false;
+                }
+            } else {
+                std::string tokenError;
+                if (!GenerateServerAuthToken(token, &tokenError)) {
+                    SetStatus(tokenError);
+                    return false;
+                }
+                serverAuthToken_->ChangeValue(token);
+            }
         }
+        if (token != config_.server.authToken) {
+            config_.server.authTokenDirty = true;
+        }
+        config_.server.authToken = std::move(token);
         config_.server.allowedOrigins = SplitTextList(serverAllowedOrigins_->GetValue().ToStdString());
 
         if (!FlushServerAppFields()) {
@@ -1877,10 +1924,32 @@ private:
         if (!FlushAllFields()) {
             return false;
         }
-        std::string error;
-        if (!SaveAppConfig(config_, &error)) {
-            SetStatus(error);
+        struct SaveResult {
+            bool ok = false;
+            std::string error;
+        };
+        auto result = std::make_shared<SaveResult>();
+        AppConfig configToSave = config_;
+        wxEventLoop saveLoop;
+        Enable(false);
+        std::thread([result, configToSave = std::move(configToSave), &saveLoop] {
+            result->ok = SaveAppConfig(configToSave, &result->error);
+            wxTheApp->CallAfter([&saveLoop] {
+                saveLoop.Exit();
+            });
+        }).detach();
+        saveLoop.Run();
+        Enable(true);
+        Raise();
+        SetFocus();
+        if (!result->ok) {
+            SetStatus(result->error);
             return false;
+        }
+        if (!config_.server.authToken.empty()) {
+            config_.version = std::max(config_.version, 2);
+            config_.server.authTokenStorage = ServerAuthTokenStorage::System;
+            config_.server.authTokenDirty = false;
         }
         RefreshAfterMutation(activeProfile_, activeProvider_);
         std::string message = "Saved changes.";
@@ -2102,7 +2171,14 @@ private:
     }
 
     void OnRegenerateServerToken(wxCommandEvent&) {
-        serverAuthToken_->ChangeValue(GenerateServerAuthToken());
+        std::string token;
+        std::string error;
+        if (!GenerateServerAuthToken(token, &error)) {
+            ShowResultDialog("Server Token", error, wxICON_ERROR);
+            return;
+        }
+        config_.server.authTokenDirty = true;
+        serverAuthToken_->ChangeValue(token);
         MarkDirty("Bearer token regenerated. Save changes before using it.");
     }
 
@@ -2321,6 +2397,7 @@ private:
     wxTextCtrl* serverAppPort_ = nullptr;
     wxButton* browseServerApp_ = nullptr;
     wxButton* regenerateServerToken_ = nullptr;
+    wxButton* copyServerToken_ = nullptr;
 
     wxTextCtrl* configPath_ = nullptr;
     wxCheckBox* recordingEnabled_ = nullptr;
@@ -2333,6 +2410,8 @@ private:
     wxButton* close_ = nullptr;
     wxFont cleanSaveFont_;
     wxFont dirtySaveFont_;
+    std::shared_ptr<std::atomic_bool> alive_ = std::make_shared<std::atomic_bool>(true);
+    bool credentialBusy_ = false;
 };
 
 class PermissionSetupDialog : public wxDialog {
@@ -2699,7 +2778,14 @@ TrayIcon::TrayIcon() {
     });
     StartOwnedDaemon();
     RefreshConfiguredServers(true);
-    AdoptExistingServers(true);
+    ResolveServerConfigAsync([this](AppConfig config, std::string error) {
+        if (!error.empty()) {
+            AppendAppLog("server", "could_not_load_bearer_token error=" + error);
+            return;
+        }
+        serverAuthToken_ = config.server.authToken;
+        AdoptExistingServers(true);
+    });
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
@@ -2711,6 +2797,7 @@ TrayIcon::TrayIcon() {
 }
 
 TrayIcon::~TrayIcon() {
+    alive_->store(false);
 #ifdef __APPLE__
     DestroyNativeTrayIcon(nativeTrayIcon_);
     nativeTrayIcon_ = nullptr;
@@ -2933,20 +3020,48 @@ void TrayIcon::OnCheckForUpdates(wxCommandEvent&) {
     }
 }
 
-void TrayIcon::OnStartServer(wxCommandEvent&) {
-    std::string error;
-    AppConfig config = LoadAppConfig(&error);
-    if (!error.empty()) {
-        wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
+void TrayIcon::ResolveServerConfigAsync(
+    std::function<void(AppConfig, std::string)> completion
+) {
+    if (serverCredentialBusy_) {
+        completion({}, "a server credential operation is already in progress");
         return;
     }
-    if (EnsureServerAuthToken(config)) {
-        std::string saveError;
-        if (!SaveAppConfig(config, &saveError)) {
-            wxMessageBox("Could not save generated server token:\n" + saveError, "ComputerCpp Server", wxOK | wxICON_ERROR);
+    serverCredentialBusy_ = true;
+    auto alive = alive_;
+    std::thread([this, alive, completion = std::move(completion)]() mutable {
+        std::string error;
+        AppConfig config = LoadAppConfig(&error);
+        if (error.empty() && !EnsureServerAuthToken(config, &error)) {
+            config.server.authToken.clear();
+        }
+        wxTheApp->CallAfter([
+            this,
+            alive,
+            completion = std::move(completion),
+            config = std::move(config),
+            error = std::move(error)
+        ]() mutable {
+            if (!alive->load()) {
+                return;
+            }
+            serverCredentialBusy_ = false;
+            completion(std::move(config), std::move(error));
+        });
+    }).detach();
+}
+
+void TrayIcon::OnStartServer(wxCommandEvent&) {
+    ResolveServerConfigAsync([this](AppConfig config, std::string error) {
+        if (!error.empty()) {
+            wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
             return;
         }
-    }
+        StartAllServersWithConfig(std::move(config));
+    });
+}
+
+void TrayIcon::StartAllServersWithConfig(AppConfig config) {
     if (config.server.apps.empty()) {
         wxMessageBox("Configure at least one Lua app in Settings > Server first.", "ComputerCpp Server", wxOK | wxICON_INFORMATION);
         return;
@@ -3063,7 +3178,9 @@ void TrayIcon::RefreshConfiguredServers(bool force) {
         return;
     }
     configuredServersRefreshedAt_ = now;
-    serverAuthToken_ = config.server.authToken;
+    if (!config.server.authToken.empty()) {
+        serverAuthToken_ = config.server.authToken;
+    }
     for (auto& [_, server] : servers_) {
         server.configured = false;
     }
@@ -3107,11 +3224,14 @@ std::set<int> TrayIcon::OccupiedServerPorts(const std::string& excludedConfigNam
 
 void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
     std::string configError;
-    const AppConfig config = LoadAppConfig(&configError);
+    AppConfig config = LoadAppConfig(&configError);
     if (!configError.empty()) {
         return;
     }
-    serverAuthToken_ = config.server.authToken;
+    if (serverAuthToken_.empty()) {
+        return;
+    }
+    config.server.authToken = serverAuthToken_;
 
     std::vector<std::filesystem::path> paths = ListTrayAppServerStatePaths(nullptr);
     const std::filesystem::path legacyPath = TrayAppServerStatePath();
@@ -3184,6 +3304,7 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
         server.port = state->port;
         server.pid = state->pid;
         server.url = state->url;
+        server.authToken = config.server.authToken;
         server.process = nullptr;
         server.status = ServerStatus::Running;
         server.statePath = TrayAppServerStatePath(configName);
@@ -3244,6 +3365,7 @@ void TrayIcon::AdoptExistingServers(bool removeInvalidState) {
         server.port = recovered->port;
         server.pid = recovered->pid;
         server.url = recovered->url;
+        server.authToken = config.server.authToken;
         server.process = nullptr;
         server.status = ServerStatus::Running;
         server.statePath = TrayAppServerStatePath(name);
@@ -3267,18 +3389,26 @@ void TrayIcon::ToggleServer(const std::string& configName) {
         return;
     }
 
-    std::string error;
-    AppConfig config = LoadAppConfig(&error);
-    if (!error.empty() || !config.server.apps.contains(configName)) {
-        wxMessageBox(error.empty() ? "Server app is no longer configured." : error, "ComputerCpp Server", wxOK | wxICON_ERROR);
-        return;
-    }
-    if (EnsureServerAuthToken(config)) {
-        std::string saveError;
-        if (!SaveAppConfig(config, &saveError)) {
-            wxMessageBox("Could not save generated server token:\n" + saveError, "ComputerCpp Server", wxOK | wxICON_ERROR);
+    ResolveServerConfigAsync([this, configName](AppConfig config, std::string error) {
+        if (!error.empty()) {
+            wxMessageBox(error, "ComputerCpp Server", wxOK | wxICON_ERROR);
             return;
         }
+        StartConfiguredServerWithConfig(configName, std::move(config));
+    });
+}
+
+void TrayIcon::StartConfiguredServerWithConfig(
+    const std::string& configName,
+    AppConfig config
+) {
+    auto managed = servers_.find(configName);
+    if (managed == servers_.end()) {
+        return;
+    }
+    if (!config.server.apps.contains(configName)) {
+        wxMessageBox("Server app is no longer configured.", "ComputerCpp Server", wxOK | wxICON_ERROR);
+        return;
     }
     serverAuthToken_ = config.server.authToken;
     const ServerAppConfig& app = config.server.apps.at(configName);
@@ -3324,6 +3454,7 @@ void TrayIcon::StartOneServer(
     server.host = host;
     server.port = port;
     server.url = ServerDisplayUrl(serverConfig.host, port);
+    server.authToken = serverConfig.authToken;
     server.status = ServerStatus::Starting;
     server.failure.clear();
     server.batchMember = batchMember;
@@ -3440,7 +3571,7 @@ void TrayIcon::StopOneServer(const std::string& configName, bool batchMember) {
     state.appPath = server.appPath;
     state.configName = configName;
     const bool shutdownRequested = server.pid > 0 &&
-        RequestServerShutdown(state, serverAuthToken_);
+        RequestServerShutdown(state, server.authToken);
     server.shutdownStage = shutdownRequested ? 0 : 1;
     if (!shutdownRequested && server.pid > 0) {
         SignalServerProcess(server.pid, wxSIGTERM, server.process != nullptr);
@@ -3496,7 +3627,7 @@ void TrayIcon::PollServers() {
                 state.url = server.url;
                 state.appPath = server.appPath;
                 state.configName = name;
-                if (HttpHealthOk(state, serverAuthToken_, 100)) {
+                if (HttpHealthOk(state, server.authToken, 100)) {
                     server.status = ServerStatus::Running;
                     server.failure.clear();
                     AppendAppLog("server", "started app=" + server.displayName + " url=" + server.url + " pid=" + std::to_string(server.pid));
@@ -3659,9 +3790,6 @@ void TrayIcon::ReleaseServerProcess(ManagedServer& server) {
 }
 
 void TrayIcon::StopAllServersBlocking() {
-    std::string configError;
-    const AppConfig config = LoadAppConfig(&configError);
-    const std::string token = configError.empty() ? config.server.authToken : serverAuthToken_;
     for (auto& [_, server] : servers_) {
         if (server.pid <= 0 || !IsProcessAlive(server.pid)) {
             ReleaseServerProcess(server);
@@ -3673,7 +3801,7 @@ void TrayIcon::StopAllServersBlocking() {
         state.port = server.port;
         state.url = server.url;
         state.appPath = server.appPath;
-        bool shutdownRequested = RequestServerShutdown(state, token);
+        bool shutdownRequested = RequestServerShutdown(state, server.authToken);
         if (!shutdownRequested) {
             SignalServerProcess(server.pid, wxSIGTERM, server.process != nullptr);
         }

@@ -12,6 +12,8 @@
 
 namespace ComputerCpp {
 
+class CredentialStore;
+
 struct LlmProviderConfig {
     std::string name;
     std::string type = "openai-compatible";
@@ -38,10 +40,18 @@ struct ServerAppConfig {
     std::optional<int> port;
 };
 
+enum class ServerAuthTokenStorage {
+    None,
+    LegacyPlaintext,
+    System,
+};
+
 struct ServerConfig {
     std::string host = "0.0.0.0";
     int basePort = 8787;
     std::string authToken;
+    ServerAuthTokenStorage authTokenStorage = ServerAuthTokenStorage::None;
+    bool authTokenDirty = false;
     std::vector<std::string> allowedOrigins;
     std::map<std::string, ServerAppConfig> apps;
 };
@@ -63,7 +73,7 @@ struct RecordingConfig {
 };
 
 struct AppConfig {
-    int version = 1;
+    int version = 2;
     std::string defaultProfile = "main";
     std::map<std::string, LlmProviderConfig> providers;
     std::map<std::string, LlmProfileConfig> profiles;
@@ -73,7 +83,10 @@ struct AppConfig {
 
 AppConfig DefaultAppConfig();
 AppConfig LoadAppConfig(std::string* error = nullptr);
-bool SaveAppConfig(const AppConfig& config, std::string* error = nullptr);
+bool SaveAppConfig(
+    const AppConfig& config,
+    std::string* error = nullptr,
+    CredentialStore* credentialStore = nullptr);
 bool AppConfigExists();
 
 nlohmann::json AppConfigToJson(const AppConfig& config, bool redactSecrets = true);
@@ -90,7 +103,10 @@ bool SetProfileDefaultParam(LlmProfileConfig& profile, const std::string& key, c
 bool ImportLegacyInferenceEnv(AppConfig& config, std::string* warning = nullptr, std::string* error = nullptr);
 
 std::string NormalizeLlmProviderType(const std::string& value, std::string* error = nullptr);
-std::string GenerateServerAuthToken();
-bool EnsureServerAuthToken(AppConfig& config);
+bool GenerateServerAuthToken(std::string& token, std::string* error = nullptr);
+bool EnsureServerAuthToken(
+    AppConfig& config,
+    std::string* error = nullptr,
+    CredentialStore* credentialStore = nullptr);
 
 } // namespace ComputerCpp
