@@ -2624,10 +2624,14 @@ public:
         const auto deadline =
             std::chrono::steady_clock::now() +
             std::chrono::seconds(8);
+        bool serverRunning = false;
         while (std::chrono::steady_clock::now() < deadline) {
             const ConfiguredServerInfo info = Status();
             if (info.running) {
-                return true;
+                serverRunning = true;
+                if (ConfiguredServerCatalogReady(info)) {
+                    return true;
+                }
             }
             if (!info.error.empty()) {
                 error = info.error;
@@ -2636,7 +2640,9 @@ public:
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(100));
         }
-        error = "local configured MCP server did not become ready";
+        error = serverRunning
+            ? "local configured MCP server catalog did not become ready"
+            : "local configured MCP server did not become ready";
         return false;
     }
 
@@ -2723,13 +2729,13 @@ TrayIcon::TrayIcon() {
 #if defined(__APPLE__) || defined(_WIN32)
     configuredServerController_ =
         std::make_unique<TrayConfiguredServerController>(*this);
-    auto http = CreateCurlGobiiHttpTransport();
+    auto http = std::shared_ptr<GobiiHttpTransport>(
+        CreateCurlGobiiHttpTransport());
     gobiiController_ =
         std::make_unique<GobiiConnectionController>(
-            std::shared_ptr<GobiiHttpTransport>(
-                std::move(http)),
+            http,
             CreateGobiiCredentialStore(),
-            CreateDisabledGobiiArtifactUploader(),
+            CreateGobiiArtifactUploader(http),
             *configuredServerController_,
             [](const std::string& url) {
                 return wxLaunchDefaultBrowser(
@@ -3090,7 +3096,16 @@ void TrayIcon::OnGobiiStatus(wxCommandEvent&) {
         return;
     }
     gobiiDialog_ =
-        new GobiiConnectionDialog(*gobiiController_);
+        new GobiiConnectionDialog(
+            *gobiiController_,
+            {
+                [this] { SetUpPermissionsIfNeeded(true); },
+                [this] {
+                    if (updateFlow_) {
+                        updateFlow_->CheckForUpdates();
+                    }
+                },
+            });
     gobiiDialog_->Bind(
         wxEVT_DESTROY,
         [this](wxWindowDestroyEvent&) {
@@ -3101,38 +3116,8 @@ void TrayIcon::OnGobiiStatus(wxCommandEvent&) {
 
 void TrayIcon::OnGobiiConnect(wxCommandEvent&) {
     if (!gobiiController_) return;
-    std::string configError;
-    const AppConfig config = LoadAppConfig(&configError);
-    const bool nonLoopback =
-        configError.empty() &&
-        config.server.host != "127.0.0.1" &&
-        config.server.host != "localhost" &&
-        config.server.host != "::1";
-    if (nonLoopback && config.server.authToken.empty()) {
-        wxMessageBox(
-            "Gobii relay access requires bearer authentication "
-            "when the configured server binds outside loopback.",
-            "Connect to Gobii",
-            wxOK | wxICON_ERROR);
-        return;
-    }
-    const int answer = wxMessageBox(
-        "The Gobii agent you select may see your screen and "
-        "control native mouse and keyboard input while access is "
-        "enabled.\n\nAuthentication and agent selection will open "
-        "in your normal browser." +
-        std::string(nonLoopback
-            ? "\n\nYour server currently binds outside loopback. "
-              "Gobii does not require a public listener; changing "
-              "the server host to 127.0.0.1 is recommended."
-            : ""),
-        "Connect to Gobii",
-        wxOK | wxCANCEL | wxICON_WARNING);
-    if (answer == wxOK) {
-        gobiiController_->StartPairing();
-        wxCommandEvent statusEvent;
-        OnGobiiStatus(statusEvent);
-    }
+    wxCommandEvent statusEvent;
+    OnGobiiStatus(statusEvent);
 }
 
 void TrayIcon::OnGobiiPauseResume(wxCommandEvent&) {
@@ -3162,7 +3147,7 @@ void TrayIcon::OnGobiiManage(wxCommandEvent&) {
     if (error.empty()) {
         wxLaunchDefaultBrowser(wxString::FromUTF8(
             config.gobii.baseUrl +
-            "/app/integrations/computer"));
+            "/app/integrations"));
     }
 }
 
@@ -3243,6 +3228,7 @@ void TrayIcon::RefreshConfiguredServer(bool force) {
             previous->second.path == status.path) {
             status.status = previous->second.status;
             status.error = previous->second.error;
+            status.schemaSha256 = previous->second.schemaSha256;
         } else if (server_.status == ServerStatus::Running) {
             status.status = "restart_required";
         }

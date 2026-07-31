@@ -40,6 +40,7 @@ public:
     GobiiConnectionStatus Status() const;
     void Initialize();
     void StartPairing();
+    bool ReopenPairingPage();
     void CancelPairing();
     void Connect();
     void Pause();
@@ -73,6 +74,7 @@ private:
     mutable std::mutex mutex_;
     StatusObserver observer_;
     GobiiConnectionStatus status_;
+    std::string pairingVerificationUrl_;
     GobiiRequestLedger ledger_;
     GobiiRelayClient relay_;
     std::jthread lifecycleThread_;

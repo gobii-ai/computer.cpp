@@ -28,14 +28,12 @@ local function command_from_tool(name, tool, transform)
       local result = response.result or {}
       if transform then return transform(result) end
       local image = result.image or result.__ac_image_path
-      if type(image) == "string" and image ~= "" then
-        return ac.mcp.result({
-          text = name .. " completed",
-          structured = result,
-          images = {{ path = image, mime_type = "image/png" }},
-        })
-      end
-      return result
+      return ac.mcp.result({
+        text = name .. " completed",
+        structured = result,
+        images = type(image) == "string" and image ~= "" and
+          {{ path = image, mime_type = "image/png" }} or {},
+      })
     end,
   })
 end
@@ -114,13 +112,16 @@ app:command("computer_status", {
     local lease = ac.request("control_session_status", {
       scope = ac.session.scope(),
     }, { allow_error = true })
-    return {
-      state = state.data or state,
-      lease = lease.data or {
-        ok = lease.ok,
-        code = lease.code,
+    return ac.mcp.result({
+      text = "Computer status",
+      structured = {
+        state = state.data or state,
+        lease = lease.data or {
+          ok = lease.ok,
+          code = lease.code,
+        },
       },
-    }
+    })
   end,
 })
 

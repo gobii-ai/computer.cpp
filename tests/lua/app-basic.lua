@@ -59,6 +59,24 @@ app:command("slow", {
   end,
 })
 
+app:command("mcp_result", {
+  description = "Return text and structured MCP content",
+  input = {},
+  handler = function()
+    return ac.mcp.result({
+      text = "MCP result ready",
+      structured = {
+        status = "ready",
+        image = "/tmp/private-screenshot.png",
+        nested = {
+          __ac_image_path = "C:\\private\\screenshot.png",
+          safe = "visible",
+        },
+      },
+    })
+  end,
+})
+
 app:command("fail", {
   description = "Raise a clean test error",
 

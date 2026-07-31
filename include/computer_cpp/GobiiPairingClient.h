@@ -63,6 +63,13 @@ struct GobiiPairingPollResult {
     int intervalSeconds = 0;
 };
 
+enum class GobiiRefreshFailure {
+    None,
+    Authentication,
+    UpdateRequired,
+    Transient,
+};
+
 class GobiiPairingClient {
 public:
     GobiiPairingClient(
@@ -78,7 +85,8 @@ public:
         const std::string& refreshToken,
         const std::string& clientVersion,
         GobiiTokenResponse& token,
-        std::string& error);
+        std::string& error,
+        GobiiRefreshFailure* failure = nullptr);
     bool Revoke(const std::string& refreshToken, std::string& error);
 
 private:

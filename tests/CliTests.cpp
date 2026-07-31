@@ -2535,16 +2535,26 @@ void TestConfiguredMultiAppServer() {
         nlohmann::json::parse(aggregateTools.body);
     std::set<std::string> aggregateToolNames;
     std::string undescribedToolDescription;
+    bool echoHasOutputSchema = false;
+    bool mcpResultHasOutputSchema = false;
     for (const auto& tool :
          aggregateToolsJson["result"]["tools"]) {
         const std::string name = tool["name"].get<std::string>();
         aggregateToolNames.insert(name);
+        if (name == "primary__echo") {
+            echoHasOutputSchema = tool.contains("outputSchema");
+        } else if (name == "primary__mcp_result") {
+            mcpResultHasOutputSchema =
+                tool.contains("outputSchema");
+        }
         if (name == "secondary.app_uname__undescribed") {
             undescribedToolDescription =
                 tool["description"].get<std::string>();
         }
     }
     assert(aggregateToolNames.contains("primary__echo"));
+    assert(echoHasOutputSchema);
+    assert(!mcpResultHasOutputSchema);
     assert(aggregateToolNames.contains("secondary.app_uname__echo"));
     assert(undescribedToolDescription ==
         "[Secondary] secondary.app_name command: undescribed");
@@ -2575,6 +2585,34 @@ void TestConfiguredMultiAppServer() {
     assert(primaryMcpEcho.status == 200);
     assert(nlohmann::json::parse(primaryMcpEcho.body)
         ["result"]["structuredContent"]["message"] == "from primary");
+    const auto primaryMcpResult = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__mcp_result"},
+            {"arguments", nlohmann::json::object()},
+        }},
+    });
+    const nlohmann::json primaryMcpResultJson =
+        nlohmann::json::parse(primaryMcpResult.body);
+    if (!primaryMcpResultJson.contains("result") ||
+        !primaryMcpResultJson["result"].is_object() ||
+        primaryMcpResultJson["result"].value("isError", true)) {
+        std::cerr << "Unexpected MCP result response: "
+                  << primaryMcpResult.body << '\n';
+    }
+    assert(primaryMcpResultJson["result"]["isError"] == false);
+    assert(primaryMcpResultJson["result"]["content"][0]["text"] ==
+        "MCP result ready");
+    assert(primaryMcpResultJson["result"]["structuredContent"]["status"] ==
+        "ready");
+    const auto& primaryStructured =
+        primaryMcpResultJson["result"]["structuredContent"];
+    assert(!primaryStructured.contains("image"));
+    assert(!primaryStructured["nested"].contains(
+        "__ac_image_path"));
+    assert(primaryStructured["nested"]["safe"] == "visible");
     const auto secondaryMcpEcho = aggregateMcp({
         {"jsonrpc", "2.0"},
         {"id", aggregateMcpId++},

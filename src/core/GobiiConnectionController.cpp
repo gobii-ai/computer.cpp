@@ -5,6 +5,7 @@
 #include "computer_cpp/Platform.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <set>
@@ -33,6 +34,16 @@ std::string ArchitectureName() {
 #else
     return "unknown";
 #endif
+}
+
+void InterruptibleWait(
+    std::stop_token stop,
+    std::chrono::seconds duration
+) {
+    std::mutex mutex;
+    std::condition_variable_any condition;
+    std::unique_lock lock(mutex);
+    condition.wait_for(lock, stop, duration, [] { return false; });
 }
 
 } // namespace
@@ -95,6 +106,7 @@ void GobiiConnectionController::SetState(
         status_.lastError = std::move(error);
         if (state != GobiiConnectionState::PairingPending) {
             status_.pairingCode.clear();
+            pairingVerificationUrl_.clear();
         }
     }
     Publish();
@@ -247,11 +259,11 @@ void GobiiConnectionController::PairingWorker(
         return;
     }
     const ConfiguredServerInfo server = server_.Status();
-    if (!server.running || server.apps.empty()) {
+    if (!ConfiguredServerCatalogReady(server)) {
         SetState(
             GobiiConnectionState::Error,
             server.error.empty()
-                ? "local configured MCP server is unavailable"
+                ? "local configured MCP server catalog is not ready"
                 : server.error);
         return;
     }
@@ -294,16 +306,14 @@ void GobiiConnectionController::PairingWorker(
     {
         std::lock_guard lock(mutex_);
         status_.pairingCode = session.userCode;
+        pairingVerificationUrl_ = session.verificationUriComplete;
     }
     Publish();
     if (stop.stop_requested()) return;
-    if (!browserLauncher_ ||
-        !browserLauncher_(session.verificationUriComplete)) {
-        SetState(
-            GobiiConnectionState::Error,
-            "could not open the Gobii pairing page");
+    if (!ReopenPairingPage()) {
         return;
     }
+    if (stop.stop_requested()) return;
     SetState(GobiiConnectionState::PairingPending);
     int interval = session.intervalSeconds;
     const auto expires =
@@ -311,8 +321,7 @@ void GobiiConnectionController::PairingWorker(
         std::chrono::seconds(session.expiresInSeconds);
     while (!stop.stop_requested() &&
            std::chrono::steady_clock::now() < expires) {
-        std::this_thread::sleep_for(
-            std::chrono::seconds(interval));
+        InterruptibleWait(stop, std::chrono::seconds(interval));
         if (stop.stop_requested()) return;
         auto result = pairing.Poll(session);
         if (result.state == GobiiPairingPollState::Pending) {
@@ -352,6 +361,24 @@ void GobiiConnectionController::PairingWorker(
     }
 }
 
+bool GobiiConnectionController::ReopenPairingPage() {
+    std::string url;
+    {
+        std::lock_guard lock(mutex_);
+        url = pairingVerificationUrl_;
+    }
+    if (url.empty()) {
+        return false;
+    }
+    if (!browserLauncher_ || !browserLauncher_(url)) {
+        SetState(
+            GobiiConnectionState::Error,
+            "could not open the Gobii pairing page");
+        return false;
+    }
+    return true;
+}
+
 void GobiiConnectionController::Connect() {
     if (shuttingDown_) return;
     if (refreshThread_.joinable()) {
@@ -369,6 +396,7 @@ void GobiiConnectionController::ConnectWorker(
     std::stop_token stop,
     std::optional<GobiiTokenResponse> initialToken
 ) {
+    artifacts_->ClearAuthentication();
     SetState(GobiiConnectionState::Connecting);
     if (permissionReady_ && !permissionReady_()) {
         SetState(GobiiConnectionState::PermissionsRequired);
@@ -410,20 +438,29 @@ void GobiiConnectionController::ConnectWorker(
             config.gobii.deviceId, &error);
         if (!refresh || refresh->empty()) {
             SetState(
-                GobiiConnectionState::AuthenticationExpired,
+                error.empty()
+                    ? GobiiConnectionState::AuthenticationExpired
+                    : GobiiConnectionState::Error,
                 error.empty()
                     ? "Gobii credential is missing"
                     : error);
             return;
         }
         GobiiPairingClient pairing(config.gobii.baseUrl, http_);
+        GobiiRefreshFailure refreshFailure =
+            GobiiRefreshFailure::None;
         if (!pairing.Refresh(
                 *refresh,
                 status_.installedVersion,
                 token,
-                error)) {
+                error,
+                &refreshFailure)) {
             SetState(
-                GobiiConnectionState::AuthenticationExpired,
+                refreshFailure == GobiiRefreshFailure::Authentication
+                    ? GobiiConnectionState::AuthenticationExpired
+                    : refreshFailure == GobiiRefreshFailure::UpdateRequired
+                        ? GobiiConnectionState::UpdateRequired
+                        : GobiiConnectionState::Error,
                 error);
             return;
         }
@@ -449,11 +486,11 @@ void GobiiConnectionController::ConnectWorker(
         return;
     }
     const ConfiguredServerInfo server = server_.Status();
-    if (!server.running || server.apps.empty()) {
+    if (!ConfiguredServerCatalogReady(server)) {
         SetState(
             GobiiConnectionState::Error,
             server.error.empty()
-                ? "local configured MCP server is unavailable"
+                ? "local configured MCP server catalog is not ready"
                 : server.error);
         return;
     }
@@ -484,6 +521,9 @@ void GobiiConnectionController::ConnectWorker(
         SetState(GobiiConnectionState::Error, error);
         return;
     }
+    artifacts_->Configure(
+        config.gobii.baseUrl,
+        token.relayAccessToken);
     json apps = json::array();
     for (const auto& [name, catalogValue] : server.apps) {
         const size_t separator = catalogValue.find('\n');
@@ -519,6 +559,7 @@ void GobiiConnectionController::ConnectWorker(
         {"apps", std::move(apps)},
     };
     if (!relay_.Send(hello.dump())) {
+        artifacts_->ClearAuthentication();
         relay_.Stop();
         SetState(
             GobiiConnectionState::Error,
@@ -841,6 +882,7 @@ void GobiiConnectionController::Pause() {
     }
     relay_.Send(json{{"type", "pause"}}.dump());
     relay_.Stop();
+    artifacts_->ClearAuthentication();
     std::string error;
     AppConfig config = LoadAppConfig(&error);
     if (error.empty()) {
@@ -870,6 +912,7 @@ void GobiiConnectionController::Resume() {
 }
 
 void GobiiConnectionController::Disconnect() {
+    CancelPairing();
     if (refreshThread_.joinable()) {
         refreshThread_.request_stop();
         refreshThread_.join();
@@ -879,6 +922,7 @@ void GobiiConnectionController::Disconnect() {
         reconnectThread_.join();
     }
     relay_.Stop();
+    artifacts_->ClearAuthentication();
     std::string error;
     AppConfig config = LoadAppConfig(&error);
     if (error.empty() && !config.gobii.deviceId.empty()) {
@@ -916,7 +960,13 @@ void GobiiConnectionController::Disconnect() {
 
 void GobiiConnectionController::Shutdown() {
     if (shuttingDown_.exchange(true)) return;
+    {
+        std::lock_guard lock(mutex_);
+        status_.pairingCode.clear();
+        pairingVerificationUrl_.clear();
+    }
     relay_.Stop();
+    artifacts_->ClearAuthentication();
     if (lifecycleThread_.joinable()) {
         lifecycleThread_.request_stop();
         lifecycleThread_.join();

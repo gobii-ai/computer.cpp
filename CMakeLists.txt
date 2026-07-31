@@ -131,6 +131,7 @@ string(TIMESTAMP COMPUTER_CPP_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
 add_library(computer_cpp_core
     src/core/AppPaths.cpp
     src/core/AppConfig.cpp
+    src/core/ConfiguredServerController.cpp
     src/core/GobiiApiClient.cpp
     src/core/GobiiArtifactUploader.cpp
     src/core/GobiiConnectionController.cpp
@@ -139,6 +140,7 @@ add_library(computer_cpp_core
     src/core/GobiiPairingClient.cpp
     src/core/GobiiRelayClient.cpp
     src/core/GobiiRelayProtocol.cpp
+    src/core/GobiiStatusPresentation.cpp
     src/core/GobiiTypes.cpp
     src/core/Image.cpp
     src/core/ControlSessionAcquire.cpp

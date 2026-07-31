@@ -1,4 +1,5 @@
 #include "computer_cpp/GobiiPairingClient.h"
+#include "computer_cpp/ConfiguredServerController.h"
 #include "computer_cpp/GobiiTypes.h"
 
 #include <nlohmann/json.hpp>
@@ -158,6 +159,11 @@ bool GobiiPairingClient::CreatePairing(
     error.clear();
     json apps = json::array();
     for (const auto& app : request.apps) {
+        if (!IsConfiguredServerSchemaDigest(app.schemaSha256)) {
+            error = "local app '" + app.key +
+                "' is missing a valid schema digest";
+            return false;
+        }
         apps.push_back({
             {"key", app.key},
             {"display_name", app.displayName},
@@ -295,9 +301,11 @@ bool GobiiPairingClient::Refresh(
     const std::string& refreshToken,
     const std::string& clientVersion,
     GobiiTokenResponse& token,
-    std::string& error
+    std::string& error,
+    GobiiRefreshFailure* failure
 ) {
     error.clear();
+    if (failure) *failure = GobiiRefreshFailure::None;
     const GobiiHttpResponse response = transport_->Send(JsonRequest(
         Endpoint("/api/computer/v1/tokens/refresh/"),
         {
@@ -305,11 +313,29 @@ bool GobiiPairingClient::Refresh(
             {"client_version", clientVersion},
             {"protocol_version", 1},
         }));
+    if (failure && response.status != 200) {
+        *failure = response.status == 401
+            ? GobiiRefreshFailure::Authentication
+            : response.status == 426
+                ? GobiiRefreshFailure::UpdateRequired
+                : GobiiRefreshFailure::Transient;
+    }
     json value;
     if (!ParseObject(response, value, error)) {
+        if (failure && *failure == GobiiRefreshFailure::None) {
+            *failure = GobiiRefreshFailure::Transient;
+        }
         return false;
     }
     if (response.status != 200) {
+        const std::string code = value.value("error", "");
+        if (failure) {
+            if (code == "invalid_grant") {
+                *failure = GobiiRefreshFailure::Authentication;
+            } else if (code == "update_required") {
+                *failure = GobiiRefreshFailure::UpdateRequired;
+            }
+        }
         error = value.value(
             "error_description",
             value.value(
@@ -317,7 +343,11 @@ bool GobiiPairingClient::Refresh(
                 "Gobii token refresh failed"));
         return false;
     }
-    return ParseToken(value, false, token, error);
+    if (!ParseToken(value, false, token, error)) {
+        if (failure) *failure = GobiiRefreshFailure::Transient;
+        return false;
+    }
+    return true;
 }
 
 bool GobiiPairingClient::Revoke(

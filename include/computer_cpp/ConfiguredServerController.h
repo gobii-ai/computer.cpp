@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 
 namespace ComputerCpp {
 
@@ -12,6 +13,9 @@ struct ConfiguredServerInfo {
     std::map<std::string, std::string> apps;
     std::string error;
 };
+
+bool IsConfiguredServerSchemaDigest(std::string_view value);
+bool ConfiguredServerCatalogReady(const ConfiguredServerInfo& info);
 
 class ConfiguredServerController {
 public:

@@ -8,6 +8,8 @@
 
 namespace ComputerCpp {
 
+class GobiiHttpTransport;
+
 struct GobiiArtifactReference {
     std::string id;
     std::string mimeType;
@@ -16,6 +18,10 @@ struct GobiiArtifactReference {
 class GobiiArtifactUploader {
 public:
     virtual ~GobiiArtifactUploader() = default;
+    virtual void Configure(
+        const std::string& baseUrl,
+        const std::string& accessToken) = 0;
+    virtual void ClearAuthentication() = 0;
     virtual bool Available() const = 0;
     virtual bool Upload(
         const std::string& requestId,
@@ -27,6 +33,10 @@ public:
 
 std::unique_ptr<GobiiArtifactUploader>
 CreateDisabledGobiiArtifactUploader();
+
+std::unique_ptr<GobiiArtifactUploader>
+CreateGobiiArtifactUploader(
+    std::shared_ptr<GobiiHttpTransport> transport);
 
 bool PrepareGobiiMcpImages(
     nlohmann::json& jsonRpcResponse,

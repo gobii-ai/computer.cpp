@@ -2395,6 +2395,53 @@ json McpTextContent(std::string text) {
     };
 }
 
+bool LooksLikeLocalPath(std::string_view value) {
+    return value.starts_with('/') ||
+        value.starts_with('\\') ||
+        value.starts_with("~/") ||
+        value.starts_with("~\\") ||
+        value.starts_with("file://") ||
+        (value.size() >= 3 &&
+            std::isalpha(
+                static_cast<unsigned char>(value[0])) != 0 &&
+            value[1] == ':' &&
+            (value[2] == '/' || value[2] == '\\'));
+}
+
+std::optional<json> SanitizeMcpStructuredValue(
+    const json& value
+) {
+    if (value.is_string() &&
+        LooksLikeLocalPath(
+            value.get_ref<const std::string&>())) {
+        return std::nullopt;
+    }
+    if (value.is_array()) {
+        json output = json::array();
+        for (const auto& item : value) {
+            if (auto sanitized =
+                    SanitizeMcpStructuredValue(item)) {
+                output.push_back(std::move(*sanitized));
+            }
+        }
+        return output;
+    }
+    if (value.is_object()) {
+        json output = json::object();
+        for (const auto& [name, item] : value.items()) {
+            if (name == "__ac_image_path") {
+                continue;
+            }
+            if (auto sanitized =
+                    SanitizeMcpStructuredValue(item)) {
+                output[name] = std::move(*sanitized);
+            }
+        }
+        return output;
+    }
+    return value;
+}
+
 std::string Base64Encode(const std::string& input) {
     static constexpr char kAlphabet[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -2494,7 +2541,9 @@ json McpToolSuccessResult(const json& result, const json& recording = json::obje
         };
         if (result.contains("structured") &&
             result["structured"].is_object()) {
-            out["structuredContent"] = result["structured"];
+            out["structuredContent"] =
+                *SanitizeMcpStructuredValue(
+                    result["structured"]);
         }
         AttachMcpRecordingMetadata(out, recording);
         return out;
