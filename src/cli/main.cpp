@@ -1,8 +1,10 @@
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/ControlSession.h"
+#include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/GobiiApiClient.h"
 #include "computer_cpp/GobiiCredentialStore.h"
+#include "computer_cpp/GobiiTypes.h"
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/Transport.h"
 
@@ -167,6 +169,13 @@ int main(int argc, char** argv) {
             credentials->Available(&credentialError);
         const auto app = ComputerCpp::InstalledResourcePath(
             "apps/gobii-desktop.lua");
+        std::string configError;
+        const ComputerCpp::AppConfig config =
+            ComputerCpp::LoadAppConfig(&configError);
+        const bool plaintextLoopbackEndpointConfigured =
+            configError.empty() &&
+            ComputerCpp::IsGobiiLoopbackUrl(
+                config.gobii.baseUrl, "http");
         json diagnosis = {
             {"platformSupported",
 #if defined(__APPLE__) || defined(_WIN32)
@@ -189,7 +198,17 @@ int main(int argc, char** argv) {
                 false
 #endif
             },
-            {"localDevelopment", true},
+            {"loopbackEndpointsAllowed", true},
+            {"plaintextLoopbackEndpointConfigured",
+             plaintextLoopbackEndpointConfigured},
+            {"securityWarning",
+             plaintextLoopbackEndpointConfigured
+                 ? json(
+                       "Gobii is configured to use plaintext HTTP on a "
+                       "loopback interface. Pairing and relay traffic are "
+                       "not protected by TLS.")
+                 : json(nullptr)},
+            {"configError", configError},
             {"artifactUploadsAvailable", true},
             {"websocketSupported", websocket},
             {"websocketError", websocketError},

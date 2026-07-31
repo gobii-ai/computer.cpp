@@ -649,6 +649,8 @@ void TestArtifactGateAndStates() {
         "ws://[::1]:8001/relay", "wss", "ws"));
     assert(!IsGobiiEndpointUrlAllowed(
         "http://gobii.example.test:8001", "https", "http"));
+    assert(!IsGobiiEndpointUrlAllowed(
+        "ws://gobii.example.test:8001/relay", "wss", "ws"));
     assert(Sha256Hex("abc") ==
         "ba7816bf8f01cfea414140de5dae2223"
         "b00361a396177a9cb410ff61f20015ad");

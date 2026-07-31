@@ -39,6 +39,12 @@ remain rejected in every build. Inline images are controlled independently
 by `COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES` when testing tools that return
 screenshots.
 
+`computer.cpp gobii diagnose` reports `loopbackEndpointsAllowed: true` on
+builds with this capability. When the configured Gobii base URL is plaintext
+loopback HTTP, it also reports `plaintextLoopbackEndpointConfigured: true`
+and includes a `securityWarning`, because local pairing and relay traffic is
+not protected by TLS.
+
 ## Relay handshake and control
 
 The WebSocket upgrade includes the relay bearer token, subprotocol, and

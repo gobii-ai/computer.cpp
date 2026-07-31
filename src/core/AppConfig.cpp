@@ -535,7 +535,7 @@ AppConfig LoadAppConfig(
     if (auto recording = parsed["recording"].as_table()) {
         config.recording.enabled = (*recording)["enabled"].value_or(false);
         if (auto value = (*recording)["retention_days"].value<int64_t>()) {
-            if (*value >= 0 && *value <= 36500) {
+            if (*value >= -1 && *value <= 36500) {
                 config.recording.retentionDays = static_cast<int>(*value);
             }
         }

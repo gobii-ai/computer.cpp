@@ -3017,6 +3017,16 @@ void TestConfigCliCanonicalFile() {
     config = ComputerCpp::LoadAppConfig(&error);
     assert(error.empty());
     assert(config.gobii.baseUrl == "http://127.0.0.1:8001");
+    auto secureGobii = RunConfigCommand({
+        "config",
+        "set-gobii",
+        "--base-url",
+        "https://gobii.example.test"
+    });
+    assert(secureGobii.exitCode == 0);
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(config.gobii.baseUrl == "https://gobii.example.test");
     auto insecureRemoteGobii = RunConfigCommand({
         "config",
         "set-gobii",

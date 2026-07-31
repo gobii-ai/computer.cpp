@@ -96,6 +96,13 @@ enum {
     ID_QUIT = wxID_EXIT
 };
 
+std::string TemporaryScreenshotPath(const char* filename) {
+    return (std::filesystem::path(
+                wxStandardPaths::Get().GetTempDir().ToStdString()) /
+            filename)
+        .string();
+}
+
 wxSize TrayIconBitmapSize() {
     int size = 22;
 #ifndef __WXOSX__
@@ -873,6 +880,36 @@ struct LlmSettingsDialogCallbacks {
 };
 
 class LlmSettingsDialog : public wxDialog {
+    enum class SettingsPage : size_t {
+        Profiles,
+        Providers,
+        Server,
+        Recording,
+        Advanced,
+        Count
+    };
+
+    enum class StatusKind {
+        Info,
+        Success,
+        Error
+    };
+
+    inline static constexpr std::array<
+        const char*,
+        static_cast<size_t>(SettingsPage::Count)>
+        kSettingsPageLabels = {
+            "Model Profiles",
+            "AI Providers",
+            "Local Server",
+            "Recording",
+            "Advanced"
+        };
+
+    static constexpr size_t PageIndex(SettingsPage page) {
+        return static_cast<size_t>(page);
+    }
+
 public:
     explicit LlmSettingsDialog(LlmSettingsDialogCallbacks callbacks = {})
         : wxDialog(
@@ -911,17 +948,17 @@ public:
 
         auto* navigationCard = new wxStaticBoxSizer(
             wxVERTICAL, navigationPanel, wxString());
+        wxWindow* navigationCardParent = navigationCard->GetStaticBox();
         navigation_ = new wxListBox(
-            navigationPanel,
+            navigationCardParent,
             wxID_ANY,
             wxDefaultPosition,
             wxDefaultSize,
             0,
             nullptr,
             wxLB_SINGLE | wxBORDER_NONE);
-        for (const char* page : {
-                 "Model Profiles", "AI Providers", "Local Server", "Recording", "Advanced"}) {
-            navigation_->Append(page);
+        for (const char* label : kSettingsPageLabels) {
+            navigation_->Append(label);
         }
         wxFont navigationFont = navigation_->GetFont();
         navigationFont.SetPointSize(navigationFont.GetPointSize() + 1);
@@ -961,6 +998,9 @@ public:
         BuildServerPage();
         BuildRecordingPage();
         BuildConfigPage();
+        wxASSERT(
+            pages_->GetPageCount() ==
+            PageIndex(SettingsPage::Count));
         contentColumn->Add(pages_, 1, wxEXPAND);
 
         statusMessage_ = new wxStaticText(this, wxID_ANY, "");
@@ -997,13 +1037,19 @@ public:
             const int selection = navigation_->GetSelection();
             if (selection != wxNOT_FOUND) {
                 pages_->SetSelection(static_cast<size_t>(selection));
+                if (static_cast<size_t>(selection) ==
+                    PageIndex(SettingsPage::Recording)) {
+                    RefreshRecordingPermissionStatus();
+                }
             }
         });
         save_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnSave, this);
         discard_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnDiscard, this);
         close_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Close(); });
         Bind(wxEVT_ACTIVATE, [this](wxActivateEvent& event) {
-            if (event.GetActive()) {
+            if (event.GetActive() &&
+                navigation_->GetSelection() == static_cast<int>(
+                    PageIndex(SettingsPage::Recording))) {
                 RefreshRecordingPermissionStatus();
             }
             event.Skip();
@@ -1268,9 +1314,14 @@ private:
             "Saved profiles",
             "Select a profile to edit",
             1);
-        profileList_ = new wxListBox(page, wxID_ANY, wxDefaultPosition, wxSize(190, -1));
+        wxWindow* listCardParent = listColumn->GetStaticBox();
+        profileList_ = new wxListBox(
+            listCardParent,
+            wxID_ANY,
+            wxDefaultPosition,
+            wxSize(190, -1));
         listColumn->Add(profileList_, 1, wxEXPAND);
-        AddProfileListButtons(page, listColumn);
+        AddProfileListButtons(listCardParent, listColumn);
         root->Add(listSection, 0, wxEXPAND | wxRIGHT, 18);
 
         auto* detailPane = AddScrollableDetailPane(page, root);
@@ -1280,14 +1331,15 @@ private:
             detail,
             "Model setup",
             "The provider, model, and sampling defaults used by this profile.");
+        wxWindow* modelCardParent = modelBox->GetStaticBox();
         auto* grid = new wxFlexGridSizer(2, 8, 10);
         grid->AddGrowableCol(1, 1);
-        profileName_ = AddTextField(detailPane, grid, "Profile name");
-        grid->Add(new wxStaticText(detailPane, wxID_ANY, "Provider"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, 8);
-        profileProvider_ = new wxChoice(detailPane, wxID_ANY);
+        profileName_ = AddTextField(modelCardParent, grid, "Profile name");
+        grid->Add(new wxStaticText(modelCardParent, wxID_ANY, "Provider"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, 8);
+        profileProvider_ = new wxChoice(modelCardParent, wxID_ANY);
         grid->Add(profileProvider_, 1, wxEXPAND | wxBOTTOM, 8);
-        profileModel_ = AddTextField(detailPane, grid, "Model");
-        temperature_ = AddTextField(detailPane, grid, "Temperature");
+        profileModel_ = AddTextField(modelCardParent, grid, "Model");
+        temperature_ = AddTextField(modelCardParent, grid, "Temperature");
         temperature_->SetHint("Provider default (0-2)");
         modelBox->Add(grid, 0, wxALL | wxEXPAND, 12);
 
@@ -1368,11 +1420,16 @@ private:
             "Configured providers",
             "Select a provider to edit",
             1);
-        providerList_ = new wxListBox(page, wxID_ANY, wxDefaultPosition, wxSize(190, -1));
+        wxWindow* listCardParent = listColumn->GetStaticBox();
+        providerList_ = new wxListBox(
+            listCardParent,
+            wxID_ANY,
+            wxDefaultPosition,
+            wxSize(190, -1));
         listColumn->Add(providerList_, 1, wxEXPAND);
         auto* listButtons = new wxBoxSizer(wxHORIZONTAL);
-        auto* add = new wxButton(page, wxID_ANY, "Add Provider");
-        auto* remove = new wxButton(page, wxID_ANY, "Delete...");
+        auto* add = new wxButton(listCardParent, wxID_ANY, "Add Provider");
+        auto* remove = new wxButton(listCardParent, wxID_ANY, "Delete...");
         listButtons->Add(add, 1, wxRIGHT, 6);
         listButtons->Add(remove, 1);
         listColumn->Add(listButtons, 0, wxTOP | wxEXPAND, 8);
@@ -1385,15 +1442,16 @@ private:
             detail,
             "Endpoint",
             "Where ComputerCpp sends inference requests.");
+        wxWindow* connectionCardParent = connectionBox->GetStaticBox();
         auto* grid = new wxFlexGridSizer(2, 8, 10);
         grid->AddGrowableCol(1, 1);
-        providerName_ = AddTextField(detailPane, grid, "Provider name");
-        grid->Add(new wxStaticText(detailPane, wxID_ANY, "API format"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, 8);
-        providerType_ = new wxChoice(detailPane, wxID_ANY);
+        providerName_ = AddTextField(connectionCardParent, grid, "Provider name");
+        grid->Add(new wxStaticText(connectionCardParent, wxID_ANY, "API format"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, 8);
+        providerType_ = new wxChoice(connectionCardParent, wxID_ANY);
         providerType_->Append("OpenRouter");
         providerType_->Append("OpenAI-compatible");
         grid->Add(providerType_, 1, wxEXPAND | wxBOTTOM, 8);
-        baseUrl_ = AddTextField(detailPane, grid, "Base URL");
+        baseUrl_ = AddTextField(connectionCardParent, grid, "Base URL");
         connectionBox->Add(grid, 0, wxALL | wxEXPAND, 12);
         detail->AddSpacer(18);
 
@@ -1402,23 +1460,28 @@ private:
             detail,
             "Authentication",
             "Choose whether this provider requires an API key.");
+        wxWindow* authenticationCardParent = authenticationBox->GetStaticBox();
         providerNoApiKey_ = new wxRadioButton(
-            detailPane,
+            authenticationCardParent,
             wxID_ANY,
             "No API key",
             wxDefaultPosition,
             wxDefaultSize,
             wxRB_GROUP);
         providerUseApiKey_ = new wxRadioButton(
-            detailPane, wxID_ANY, "Use API key");
+            authenticationCardParent, wxID_ANY, "Use API key");
         authenticationBox->Add(providerNoApiKey_, 0, wxALL, 12);
         authenticationBox->Add(providerUseApiKey_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
         auto* apiKeyGrid = new wxFlexGridSizer(2, 8, 10);
         apiKeyGrid->AddGrowableCol(1, 1);
-        apiKey_ = AddTextField(detailPane, apiKeyGrid, "API key", wxTE_PASSWORD);
+        apiKey_ = AddTextField(
+            authenticationCardParent,
+            apiKeyGrid,
+            "API key",
+            wxTE_PASSWORD);
         authenticationBox->Add(apiKeyGrid, 0, wxLEFT | wxRIGHT | wxEXPAND, 12);
         AddHelperText(
-            detailPane,
+            authenticationCardParent,
             authenticationBox,
             "The key is stored in config.toml with owner-only file permissions.",
             12);
@@ -1457,12 +1520,16 @@ private:
             "Configured apps",
             "Select an app to edit",
             1);
+        wxWindow* listCardParent = listColumn->GetStaticBox();
         serverAppList_ = new wxListBox(
-            page, wxID_ANY, wxDefaultPosition, wxSize(200, -1));
+            listCardParent,
+            wxID_ANY,
+            wxDefaultPosition,
+            wxSize(200, -1));
         listColumn->Add(serverAppList_, 1, wxEXPAND);
         auto* listButtons = new wxBoxSizer(wxHORIZONTAL);
-        auto* add = new wxButton(page, wxID_ANY, "Add App");
-        auto* remove = new wxButton(page, wxID_ANY, "Delete...");
+        auto* add = new wxButton(listCardParent, wxID_ANY, "Add App");
+        auto* remove = new wxButton(listCardParent, wxID_ANY, "Delete...");
         listButtons->Add(add, 1, wxRIGHT, 6);
         listButtons->Add(remove, 1);
         listColumn->Add(listButtons, 0, wxTOP | wxEXPAND, 8);
@@ -1476,15 +1543,16 @@ private:
             detail,
             "Server endpoint",
             "The local address apps use to reach ComputerCpp.");
+        wxWindow* serverCardParent = serverBox->GetStaticBox();
         auto* serverGrid = new wxFlexGridSizer(2, 8, 10);
         serverGrid->AddGrowableCol(1, 1);
-        serverHost_ = AddTextField(detailPane, serverGrid, "Host");
-        serverPort_ = AddTextField(detailPane, serverGrid, "Port");
-        serverUrl_ = AddTextField(detailPane, serverGrid, "Server URL");
+        serverHost_ = AddTextField(serverCardParent, serverGrid, "Host");
+        serverPort_ = AddTextField(serverCardParent, serverGrid, "Port");
+        serverUrl_ = AddTextField(serverCardParent, serverGrid, "Server URL");
         serverUrl_->SetEditable(false);
         serverBox->Add(serverGrid, 0, wxALL | wxEXPAND, 12);
         auto* urlButtons = new wxBoxSizer(wxHORIZONTAL);
-        auto* copyUrl = new wxButton(detailPane, wxID_ANY, "Copy URL");
+        auto* copyUrl = new wxButton(serverCardParent, wxID_ANY, "Copy URL");
         urlButtons->AddStretchSpacer();
         urlButtons->Add(copyUrl, 0);
         serverBox->Add(urlButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
@@ -1495,19 +1563,22 @@ private:
             detail,
             "Authentication",
             "A private token required by clients connecting to this server.");
+        wxWindow* tokenCardParent = tokenBox->GetStaticBox();
         auto* tokenGrid = new wxFlexGridSizer(2, 8, 10);
         tokenGrid->AddGrowableCol(1, 1);
         serverAuthToken_ = AddTextField(
-            detailPane, tokenGrid, "Bearer token", wxTE_PASSWORD);
+            tokenCardParent, tokenGrid, "Bearer token", wxTE_PASSWORD);
         tokenBox->Add(tokenGrid, 0, wxALL | wxEXPAND, 12);
         AddHelperText(
-            detailPane,
+            tokenCardParent,
             tokenBox,
             "Apps must send this token when connecting to the server.",
             12);
         auto* tokenButtons = new wxBoxSizer(wxHORIZONTAL);
-        regenerateServerToken_ = new wxButton(detailPane, wxID_ANY, "Regenerate Token");
-        auto* copyToken = new wxButton(detailPane, wxID_ANY, "Copy Token");
+        regenerateServerToken_ = new wxButton(
+            tokenCardParent, wxID_ANY, "Regenerate Token");
+        auto* copyToken = new wxButton(
+            tokenCardParent, wxID_ANY, "Copy Token");
         tokenButtons->AddStretchSpacer();
         tokenButtons->Add(copyToken, 0, wxRIGHT, 8);
         tokenButtons->Add(regenerateServerToken_, 0);
@@ -1519,8 +1590,9 @@ private:
             detail,
             "Browser access",
             "Limit which web origins may connect to the local server.");
+        wxWindow* originsCardParent = originsBox->GetStaticBox();
         serverAllowedOrigins_ = new wxTextCtrl(
-            detailPane,
+            originsCardParent,
             wxID_ANY,
             "",
             wxDefaultPosition,
@@ -1528,7 +1600,7 @@ private:
             wxTE_MULTILINE);
         originsBox->Add(serverAllowedOrigins_, 0, wxALL | wxEXPAND, 12);
         AddHelperText(
-            detailPane,
+            originsCardParent,
             originsBox,
             "Enter one browser origin per line. Leave blank to disable browser access.",
             12);
@@ -1539,14 +1611,17 @@ private:
             detail,
             "App configuration",
             "Identify the app and choose the Lua definition it exposes.");
+        wxWindow* appCardParent = appBox->GetStaticBox();
         auto* appGrid = new wxFlexGridSizer(2, 8, 10);
         appGrid->AddGrowableCol(1, 1);
-        serverAppName_ = AddTextField(detailPane, appGrid, "App ID");
-        serverAppDisplayName_ = AddTextField(detailPane, appGrid, "Display name");
-        serverAppPath_ = AddTextField(detailPane, appGrid, "Lua file");
+        serverAppName_ = AddTextField(appCardParent, appGrid, "App ID");
+        serverAppDisplayName_ = AddTextField(
+            appCardParent, appGrid, "Display name");
+        serverAppPath_ = AddTextField(appCardParent, appGrid, "Lua file");
         appBox->Add(appGrid, 0, wxALL | wxEXPAND, 12);
         auto* appButtons = new wxBoxSizer(wxHORIZONTAL);
-        browseServerApp_ = new wxButton(detailPane, wxID_ANY, "Choose...");
+        browseServerApp_ = new wxButton(
+            appCardParent, wxID_ANY, "Choose...");
         appButtons->Add(browseServerApp_, 0);
         appButtons->AddStretchSpacer();
         appBox->Add(appButtons, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
@@ -1586,20 +1661,21 @@ private:
             content,
             "Configuration file",
             "Open or reload the source of truth for these settings.");
+        wxWindow* cardParent = box->GetStaticBox();
         AddHelperText(
-            page,
+            cardParent,
             box,
             "Providers, profiles, server settings, and recording preferences are stored here.",
             12);
         auto* grid = new wxFlexGridSizer(2, 8, 10);
         grid->AddGrowableCol(1, 1);
-        configPath_ = AddTextField(page, grid, "Location");
+        configPath_ = AddTextField(cardParent, grid, "Location");
         configPath_->SetEditable(false);
         box->Add(grid, 0, wxLEFT | wxRIGHT | wxEXPAND, 12);
         auto* actions = new wxBoxSizer(wxHORIZONTAL);
-        auto* copyPath = new wxButton(page, wxID_ANY, "Copy Path");
-        openConfig_ = new wxButton(page, wxID_ANY, "Open Config");
-        reload_ = new wxButton(page, wxID_ANY, "Reload from Disk");
+        auto* copyPath = new wxButton(cardParent, wxID_ANY, "Copy Path");
+        openConfig_ = new wxButton(cardParent, wxID_ANY, "Open Config");
+        reload_ = new wxButton(cardParent, wxID_ANY, "Reload from Disk");
         actions->Add(copyPath, 0, wxRIGHT, 8);
         actions->Add(openConfig_, 0, wxRIGHT, 8);
         actions->Add(reload_, 0);
@@ -1628,32 +1704,36 @@ private:
             content,
             "Recording behavior",
             "Choose whether top-level app commands create a desktop recording.");
+        wxWindow* behaviorCardParent = box->GetStaticBox();
         recordingEnabled_ = new wxCheckBox(
-            page,
+            behaviorCardParent,
             wxID_ANY,
             "Record desktop activity");
         box->Add(recordingEnabled_, 0, wxALL | wxEXPAND, 12);
         AddHelperText(
-            page,
+            behaviorCardParent,
             box,
             "Creates one video for each top-level app command.",
             12);
 
+#ifdef __APPLE__
         auto* permissionRow = new wxBoxSizer(wxHORIZONTAL);
-        recordingPermissionStatus_ = new wxStaticText(page, wxID_ANY, "");
+        recordingPermissionStatus_ = new wxStaticText(
+            behaviorCardParent, wxID_ANY, "");
         manageRecordingPermissions_ = new wxButton(
-            page, wxID_ANY, "Manage Permissions");
+            behaviorCardParent, wxID_ANY, "Manage Permissions");
         permissionRow->Add(
             recordingPermissionStatus_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
         permissionRow->Add(manageRecordingPermissions_, 0);
         box->Add(permissionRow, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
+#endif
 
         auto* warning = new wxStaticText(
-            page,
+            behaviorCardParent,
             wxID_ANY,
             "Privacy: recordings can include anything visible on your desktop, including "
             "other apps and notifications. Audio is never recorded.");
-        warning->Wrap(720);
+        warning->Wrap(FromDIP(720));
         box->Add(warning, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 12);
 
         content->AddSpacer(18);
@@ -1663,14 +1743,18 @@ private:
             content,
             "Recording storage",
             "Review where recordings are kept and how long they remain available.");
+        wxWindow* storageCardParent = storageBox->GetStaticBox();
         auto* pathGrid = new wxFlexGridSizer(2, 8, 10);
         pathGrid->AddGrowableCol(1, 1);
-        recordingPath_ = AddTextField(page, pathGrid, "Recording folder");
+        recordingPath_ = AddTextField(
+            storageCardParent, pathGrid, "Recording folder");
         recordingPath_->SetEditable(false);
         storageBox->Add(pathGrid, 0, wxALL | wxEXPAND, 12);
 
-        openRecordings_ = new wxButton(page, wxID_ANY, "Open Folder");
-        recordingRetentionText_ = new wxStaticText(page, wxID_ANY, "");
+        openRecordings_ = new wxButton(
+            storageCardParent, wxID_ANY, "Open Folder");
+        recordingRetentionText_ = new wxStaticText(
+            storageCardParent, wxID_ANY, "");
         auto* storageActions = new wxBoxSizer(wxHORIZONTAL);
         storageActions->Add(
             recordingRetentionText_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
@@ -1684,8 +1768,9 @@ private:
             content,
             "Output format",
             "Recording settings are fixed for consistent playback and debugging.");
+        wxWindow* formatCardParent = formatBox->GetStaticBox();
         auto* details = new wxStaticText(
-            page,
+            formatCardParent,
             wxID_ANY,
             "H.264 MP4  |  15 fps  |  Up to 1920 px  |  Cursor included  |  No audio");
         details->SetMinSize(wxSize(-1, FromDIP(24)));
@@ -1697,6 +1782,7 @@ private:
 
         BindDirty(recordingEnabled_);
         openRecordings_->Bind(wxEVT_BUTTON, &LlmSettingsDialog::OnOpenRecordings, this);
+#ifdef __APPLE__
         manageRecordingPermissions_->Bind(
             wxEVT_BUTTON,
             [this](wxCommandEvent&) {
@@ -1704,33 +1790,25 @@ private:
                     callbacks_.showPermissions();
                 }
             });
+#endif
     }
 
-    void SetStatus(const std::string& message) {
+    void SetStatus(
+        const std::string& message,
+        StatusKind kind = StatusKind::Info) {
         if (!statusMessage_) {
             return;
         }
         statusMessage_->SetLabel(wxString::FromUTF8(message));
-        const std::string lowered = Lowercase(message);
-        const bool error =
-            lowered.find("failed") != std::string::npos ||
-            lowered.find("error") != std::string::npos ||
-            lowered.find("must ") != std::string::npos ||
-            lowered.find("required") != std::string::npos ||
-            lowered.find("could not") != std::string::npos ||
-            lowered.find("invalid") != std::string::npos;
-        const bool success =
-            lowered.find("saved") != std::string::npos ||
-            lowered.find("copied") != std::string::npos ||
-            lowered.find("passed") != std::string::npos ||
-            lowered.find("inference ok") != std::string::npos;
         statusMessage_->SetForegroundColour(
-            error
+            kind == StatusKind::Error
                 ? wxColour(205, 67, 67)
-                : success
+                : kind == StatusKind::Success
                     ? wxColour(52, 150, 75)
                     : wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-        statusMessage_->Wrap(std::max(300, GetClientSize().GetWidth() - 240));
+        statusMessage_->Wrap(std::max(
+            FromDIP(300),
+            GetClientSize().GetWidth() - FromDIP(240)));
         Layout();
     }
 
@@ -1775,11 +1853,14 @@ private:
         Layout();
     }
 
-    void SetDirty(bool dirty, const std::string& message = {}) {
+    void SetDirty(
+        bool dirty,
+        const std::string& message = {},
+        StatusKind kind = StatusKind::Info) {
         dirty_ = dirty;
         RefreshDirtyUi();
         if (!message.empty()) {
-            SetStatus(message);
+            SetStatus(message, kind);
         }
     }
 
@@ -1834,9 +1915,14 @@ private:
             recordingPath_->ChangeValue(RecordingDir().string());
         }
         if (recordingRetentionText_) {
-            recordingRetentionText_->SetLabel(wxString::Format(
-                "Recordings are removed after %d days.",
-                config_.recording.retentionDays));
+            recordingRetentionText_->SetLabel(
+                config_.recording.retentionDays < 0
+                    ? "Recordings are kept until you delete them."
+                    : config_.recording.retentionDays == 0
+                        ? "Recordings are removed as soon as they finish."
+                        : wxString::Format(
+                              "Recordings are removed after %d days.",
+                              config_.recording.retentionDays));
         }
         RefreshRecordingPermissionStatus();
         PopulateProviderLists(FirstProviderName());
@@ -1844,15 +1930,26 @@ private:
         PopulateProfileList(config_.defaultProfile.empty() ? FirstProfileName() : config_.defaultProfile);
         LoadServerFields();
         PopulateServerAppList(FirstServerAppName());
-        for (size_t i = 0; i < 4 && i < pages_->GetPageCount(); ++i) {
-            pages_->GetPage(i)->Enable(!loadFailed_);
+        for (size_t i = 0; i < pages_->GetPageCount(); ++i) {
+            if (i != PageIndex(SettingsPage::Advanced)) {
+                pages_->GetPage(i)->Enable(!loadFailed_);
+            }
         }
         if (loadFailed_) {
-            navigation_->SetSelection(4);
-            pages_->SetSelection(4);
+            const int advanced = static_cast<int>(
+                PageIndex(SettingsPage::Advanced));
+            navigation_->SetSelection(advanced);
+            pages_->SetSelection(PageIndex(SettingsPage::Advanced));
         }
         SetDirty(false);
-        SetStatus(loadStatus.empty() ? successMessage : loadStatus);
+        const bool showingSuccess = loadStatus.empty() && !successMessage.empty();
+        SetStatus(
+            loadStatus.empty() ? successMessage : loadStatus,
+            loadFailed_
+                ? StatusKind::Error
+                : showingSuccess
+                    ? StatusKind::Success
+                    : StatusKind::Info);
     }
 
     std::string FirstProfileName() const {
@@ -1950,9 +2047,11 @@ private:
             rawPort.data(), rawPort.data() + rawPort.size(), port);
         if (ec != std::errc{} || ptr != rawPort.data() + rawPort.size() ||
             port <= 0 || port > 65535) {
+            serverUrlValid_ = false;
             serverUrl_->ChangeValue("Enter a valid host and port");
             return;
         }
+        serverUrlValid_ = true;
         serverUrl_->ChangeValue(ServerDisplayUrl(host, port));
     }
 
@@ -2117,7 +2216,7 @@ private:
         }
         json parsed = json::parse(value, nullptr, false);
         if (!parsed.is_object()) {
-            SetStatus(label + " must be a JSON object.");
+            SetStatus(label + " must be a JSON object.", StatusKind::Error);
             return false;
         }
         out = parsed;
@@ -2138,16 +2237,18 @@ private:
         }
         std::string name = FieldValue(profileName_);
         if (name.empty()) {
-            SetStatus("Profile name is required.");
+            SetStatus("Profile name is required.", StatusKind::Error);
             return false;
         }
         if (name != activeProfile_ && config_.profiles.contains(name)) {
-            SetStatus("Profile '" + name + "' already exists.");
+            SetStatus("Profile '" + name + "' already exists.", StatusKind::Error);
             return false;
         }
         std::string provider = profileProvider_->GetStringSelection().ToStdString();
         if (provider.empty() || !config_.providers.contains(provider)) {
-            SetStatus("Choose a provider for profile '" + name + "'.");
+            SetStatus(
+                "Choose a provider for profile '" + name + "'.",
+                StatusKind::Error);
             return false;
         }
 
@@ -2169,7 +2270,7 @@ private:
             !ApplyOptionalParam(profile, topP_, "top_p", &error) ||
             !ApplyOptionalParam(profile, maxTokens_, "max_output_tokens", &error) ||
             !ApplyOptionalParam(profile, timeoutMs_, "timeout_ms", &error)) {
-            SetStatus(error);
+            SetStatus(error, StatusKind::Error);
             return false;
         }
 
@@ -2193,16 +2294,18 @@ private:
         }
         std::string name = FieldValue(providerName_);
         if (name.empty()) {
-            SetStatus("Provider name is required.");
+            SetStatus("Provider name is required.", StatusKind::Error);
             return false;
         }
         if (name != activeProvider_ && config_.providers.contains(name)) {
-            SetStatus("Provider '" + name + "' already exists.");
+            SetStatus("Provider '" + name + "' already exists.", StatusKind::Error);
             return false;
         }
         const std::string newApiKey = FieldValue(apiKey_);
         if (providerUseApiKey_->GetValue() && newApiKey.empty()) {
-            SetStatus("Enter an API key or select No API key.");
+            SetStatus(
+                "Enter an API key or select No API key.",
+                StatusKind::Error);
             apiKey_->SetFocus();
             return false;
         }
@@ -2210,7 +2313,7 @@ private:
         std::string error;
         std::string oldProviderName = activeProvider_;
         if (!SetProviderConfig(config_, name, ProviderTypeValue(), FieldValue(baseUrl_), &error)) {
-            SetStatus(error);
+            SetStatus(error, StatusKind::Error);
             return false;
         }
         LlmProviderConfig& provider = config_.providers[name];
@@ -2252,7 +2355,9 @@ private:
         std::string portError;
         auto port = ParsePortField(serverPort_, "Port", &portError);
         if (!port.has_value()) {
-            SetStatus(portError.empty() ? "Port is required." : portError);
+            SetStatus(
+                portError.empty() ? "Port is required." : portError,
+                StatusKind::Error);
             return false;
         }
 
@@ -2272,12 +2377,15 @@ private:
             if (!IsValidServerAppName(name)) {
                 SetStatus(
                     "Server app stable name must match "
-                    "[A-Za-z0-9][A-Za-z0-9._-]*.");
+                    "[A-Za-z0-9][A-Za-z0-9._-]*.",
+                    StatusKind::Error);
                 return false;
             }
             std::string error;
             if (!IsReadableLuaFile(app.path, &error)) {
-                SetStatus("Server app '" + name + "': " + error);
+                SetStatus(
+                    "Server app '" + name + "': " + error,
+                    StatusKind::Error);
                 return false;
             }
         }
@@ -2292,11 +2400,14 @@ private:
         if (!IsValidServerAppName(name)) {
             SetStatus(
                 "Server app stable name must match "
-                "[A-Za-z0-9][A-Za-z0-9._-]*.");
+                "[A-Za-z0-9][A-Za-z0-9._-]*.",
+                StatusKind::Error);
             return false;
         }
         if (name != activeServerApp_ && config_.server.apps.contains(name)) {
-            SetStatus("Server app '" + name + "' already exists.");
+            SetStatus(
+                "Server app '" + name + "' already exists.",
+                StatusKind::Error);
             return false;
         }
         std::string displayName = FieldValue(serverAppDisplayName_);
@@ -2306,7 +2417,7 @@ private:
         std::string path = FieldValue(serverAppPath_);
         std::string fileError;
         if (!IsReadableLuaFile(path, &fileError)) {
-            SetStatus(fileError);
+            SetStatus(fileError, StatusKind::Error);
             return false;
         }
         ServerAppConfig app;
@@ -2323,7 +2434,9 @@ private:
 
     bool SaveChanges(bool showStatus) {
         if (loadFailed_) {
-            SetStatus("Reload a valid configuration before saving changes.");
+            SetStatus(
+                "Reload a valid configuration before saving changes.",
+                StatusKind::Error);
             return false;
         }
         if (!FlushAllFields()) {
@@ -2331,13 +2444,16 @@ private:
         }
         std::string error;
         if (!SaveAppConfig(config_, &error)) {
-            SetStatus(error);
+            SetStatus(error, StatusKind::Error);
             return false;
         }
         ResetProviderAuthDrafts();
         RefreshAfterMutation(activeProfile_, activeProvider_);
         std::string message = "Saved changes.";
-        SetDirty(false, showStatus ? message : "");
+        SetDirty(
+            false,
+            showStatus ? message : "",
+            StatusKind::Success);
         if (callbacks_.configSaved) {
             callbacks_.configSaved();
         }
@@ -2483,7 +2599,7 @@ private:
 
     void OnDeleteProfile(wxCommandEvent&) {
         if (activeProfile_.empty() || config_.profiles.size() <= 1) {
-            SetStatus("At least one profile is required.");
+            SetStatus("At least one profile is required.", StatusKind::Error);
             return;
         }
         std::string removed = activeProfile_;
@@ -2521,12 +2637,14 @@ private:
 
     void OnDeleteProvider(wxCommandEvent&) {
         if (activeProvider_.empty() || config_.providers.size() <= 1) {
-            SetStatus("At least one provider is required.");
+            SetStatus("At least one provider is required.", StatusKind::Error);
             return;
         }
         for (const auto& [name, profile] : config_.profiles) {
             if (profile.provider == activeProvider_) {
-                SetStatus("Provider is used by profile '" + name + "'.");
+                SetStatus(
+                    "Provider is used by profile '" + name + "'.",
+                    StatusKind::Error);
                 return;
             }
         }
@@ -2562,7 +2680,7 @@ private:
 
     void OnDeleteServerApp(wxCommandEvent&) {
         if (activeServerApp_.empty()) {
-            SetStatus("Choose a server app first.");
+            SetStatus("Choose a server app first.", StatusKind::Error);
             return;
         }
         std::string removed = activeServerApp_;
@@ -2609,19 +2727,27 @@ private:
     void OnCopyServerTokenFromSettings(wxCommandEvent&) {
         std::string token = FieldValue(serverAuthToken_);
         if (token.empty()) {
-            SetStatus("No bearer token to copy.");
+            SetStatus("No bearer token to copy.", StatusKind::Error);
             return;
         }
-        SetStatus(CopyTextToClipboard(token) ? "Bearer token copied." : "Could not open clipboard.");
+        const bool copied = CopyTextToClipboard(token);
+        SetStatus(
+            copied ? "Bearer token copied." : "Could not open clipboard.",
+            copied ? StatusKind::Success : StatusKind::Error);
     }
 
     void OnCopyServerUrl(wxCommandEvent&) {
         const std::string url = FieldValue(serverUrl_);
-        if (url.empty() || url.starts_with("Enter ")) {
-            SetStatus("Enter a valid host and port before copying the URL.");
+        if (!serverUrlValid_) {
+            SetStatus(
+                "Enter a valid host and port before copying the URL.",
+                StatusKind::Error);
             return;
         }
-        SetStatus(CopyTextToClipboard(url) ? "Server URL copied." : "Could not open clipboard.");
+        const bool copied = CopyTextToClipboard(url);
+        SetStatus(
+            copied ? "Server URL copied." : "Could not open clipboard.",
+            copied ? StatusKind::Success : StatusKind::Error);
     }
 
     void OnSave(wxCommandEvent&) {
@@ -2633,7 +2759,7 @@ private:
             return;
         }
         if (activeProfile_.empty()) {
-            SetStatus("Choose a profile first.");
+            SetStatus("Choose a profile first.", StatusKind::Error);
             return;
         }
         config_.defaultProfile = activeProfile_;
@@ -2654,14 +2780,16 @@ private:
             return;
         }
         if (activeProfile_.empty()) {
-            SetStatus("Choose a profile first.");
+            SetStatus("Choose a profile first.", StatusKind::Error);
             ShowResultDialog("Inference Test", "Choose a profile first.", wxICON_INFORMATION);
             return;
         }
         json resolved = Inference::ResolveChatConfig({{"profile", activeProfile_}});
         if (!resolved.value("ok", false)) {
             std::string message = resolved.value("error", "invalid config");
-            SetStatus("Inference test could not resolve this profile.");
+            SetStatus(
+                "Inference test could not resolve this profile.",
+                StatusKind::Error);
             ShowResultDialog("Inference Test Failed", message, wxICON_ERROR);
             return;
         }
@@ -2686,7 +2814,9 @@ private:
         if (!response.value("ok", false)) {
             std::string code = response.value("code", "error");
             std::string message = response.value("error", "inference test failed");
-            SetStatus("Inference test failed. See details dialog.");
+            SetStatus(
+                "Inference test failed. See details dialog.",
+                StatusKind::Error);
             ShowResultDialog(
                 "Inference Test Failed",
                 "Profile: " + activeProfile_ +
@@ -2711,7 +2841,9 @@ private:
             if (content.empty() && !reasoningContent.empty()) {
                 extra += "\n\nThe endpoint returned reasoning_content but no visible assistant content. For Qwen-style thinking models, disable thinking in the deployment/template or keep /no_think in the prompt.";
             }
-            SetStatus("Inference reached the endpoint, but the reply was not OK.");
+            SetStatus(
+                "Inference reached the endpoint, but the reply was not OK.",
+                StatusKind::Error);
             ShowResultDialog(
                 "Inference Test Reached Endpoint",
                 "Profile: " + activeProfile_ +
@@ -2724,7 +2856,7 @@ private:
                 wxICON_WARNING);
             return;
         }
-        SetStatus("Inference OK.");
+        SetStatus("Inference OK.", StatusKind::Success);
         ShowResultDialog(
             "Inference Test Passed",
             "Profile: " + activeProfile_ +
@@ -2752,22 +2884,32 @@ private:
         if (!dirty_) {
             return;
         }
-        LoadConfig();
-        SetStatus("Discarded unsaved changes and reloaded config.toml.");
+        if (wxMessageBox(
+                "Discard all unsaved settings changes?",
+                "Discard Changes",
+                wxYES_NO | wxNO_DEFAULT | wxICON_WARNING,
+                this) != wxYES) {
+            return;
+        }
+        LoadConfig("Discarded unsaved changes and reloaded config.toml.");
     }
 
     void OnCopyConfigPath(wxCommandEvent&) {
+        const bool copied = CopyTextToClipboard(ConfigPath().string());
         SetStatus(
-            CopyTextToClipboard(ConfigPath().string())
-                ? "Configuration path copied."
-                : "Could not open clipboard.");
+            copied ? "Configuration path copied." : "Could not open clipboard.",
+            copied ? StatusKind::Success : StatusKind::Error);
     }
 
     void OnOpenConfig(wxCommandEvent&) {
         if (!wxLaunchDefaultApplication(ConfigPath().string())) {
-            SetStatus("Could not open config.toml in the default application.");
+            SetStatus(
+                "Could not open config.toml in the default application.",
+                StatusKind::Error);
         } else {
-            SetStatus("Opened config.toml in the default application.");
+            SetStatus(
+                "Opened config.toml in the default application.",
+                StatusKind::Success);
         }
     }
 
@@ -2784,7 +2926,7 @@ private:
                 "Could not open:\n" + RecordingDir().string(),
                 wxICON_ERROR);
         } else {
-            SetStatus("Opened the recording folder.");
+            SetStatus("Opened the recording folder.", StatusKind::Success);
         }
     }
 
@@ -2851,6 +2993,7 @@ private:
     wxTextCtrl* serverHost_ = nullptr;
     wxTextCtrl* serverPort_ = nullptr;
     wxTextCtrl* serverUrl_ = nullptr;
+    bool serverUrlValid_ = false;
     wxTextCtrl* serverAuthToken_ = nullptr;
     wxTextCtrl* serverAllowedOrigins_ = nullptr;
     wxTextCtrl* serverAppName_ = nullptr;
@@ -2925,12 +3068,13 @@ public:
             22);
         auto* summaryBox = new wxStaticBoxSizer(
             wxVERTICAL, content_, wxString());
-        summary_ = new wxStaticText(content_, wxID_ANY, "");
+        summary_ = new wxStaticText(
+            summaryBox->GetStaticBox(), wxID_ANY, "");
         wxFont summaryFont = summary_->GetFont();
         summaryFont.SetPointSize(summaryFont.GetPointSize() + 2);
         summaryFont.SetWeight(wxFONTWEIGHT_BOLD);
         summary_->SetFont(summaryFont);
-        summary_->Wrap(620);
+        summary_->Wrap(FromDIP(620));
         summaryBox->Add(summary_, 0, wxALL | wxEXPAND, 14);
         contentRoot->Add(
             summaryBox,
@@ -2974,7 +3118,7 @@ public:
             "Restart after changing permissions, or reset them if macOS remains out of sync.");
         restartHelp->SetForegroundColour(
             wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-        restartHelp->Wrap(640);
+        restartHelp->Wrap(FromDIP(640));
         resetOrRestart_ = new wxButton(
             troubleshooting_->GetPane(),
             wxID_ANY,
@@ -3068,12 +3212,13 @@ private:
             22);
         auto* box = new wxStaticBoxSizer(
             wxVERTICAL, parent, wxString());
+        wxWindow* cardParent = box->GetStaticBox();
 
         auto* statusRow = new wxBoxSizer(wxHORIZONTAL);
         auto* descriptionLabel = new wxStaticText(
-            parent, wxID_ANY, description);
-        descriptionLabel->Wrap(410);
-        statusLabel = new wxStaticText(parent, wxID_ANY, "");
+            cardParent, wxID_ANY, description);
+        descriptionLabel->Wrap(FromDIP(410));
+        statusLabel = new wxStaticText(cardParent, wxID_ANY, "");
         wxFont statusFont = statusLabel->GetFont();
         statusFont.SetWeight(wxFONTWEIGHT_BOLD);
         statusLabel->SetFont(statusFont);
@@ -3081,14 +3226,14 @@ private:
         statusRow->Add(statusLabel, 0, wxALIGN_TOP);
         box->Add(statusRow, 0, wxALL | wxEXPAND, 14);
 
-        detailLabel = new wxStaticText(parent, wxID_ANY, "");
-        detailLabel->Wrap(620);
+        detailLabel = new wxStaticText(cardParent, wxID_ANY, "");
+        detailLabel->Wrap(FromDIP(620));
         box->Add(detailLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 14);
 
         auto* buttonRow = new wxBoxSizer(wxHORIZONTAL);
         requestButton = new wxButton(
-            parent, wxID_ANY, "Open System Settings");
-        testButton = new wxButton(parent, wxID_ANY, "Test");
+            cardParent, wxID_ANY, "Open System Settings");
+        testButton = new wxButton(cardParent, wxID_ANY, "Test");
         buttonRow->Add(requestButton, 0);
         buttonRow->AddSpacer(8);
         buttonRow->Add(testButton, 0);
@@ -3129,18 +3274,26 @@ private:
             : "ComputerCpp needs attention — complete each missing permission below.");
         summary_->SetForegroundColour(
             ready ? wxColour(52, 150, 75) : wxColour(190, 110, 30));
-        summary_->Wrap(620);
+        summary_->Wrap(FromDIP(620));
 
-        accessibilityRequest_->Show(!status.accessibility);
+        accessibilityRequest_->SetLabel(
+            status.accessibility
+                ? "Open System Settings"
+                : "Grant in System Settings");
+        accessibilityRequest_->Show(true);
         accessibilityTest_->Show(status.accessibility);
-        screenRequest_->Show(!status.screenCapture);
+        screenRequest_->SetLabel(
+            status.screenCapture
+                ? "Open System Settings"
+                : "Grant in System Settings");
+        screenRequest_->Show(true);
         screenTest_->Show(status.screenCapture);
         resetOrRestart_->SetLabel(ready ? "Restart ComputerCpp" : "Reset Permissions && Restart");
 
         accessibilityDetail_->SetLabel(accessibilityResult_.empty() ? DefaultAccessibilityDetail(status.accessibility) : accessibilityResult_);
-        accessibilityDetail_->Wrap(620);
+        accessibilityDetail_->Wrap(FromDIP(620));
         screenDetail_->SetLabel(screenResult_.empty() ? DefaultScreenDetail(status.screenCapture) : screenResult_);
-        screenDetail_->Wrap(620);
+        screenDetail_->Wrap(FromDIP(620));
 
         if (content_) {
             content_->Layout();
@@ -3249,7 +3402,8 @@ private:
         ApplyStatus(status);
 
         wxBusyCursor busy;
-        const std::string path = "/tmp/computer.cpp-permission-test.png";
+        const std::string path = TemporaryScreenshotPath(
+            "computer.cpp-permission-test.png");
         bool ok = Platform::SaveScreenshot(path);
         screenResult_ = ok
             ? "Test passed. Screenshot capture works."
@@ -3274,7 +3428,8 @@ private:
         lastStatus_ = status;
         ApplyStatus(status);
         wxBusyCursor busy;
-        const std::string path = "/tmp/computer.cpp-permission-test.png";
+        const std::string path = TemporaryScreenshotPath(
+            "computer.cpp-permission-test.png");
         screenResult_ = Platform::SaveScreenshot(path)
             ? "Test passed. Screenshot capture works."
             : "Test failed. Restart ComputerCpp, then test again. If it still fails, reset permissions.";
@@ -3315,7 +3470,7 @@ private:
         wxString error;
         if (!ResetPermissionsAndRelaunch(&error)) {
             summary_->SetLabel(error);
-            summary_->Wrap(620);
+            summary_->Wrap(FromDIP(620));
             timer_.Start(750);
             Layout();
         }
@@ -3559,6 +3714,7 @@ TrayIcon::TrayIcon() {
     });
     gobiiController_->Initialize();
 #endif
+#ifdef __APPLE__
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
@@ -3567,6 +3723,7 @@ TrayIcon::TrayIcon() {
             SetUpPermissionsIfNeeded(false);
         }
     });
+#endif
 }
 
 TrayIcon::~TrayIcon() {
@@ -3761,7 +3918,9 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     }
     menu->AppendSeparator();
 
+#ifdef __APPLE__
     menu->Append(ID_PERMISSIONS, "Permissions");
+#endif
     menu->Append(ID_SETTINGS, "Settings...");
     std::string configError;
     const AppConfig config = LoadAppConfig(&configError);
@@ -3803,7 +3962,11 @@ void TrayIcon::OnSettings(wxCommandEvent&) {
         return;
     }
     settingsDialog_ = new LlmSettingsDialog({
+#ifdef __APPLE__
         [this] { SetUpPermissionsIfNeeded(false); },
+#else
+        {},
+#endif
         [this] { RefreshConfiguredServer(true); },
     });
     settingsDialog_->Bind(wxEVT_DESTROY, [this](wxWindowDestroyEvent&) {
@@ -4556,6 +4719,9 @@ void TrayIcon::StopServerBlocking() {
 
 void TrayIcon::SetUpPermissionsIfNeeded(bool notifyWhenGranted) {
     (void)notifyWhenGranted;
+#ifndef __APPLE__
+    return;
+#else
     if (permissionDialog_) {
         PresentPermissionDialog(permissionDialog_);
         return;
@@ -4566,6 +4732,7 @@ void TrayIcon::SetUpPermissionsIfNeeded(bool notifyWhenGranted) {
         permissionDialog_ = nullptr;
     });
     PresentPermissionDialog(permissionDialog_);
+#endif
 }
 
 void TrayIcon::OnState(wxCommandEvent&) {
@@ -4584,7 +4751,8 @@ void TrayIcon::OnState(wxCommandEvent&) {
 
 void TrayIcon::OnTestScreenshot(wxCommandEvent&) {
     std::thread([] {
-        std::string path = "/tmp/computer.cpp-test-screenshot.png";
+        std::string path = TemporaryScreenshotPath(
+            "computer.cpp-test-screenshot.png");
         bool ok = Platform::SaveScreenshot(path);
         wxTheApp->CallAfter([ok, path] {
             wxMessageBox(ok ? "Saved screenshot to " + path : "Screenshot failed",
