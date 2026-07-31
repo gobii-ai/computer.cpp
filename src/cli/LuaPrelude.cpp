@@ -2869,6 +2869,8 @@ function ac.tools.action_sequence(spec)
   end)
 end
 
+)LUA";
+    out << R"LUA(
 function ac.tools.desktop_agent(opts)
   opts = opts or {}
   local store = opts.store or {}
