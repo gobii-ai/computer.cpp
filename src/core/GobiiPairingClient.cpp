@@ -73,7 +73,7 @@ bool ParseToken(
         std::chrono::seconds(expiresIn);
     if (!IsGobiiEndpointUrlAllowed(
             token.relayUrl, "wss", "ws")) {
-        error = "relay_url must use wss";
+        error = "relay_url must use wss, or ws with a loopback host";
         return false;
     }
     if (requireAgent &&
@@ -244,7 +244,9 @@ bool GobiiPairingClient::CreatePairing(
             session.verificationUriComplete,
             "https",
             "http")) {
-        error = "verification_uri_complete must use https";
+        error =
+            "verification_uri_complete must use https, or http with a "
+            "loopback host";
         return false;
     }
     return true;

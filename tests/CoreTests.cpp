@@ -130,6 +130,12 @@ void TestAppConfigServerRoundTrip() {
     assert(ComputerCpp::RecordingDir().parent_path() ==
         ComputerCpp::DefaultArtifactDir().parent_path());
 
+    loaded.recording.retentionDays = -1;
+    assert(ComputerCpp::SaveAppConfig(loaded, &error));
+    ComputerCpp::AppConfig keepForever = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(keepForever.recording.retentionDays == -1);
+
     ComputerCpp::AppConfig tokenConfig = ComputerCpp::DefaultAppConfig();
     assert(ComputerCpp::EnsureServerAuthToken(tokenConfig));
     assert(tokenConfig.server.authToken.size() >= 32);

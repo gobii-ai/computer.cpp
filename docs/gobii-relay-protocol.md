@@ -26,24 +26,24 @@ access tokens are never persisted.
 
 ### Local platform development
 
-Configure a non-Release build with
-`COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT=ON`, then set the platform endpoint:
+Set the platform endpoint to a loopback URL:
 
 ```sh
-cmake -S . -B build/gobii-local -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCOMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT=ON \
-  -DCOMPUTER_CPP_GOBII_DEV_INLINE_IMAGES=ON
-cmake --build build/gobii-local
-build/gobii-local/computer.cpp config set-gobii \
+build/debug-ninja/computer.cpp config set-gobii \
   --base-url http://127.0.0.1:8001
 ```
 
-This mode permits insecure `http` pairing/browser URLs and `ws` relay URLs
-only when their host is `127.0.0.1`, `localhost`, or `[::1]`. Remote insecure
-hosts remain rejected. CMake rejects local-development mode in Release
-builds. Inline images are controlled independently; enable the capped
-development mode as shown when testing tools that return screenshots.
+Insecure `http` pairing/browser URLs and `ws` relay URLs are permitted only
+when their host is `127.0.0.1`, `localhost`, or `[::1]`. Remote insecure hosts
+remain rejected in every build. Inline images are controlled independently
+by `COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES` when testing tools that return
+screenshots.
+
+`computer.cpp gobii diagnose` reports `loopbackEndpointsAllowed: true` on
+builds with this capability. When the configured Gobii base URL is plaintext
+loopback HTTP, it also reports `plaintextLoopbackEndpointConfigured: true`
+and includes a `securityWarning`, because local pairing and relay traffic is
+not protected by TLS.
 
 ## Relay handshake and control
 

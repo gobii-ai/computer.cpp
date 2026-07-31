@@ -639,6 +639,18 @@ void TestArtifactGateAndStates() {
         "http://127.0.0.1.example.com:8001", "http"));
     assert(!IsGobiiLoopbackUrl(
         "http://user@127.0.0.1:8001", "http"));
+    assert(IsGobiiEndpointUrlAllowed(
+        "https://gobii.example.test", "https", "http"));
+    assert(IsGobiiEndpointUrlAllowed(
+        "http://127.0.0.1:8001", "https", "http"));
+    assert(IsGobiiEndpointUrlAllowed(
+        "http://localhost:8001", "https", "http"));
+    assert(IsGobiiEndpointUrlAllowed(
+        "ws://[::1]:8001/relay", "wss", "ws"));
+    assert(!IsGobiiEndpointUrlAllowed(
+        "http://gobii.example.test:8001", "https", "http"));
+    assert(!IsGobiiEndpointUrlAllowed(
+        "ws://gobii.example.test:8001/relay", "wss", "ws"));
     assert(Sha256Hex("abc") ==
         "ba7816bf8f01cfea414140de5dae2223"
         "b00361a396177a9cb410ff61f20015ad");

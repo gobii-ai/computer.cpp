@@ -6,7 +6,7 @@
 #include <sstream>
 
 #if defined(COMPUTER_CPP_GOBII_UNSAFE_RELEASE_CONFIGURATION)
-#error "Gobii local-development features are forbidden in release-like builds"
+#error "Gobii development features are forbidden in release-like builds"
 #endif
 
 namespace ComputerCpp {
@@ -89,7 +89,7 @@ bool IsGobiiLoopbackUrl(
 bool IsGobiiEndpointUrlAllowed(
     std::string_view value,
     std::string_view secureScheme,
-    std::string_view localDevelopmentScheme
+    std::string_view loopbackScheme
 ) {
     const std::string securePrefix =
         std::string(secureScheme) + "://";
@@ -97,13 +97,8 @@ bool IsGobiiEndpointUrlAllowed(
         value.size() > securePrefix.size()) {
         return true;
     }
-#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
     return IsGobiiLoopbackUrl(
-        value, localDevelopmentScheme);
-#else
-    (void)localDevelopmentScheme;
-    return false;
-#endif
+        value, loopbackScheme);
 }
 
 std::optional<std::chrono::system_clock::time_point>
