@@ -38,19 +38,42 @@ json RuntimeMismatchResponse(const std::string& executablePath, const json& capa
     };
 }
 
-bool IsExpectedMacTrayDaemonForCli(const std::string& executablePath, const json& daemon) {
-#if defined(__APPLE__)
+bool IsExpectedTrayDaemonForCli(
+    const std::string& executablePath,
+    const json& daemon
+) {
+#if defined(__APPLE__) || defined(_WIN32)
     std::filesystem::path clientPath(executablePath);
     std::filesystem::path daemonPath(daemon.value("executablePath", ""));
+#if defined(__APPLE__)
     if (clientPath.filename() != "computer.cpp" || daemonPath.filename() != "ComputerCpp") {
         return false;
     }
     if (daemonPath.string().find("ComputerCpp.app/Contents/MacOS/ComputerCpp") == std::string::npos) {
         return false;
     }
+#else
+    if (clientPath.filename() != "computer.cpp.exe" ||
+        daemonPath.filename() != "ComputerCpp.exe") {
+        return false;
+    }
+#endif
+
+    std::error_code ec;
+    if (!std::filesystem::equivalent(
+            clientPath.parent_path(), daemonPath.parent_path(), ec) ||
+        ec) {
+        return false;
+    }
 
     json client = RuntimeProvenanceToJson(RuntimeProvenanceForExecutable(executablePath));
-    return daemon.value("buildGitSha", "") == client.value("buildGitSha", "") &&
+    const std::string clientGitSha = client.value("buildGitSha", "");
+    const std::string clientBuildTimestamp =
+        client.value("buildTimestamp", "");
+    return !clientGitSha.empty() &&
+           !clientBuildTimestamp.empty() &&
+           daemon.value("buildGitSha", "") == clientGitSha &&
+           daemon.value("buildTimestamp", "") == clientBuildTimestamp &&
            daemon.value("featureMapSchemaVersion", "") == client.value("featureMapSchemaVersion", "");
 #else
     (void)executablePath;
@@ -136,7 +159,7 @@ int VerifyDaemonRuntimeOrExit(const CliOptions& options, const std::string& exec
     std::string clientFingerprint = ExecutableFingerprint(executablePath);
     if (daemonFingerprint.empty() || daemonFingerprint == "unavailable" || clientFingerprint.empty() ||
         clientFingerprint == "unavailable" || daemonFingerprint != clientFingerprint) {
-        if (IsExpectedMacTrayDaemonForCli(executablePath, daemon)) {
+        if (IsExpectedTrayDaemonForCli(executablePath, daemon)) {
             return 0;
         }
         json response = RuntimeMismatchResponse(executablePath, capabilities);
