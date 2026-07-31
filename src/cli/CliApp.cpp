@@ -2424,7 +2424,7 @@ std::optional<json> SanitizeMcpStructuredValue(
                 output.push_back(std::move(*sanitized));
             }
         }
-        return output;
+        return std::optional<json>{std::move(output)};
     }
     if (value.is_object()) {
         json output = json::object();
@@ -2437,9 +2437,9 @@ std::optional<json> SanitizeMcpStructuredValue(
                 output[name] = std::move(*sanitized);
             }
         }
-        return output;
+        return std::optional<json>{std::move(output)};
     }
-    return value;
+    return std::optional<json>{value};
 }
 
 std::string Base64Encode(const std::string& input) {
