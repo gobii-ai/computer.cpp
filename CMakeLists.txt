@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(computer.cpp
-    VERSION 0.27.0
+    VERSION 0.27.1
     DESCRIPTION "Agent-oriented desktop computer control surface"
     LANGUAGES CXX
 )
