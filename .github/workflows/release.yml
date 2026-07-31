@@ -222,7 +222,6 @@ jobs:
             -s "$CURL_PREFIX/lib" \
             -s "$HOMEBREW_PREFIX/lib"
           dylibbundler \
-            -od \
             -b \
             -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
