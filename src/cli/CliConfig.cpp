@@ -142,8 +142,8 @@ int HandleSetGobii(
     if (!IsGobiiEndpointUrlAllowed(
             baseUrl, "https", "http")) {
         return ErrorExit(
-            "Gobii base URL must use https; a local-development "
-            "build also permits loopback http");
+            "Gobii base URL must use https, or http with a loopback "
+            "host (127.0.0.1, localhost, or ::1)");
     }
     std::string error;
     AppConfig config;

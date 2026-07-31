@@ -12,16 +12,10 @@ option(COMPUTER_CPP_ENABLE_WARNINGS "Enable strict compiler warnings for project
 option(COMPUTER_CPP_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer for project targets" OFF)
 option(COMPUTER_CPP_BUILD_GUI "Build the ComputerCpp desktop tray application when wxWidgets is available" ON)
 option(COMPUTER_CPP_BUNDLE_LUA "Copy a Lua executable beside Windows build and install artifacts" ON)
-option(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT "Allow insecure Gobii HTTP/WS endpoints on loopback only" OFF)
 option(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES "Allow development-only inline Gobii images up to 128 KiB" OFF)
 
 set(COMPUTER_CPP_RELEASE_LIKE_CONFIGS
     Release RelWithDebInfo MinSizeRel)
-if(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT AND
-   CMAKE_BUILD_TYPE IN_LIST COMPUTER_CPP_RELEASE_LIKE_CONFIGS)
-    message(FATAL_ERROR
-        "COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT is forbidden in Release builds")
-endif()
 if(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES AND
    CMAKE_BUILD_TYPE IN_LIST COMPUTER_CPP_RELEASE_LIKE_CONFIGS)
     message(FATAL_ERROR
@@ -215,12 +209,6 @@ target_compile_definitions(computer_cpp_core
         $<$<NOT:$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:COMPUTER_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}">
 )
 
-if(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
-    target_compile_definitions(computer_cpp_core PUBLIC
-        $<$<NOT:$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT=1>
-        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:COMPUTER_CPP_GOBII_UNSAFE_RELEASE_CONFIGURATION=1>
-    )
-endif()
 if(COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES)
     target_compile_definitions(computer_cpp_core PUBLIC
         $<$<NOT:$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:COMPUTER_CPP_GOBII_DEV_INLINE_IMAGES=1>

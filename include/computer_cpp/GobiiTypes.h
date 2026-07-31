@@ -43,7 +43,7 @@ bool IsGobiiLoopbackUrl(
 bool IsGobiiEndpointUrlAllowed(
     std::string_view value,
     std::string_view secureScheme,
-    std::string_view localDevelopmentScheme);
+    std::string_view loopbackScheme);
 std::optional<std::chrono::system_clock::time_point>
 ParseGobiiTimestamp(const std::string& value);
 

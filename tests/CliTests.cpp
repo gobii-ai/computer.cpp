@@ -3011,20 +3011,12 @@ void TestConfigCliCanonicalFile() {
         "config",
         "set-gobii",
         "--base-url",
-#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
         "http://127.0.0.1:8001"
-#else
-        "https://gobii.example.test"
-#endif
     });
     assert(gobii.exitCode == 0);
     config = ComputerCpp::LoadAppConfig(&error);
     assert(error.empty());
-#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
     assert(config.gobii.baseUrl == "http://127.0.0.1:8001");
-#else
-    assert(config.gobii.baseUrl == "https://gobii.example.test");
-#endif
     auto insecureRemoteGobii = RunConfigCommand({
         "config",
         "set-gobii",

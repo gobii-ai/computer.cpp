@@ -189,13 +189,7 @@ int main(int argc, char** argv) {
                 false
 #endif
             },
-            {"localDevelopment",
-#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
-                true
-#else
-                false
-#endif
-            },
+            {"localDevelopment", true},
             {"artifactUploadsAvailable", true},
             {"websocketSupported", websocket},
             {"websocketError", websocketError},

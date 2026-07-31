@@ -77,7 +77,7 @@ bool GobiiRelayClient::Start(
     }
     if (!IsGobiiEndpointUrlAllowed(
             options.url, "wss", "ws")) {
-        error = "relay URL must use wss";
+        error = "relay URL must use wss, or ws with a loopback host";
         return false;
     }
     {

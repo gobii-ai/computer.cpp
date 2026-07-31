@@ -566,8 +566,8 @@ AppConfig LoadAppConfig(
             config.gobii.baseUrl, "https", "http")) {
         if (error) {
             *error =
-                "gobii.base_url must use https; a local-development "
-                "build also permits loopback http";
+                "gobii.base_url must use https, or http with a loopback "
+                "host (127.0.0.1, localhost, or ::1)";
         }
         return {};
     }
