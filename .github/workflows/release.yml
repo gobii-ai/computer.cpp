@@ -216,16 +216,10 @@ jobs:
             -od \
             -b \
             -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp" \
-            -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
-            -p "@executable_path/../Frameworks" \
-            -s "$WX_PREFIX/lib" \
-            -s "$CURL_PREFIX/lib" \
-            -s "$HOMEBREW_PREFIX/lib"
-          dylibbundler \
-            -b \
             -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp" \
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
             -p "@executable_path/../Frameworks" \
+            -s "$WX_PREFIX/lib" \
             -s "$CURL_PREFIX/lib" \
             -s "$HOMEBREW_PREFIX/lib"
           dylibbundler \
