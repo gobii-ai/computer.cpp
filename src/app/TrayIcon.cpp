@@ -883,8 +883,8 @@ public:
               wxDefaultSize,
               wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxSTAY_ON_TOP),
           callbacks_(std::move(callbacks)) {
-        const wxSize initialSize = FromDIP(wxSize(980, 700));
-        const wxSize minimumSize = FromDIP(wxSize(840, 600));
+        const wxSize initialSize = FromDIP(wxSize(1180, 760));
+        const wxSize minimumSize = FromDIP(wxSize(960, 620));
         SetClientSize(initialSize);
         SetMinClientSize(minimumSize);
 
@@ -915,7 +915,7 @@ public:
             navigationPanel,
             wxID_ANY,
             wxDefaultPosition,
-            FromDIP(wxSize(184, -1)),
+            wxDefaultSize,
             0,
             nullptr,
             wxLB_SINGLE | wxBORDER_NONE);
@@ -926,6 +926,18 @@ public:
         wxFont navigationFont = navigation_->GetFont();
         navigationFont.SetPointSize(navigationFont.GetPointSize() + 1);
         navigation_->SetFont(navigationFont);
+        int widestNavigationLabel = 0;
+        for (unsigned int i = 0; i < navigation_->GetCount(); ++i) {
+            widestNavigationLabel = std::max(
+                widestNavigationLabel,
+                navigation_->GetTextExtent(
+                    navigation_->GetString(i)).GetWidth());
+        }
+        navigation_->SetMinSize(wxSize(
+            std::max(
+                FromDIP(184),
+                widestNavigationLabel + FromDIP(40)),
+            -1));
         navigationCard->Add(navigation_, 1, wxALL | wxEXPAND, 8);
         navigationSizer->Add(
             navigationCard, 1, wxALL | wxEXPAND, 12);
@@ -1217,8 +1229,8 @@ private:
             wxID_ANY,
             wxDefaultPosition,
             wxDefaultSize,
-            wxVSCROLL | wxTAB_TRAVERSAL);
-        pane->SetScrollRate(0, 12);
+            wxHSCROLL | wxVSCROLL | wxTAB_TRAVERSAL);
+        pane->SetScrollRate(12, 12);
         root->Add(pane, 1, wxTOP | wxRIGHT | wxBOTTOM | wxEXPAND, 14);
         return pane;
     }
@@ -1445,7 +1457,8 @@ private:
             "Configured apps",
             "Select an app to edit",
             1);
-        serverAppList_ = new wxListBox(page, wxID_ANY, wxDefaultPosition, wxSize(220, -1));
+        serverAppList_ = new wxListBox(
+            page, wxID_ANY, wxDefaultPosition, wxSize(200, -1));
         listColumn->Add(serverAppList_, 1, wxEXPAND);
         auto* listButtons = new wxBoxSizer(wxHORIZONTAL);
         auto* add = new wxButton(page, wxID_ANY, "Add App");
@@ -1675,8 +1688,9 @@ private:
             page,
             wxID_ANY,
             "H.264 MP4  |  15 fps  |  Up to 1920 px  |  Cursor included  |  No audio");
-        details->Wrap(720);
+        details->SetMinSize(wxSize(-1, FromDIP(24)));
         formatBox->Add(details, 0, wxALL | wxEXPAND, 12);
+        formatBox->SetMinSize(wxSize(-1, FromDIP(64)));
         root->Add(content, 0, wxALL | wxEXPAND, 22);
         root->AddStretchSpacer();
         page->SetSizer(root);
@@ -2870,58 +2884,70 @@ public:
           timer_(this) {
         AppendPermissionTrace("permission_dialog_constructed");
         auto* root = new wxBoxSizer(wxVERTICAL);
-        root->SetMinSize(FromDIP(wxSize(700, 520)));
+        content_ = new wxScrolledWindow(
+            this,
+            wxID_ANY,
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxVSCROLL | wxTAB_TRAVERSAL);
+        content_->SetScrollRate(0, 12);
+        auto* contentRoot = new wxBoxSizer(wxVERTICAL);
 
-        auto* title = new wxStaticText(this, wxID_ANY, "Permissions");
+        auto* title = new wxStaticText(content_, wxID_ANY, "Permissions");
         wxFont titleFont = title->GetFont();
         titleFont.SetPointSize(titleFont.GetPointSize() + 6);
         titleFont.SetWeight(wxFONTWEIGHT_BOLD);
         title->SetFont(titleFont);
-        root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 22);
+        contentRoot->Add(
+            title, 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 22);
 
         auto* subtitle = new wxStaticText(
-            this,
+            content_,
             wxID_ANY,
             "ComputerCpp needs two permissions to observe and control the desktop.");
         subtitle->SetForegroundColour(
             wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-        root->Add(subtitle, 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 22);
+        contentRoot->AddSpacer(6);
+        contentRoot->Add(
+            subtitle, 0, wxLEFT | wxRIGHT | wxEXPAND, 22);
 
         auto* summaryHeading = new wxStaticText(
-            this, wxID_ANY, "Permission readiness");
+            content_, wxID_ANY, "Permission readiness");
         wxFont summaryHeadingFont = summaryHeading->GetFont();
         summaryHeadingFont.SetPointSize(
             summaryHeadingFont.GetPointSize() + 1);
         summaryHeadingFont.SetWeight(wxFONTWEIGHT_BOLD);
         summaryHeading->SetFont(summaryHeadingFont);
-        root->Add(
+        contentRoot->Add(
             summaryHeading,
             0,
             wxLEFT | wxRIGHT | wxTOP | wxEXPAND,
             22);
         auto* summaryBox = new wxStaticBoxSizer(
-            wxVERTICAL, this, wxString());
-        summary_ = new wxStaticText(this, wxID_ANY, "");
+            wxVERTICAL, content_, wxString());
+        summary_ = new wxStaticText(content_, wxID_ANY, "");
         wxFont summaryFont = summary_->GetFont();
         summaryFont.SetPointSize(summaryFont.GetPointSize() + 2);
         summaryFont.SetWeight(wxFONTWEIGHT_BOLD);
         summary_->SetFont(summaryFont);
         summary_->Wrap(620);
         summaryBox->Add(summary_, 0, wxALL | wxEXPAND, 14);
-        root->Add(
+        contentRoot->Add(
             summaryBox,
             0,
             wxLEFT | wxRIGHT | wxTOP | wxEXPAND,
             8);
 
-        AddPermissionSection(root,
+        AddPermissionSection(content_,
+                             contentRoot,
                              "1  Accessibility",
                              "Inspect interface state and send mouse and keyboard input.",
                              accessibilityStatus_,
                              accessibilityDetail_,
                              accessibilityRequest_,
                              accessibilityTest_);
-        AddPermissionSection(root,
+        AddPermissionSection(content_,
+                             contentRoot,
                              "2  Screen Recording",
                              "Capture screenshots for observation and verification.",
                              screenStatus_,
@@ -2935,29 +2961,39 @@ public:
         screenTest_->SetLabel("Test Capture");
 
         troubleshooting_ = new wxCollapsiblePane(
-            this,
+            content_,
             wxID_ANY,
             "Troubleshooting",
             wxDefaultPosition,
             wxDefaultSize,
             wxCP_NO_TLW_RESIZE);
-        auto* troubleshootingSizer = new wxBoxSizer(wxHORIZONTAL);
+        auto* troubleshootingSizer = new wxBoxSizer(wxVERTICAL);
         auto* restartHelp = new wxStaticText(
             troubleshooting_->GetPane(),
             wxID_ANY,
             "Restart after changing permissions, or reset them if macOS remains out of sync.");
         restartHelp->SetForegroundColour(
             wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
+        restartHelp->Wrap(640);
         resetOrRestart_ = new wxButton(
             troubleshooting_->GetPane(),
             wxID_ANY,
             "Restart ComputerCpp");
         troubleshootingSizer->Add(
-            restartHelp, 1, wxRIGHT | wxALIGN_CENTER_VERTICAL, 12);
-        troubleshootingSizer->Add(resetOrRestart_, 0);
-        troubleshooting_->GetPane()->SetSizer(troubleshootingSizer);
-        root->Add(
-            troubleshooting_, 0, wxLEFT | wxRIGHT | wxTOP | wxEXPAND, 22);
+            restartHelp, 0, wxALL | wxEXPAND, 12);
+        troubleshootingSizer->Add(
+            resetOrRestart_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
+        troubleshooting_->GetPane()->SetSizerAndFit(
+            troubleshootingSizer);
+        contentRoot->Add(
+            troubleshooting_,
+            0,
+            wxLEFT | wxRIGHT | wxTOP | wxBOTTOM | wxEXPAND,
+            22);
+
+        content_->SetSizer(contentRoot);
+        content_->FitInside();
+        root->Add(content_, 1, wxEXPAND);
 
         auto* footer = new wxBoxSizer(wxHORIZONTAL);
         runAllChecks_ = new wxButton(this, wxID_ANY, "Run All Checks");
@@ -2969,7 +3005,7 @@ public:
 
         SetEscapeId(wxID_CANCEL);
         SetSizer(root);
-        SetClientSize(FromDIP(wxSize(760, 620)));
+        SetClientSize(FromDIP(wxSize(800, 720)));
         SetMinClientSize(FromDIP(wxSize(700, 560)));
         CentreOnScreen();
 
@@ -2978,6 +3014,23 @@ public:
         screenRequest_->Bind(wxEVT_BUTTON, &PermissionSetupDialog::OnRequestScreenRecording, this);
         screenTest_->Bind(wxEVT_BUTTON, &PermissionSetupDialog::OnTestScreenRecording, this);
         resetOrRestart_->Bind(wxEVT_BUTTON, &PermissionSetupDialog::OnResetOrRestart, this);
+        troubleshooting_->Bind(
+            wxEVT_COLLAPSIBLEPANE_CHANGED,
+            [this](wxCollapsiblePaneEvent& event) {
+                troubleshooting_->GetPane()->Layout();
+                troubleshooting_->InvalidateBestSize();
+                content_->GetSizer()->Layout();
+                content_->FitInside();
+                if (!event.GetCollapsed()) {
+                    CallAfter([this] {
+                        content_->GetSizer()->Layout();
+                        content_->FitInside();
+                        content_->Scroll(
+                            -1, content_->GetVirtualSize().GetHeight());
+                    });
+                }
+                event.Skip();
+            });
         runAllChecks_->Bind(wxEVT_BUTTON, &PermissionSetupDialog::OnRunAllChecks, this);
         close_->Bind(wxEVT_BUTTON, &PermissionSetupDialog::OnCancel, this);
         Bind(wxEVT_TIMER, &PermissionSetupDialog::OnTimer, this);
@@ -2995,14 +3048,15 @@ private:
         ScreenRecording
     };
 
-    void AddPermissionSection(wxBoxSizer* root,
+    void AddPermissionSection(wxWindow* parent,
+                              wxBoxSizer* root,
                               const wxString& title,
                               const wxString& description,
                               wxStaticText*& statusLabel,
                               wxStaticText*& detailLabel,
                               wxButton*& requestButton,
                               wxButton*& testButton) {
-        auto* heading = new wxStaticText(this, wxID_ANY, title);
+        auto* heading = new wxStaticText(parent, wxID_ANY, title);
         wxFont headingFont = heading->GetFont();
         headingFont.SetPointSize(headingFont.GetPointSize() + 1);
         headingFont.SetWeight(wxFONTWEIGHT_BOLD);
@@ -3013,12 +3067,13 @@ private:
             wxLEFT | wxRIGHT | wxTOP | wxEXPAND,
             22);
         auto* box = new wxStaticBoxSizer(
-            wxVERTICAL, this, wxString());
+            wxVERTICAL, parent, wxString());
 
         auto* statusRow = new wxBoxSizer(wxHORIZONTAL);
-        auto* descriptionLabel = new wxStaticText(this, wxID_ANY, description);
+        auto* descriptionLabel = new wxStaticText(
+            parent, wxID_ANY, description);
         descriptionLabel->Wrap(410);
-        statusLabel = new wxStaticText(this, wxID_ANY, "");
+        statusLabel = new wxStaticText(parent, wxID_ANY, "");
         wxFont statusFont = statusLabel->GetFont();
         statusFont.SetWeight(wxFONTWEIGHT_BOLD);
         statusLabel->SetFont(statusFont);
@@ -3026,13 +3081,14 @@ private:
         statusRow->Add(statusLabel, 0, wxALIGN_TOP);
         box->Add(statusRow, 0, wxALL | wxEXPAND, 14);
 
-        detailLabel = new wxStaticText(this, wxID_ANY, "");
+        detailLabel = new wxStaticText(parent, wxID_ANY, "");
         detailLabel->Wrap(620);
         box->Add(detailLabel, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 14);
 
         auto* buttonRow = new wxBoxSizer(wxHORIZONTAL);
-        requestButton = new wxButton(this, wxID_ANY, "Open System Settings");
-        testButton = new wxButton(this, wxID_ANY, "Test");
+        requestButton = new wxButton(
+            parent, wxID_ANY, "Open System Settings");
+        testButton = new wxButton(parent, wxID_ANY, "Test");
         buttonRow->Add(requestButton, 0);
         buttonRow->AddSpacer(8);
         buttonRow->Add(testButton, 0);
@@ -3086,6 +3142,10 @@ private:
         screenDetail_->SetLabel(screenResult_.empty() ? DefaultScreenDetail(status.screenCapture) : screenResult_);
         screenDetail_->Wrap(620);
 
+        if (content_) {
+            content_->Layout();
+            content_->FitInside();
+        }
         Layout();
     }
 
@@ -3272,6 +3332,7 @@ private:
         Destroy();
     }
 
+    wxScrolledWindow* content_ = nullptr;
     wxStaticText* summary_ = nullptr;
     wxStaticText* accessibilityStatus_ = nullptr;
     wxStaticText* accessibilityDetail_ = nullptr;
