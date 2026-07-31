@@ -1681,6 +1681,7 @@ struct AppServeOptions {
     std::string host = "0.0.0.0";
     int port = 8787;
     std::string authToken;
+    std::string internalControlToken;
     std::set<std::string> allowedOrigins;
     std::string routeBasePath;
     std::string stableAppName;
@@ -2408,23 +2409,18 @@ bool LooksLikeLocalPath(std::string_view value) {
             (value[2] == '/' || value[2] == '\\'));
 }
 
-std::optional<json> SanitizeMcpStructuredValue(
-    const json& value
-) {
+json SanitizeMcpStructuredValue(const json& value) {
     if (value.is_string() &&
         LooksLikeLocalPath(
             value.get_ref<const std::string&>())) {
-        return std::nullopt;
+        return "[redacted local path]";
     }
     if (value.is_array()) {
         json output = json::array();
         for (const auto& item : value) {
-            if (auto sanitized =
-                    SanitizeMcpStructuredValue(item)) {
-                output.push_back(std::move(*sanitized));
-            }
+            output.push_back(SanitizeMcpStructuredValue(item));
         }
-        return std::optional<json>{std::move(output)};
+        return output;
     }
     if (value.is_object()) {
         json output = json::object();
@@ -2432,14 +2428,11 @@ std::optional<json> SanitizeMcpStructuredValue(
             if (name == "__ac_image_path") {
                 continue;
             }
-            if (auto sanitized =
-                    SanitizeMcpStructuredValue(item)) {
-                output[name] = std::move(*sanitized);
-            }
+            output[name] = SanitizeMcpStructuredValue(item);
         }
-        return std::optional<json>{std::move(output)};
+        return output;
     }
-    return std::optional<json>{value};
+    return value;
 }
 
 std::string Base64Encode(const std::string& input) {
@@ -2542,8 +2535,7 @@ json McpToolSuccessResult(const json& result, const json& recording = json::obje
         if (result.contains("structured") &&
             result["structured"].is_object()) {
             out["structuredContent"] =
-                *SanitizeMcpStructuredValue(
-                    result["structured"]);
+                SanitizeMcpStructuredValue(result["structured"]);
         }
         AttachMcpRecordingMetadata(out, recording);
         return out;
@@ -2824,7 +2816,7 @@ template <typename Handler>
 bool HandleMcpTransportRequest(
     AppSocket fd,
     const HttpRequest& request,
-    bool allowInternalControlHints,
+    const std::string& internalControlToken,
     Handler&& handler
 ) {
     if (request.method == "GET") {
@@ -2881,6 +2873,12 @@ bool HandleMcpTransportRequest(
     }
     std::optional<int64_t> leaseWaitOverride;
     int64_t executionTimeoutMs = 0;
+    const auto internalToken = request.headers.find(
+        "x-computercpp-internal-token");
+    const bool allowInternalControlHints =
+        !internalControlToken.empty() &&
+        internalToken != request.headers.end() &&
+        internalToken->second == internalControlToken;
     if (allowInternalControlHints) {
         const auto queue = request.headers.find(
             "x-computercpp-control-queue");
@@ -2921,7 +2919,7 @@ bool HandleMcpRequest(
     return HandleMcpTransportRequest(
         fd,
         request,
-        serveOptions.configured && !serveOptions.authToken.empty(),
+        serveOptions.internalControlToken,
         [&](const json& message,
             std::optional<int64_t> leaseWaitOverride,
             int64_t executionTimeoutMs) {
@@ -2949,7 +2947,7 @@ bool HandleConfiguredMcpRequest(
     return HandleMcpTransportRequest(
         fd,
         request,
-        !serveOptions.authToken.empty(),
+        serveOptions.internalControlToken,
         [&](const json& message,
             std::optional<int64_t> leaseWaitOverride,
             int64_t executionTimeoutMs) {
@@ -3438,6 +3436,10 @@ std::optional<AppServeOptions> ParseServeOptions(const std::vector<std::string>&
         serve.host = config.server.host;
         serve.port = config.server.port;
         serve.authToken = config.server.authToken;
+        if (const char* internalToken = std::getenv(
+                "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN")) {
+            serve.internalControlToken = internalToken;
+        }
         for (const auto& origin : config.server.allowedOrigins) {
             auto normalized = NormalizeOrigin(origin);
             if (!normalized) {
@@ -3642,6 +3644,8 @@ int RunHttpServer(
         state.configName = serveOptions.trayConfigName;
         state.displayName = serveOptions.trayDisplayName;
         state.startedAt = NowIsoUtc();
+        state.internalControlToken =
+            serveOptions.internalControlToken;
         std::string stateError;
         if (!SaveTrayAppServerState(state, *serveOptions.trayStateFile, &stateError)) {
             std::cerr << "warning: " << stateError << "\n";

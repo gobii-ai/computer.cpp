@@ -19,6 +19,7 @@ struct TrayAppServerState {
     std::string configName;
     std::string displayName;
     std::string startedAt;
+    std::string internalControlToken;
 };
 
 // Singleton configured-server state path. Version 1 files remain readable for

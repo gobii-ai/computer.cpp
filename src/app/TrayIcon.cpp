@@ -2610,6 +2610,10 @@ public:
 
     bool EnsureRunning(std::string& error) override {
         error.clear();
+        if (wxIsMainThread()) {
+            error = "configured server startup cannot run on the UI thread";
+            return false;
+        }
         auto startPromise =
             std::make_shared<std::promise<void>>();
         auto startFuture = startPromise->get_future();
@@ -2647,6 +2651,12 @@ public:
     }
 
     ConfiguredServerInfo Status() const override {
+        if (wxIsMainThread()) {
+            ConfiguredServerInfo info;
+            info.error =
+                "configured server status cannot run on the UI thread";
+            return info;
+        }
         auto promise =
             std::make_shared<
                 std::promise<ConfiguredServerInfo>>();
@@ -2658,9 +2668,12 @@ public:
             ConfiguredServerInfo info;
             info.running =
                 owner_.server_.status ==
-                TrayIcon::ServerStatus::Running;
+                    TrayIcon::ServerStatus::Running;
+            info.host = owner_.server_.host;
             info.port = owner_.server_.port;
             info.bearerToken = owner_.serverAuthToken_;
+            info.internalControlToken =
+                owner_.serverInternalControlToken_;
             info.error =
                 owner_.server_.status ==
                     TrayIcon::ServerStatus::Failed
@@ -2870,12 +2883,6 @@ wxMenu* TrayIcon::CreatePopupMenu() {
         }
         auto* statusItem = menu->Append(wxID_ANY, label);
         statusItem->Enable(false);
-        if (!status.agentName.empty()) {
-            auto* agent = menu->Append(
-                wxID_ANY,
-                "Agent: " + status.agentName);
-            agent->Enable(false);
-        }
         if (status.state ==
             GobiiConnectionState::Disconnected ||
             status.state ==
@@ -3313,6 +3320,7 @@ void TrayIcon::AdoptExistingServer(bool removeInvalidState) {
     server_.port = state->port;
     server_.pid = state->pid;
     server_.url = state->url;
+    serverInternalControlToken_ = state->internalControlToken;
     server_.process = nullptr;
     server_.status = ServerStatus::Running;
     server_.statePath = statePath;
@@ -3478,6 +3486,7 @@ void TrayIcon::StartConfiguredServer() {
     server_.deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     server_.nextHealthProbe = std::chrono::steady_clock::now();
+    serverInternalControlToken_ = GenerateServerAuthToken();
 
     std::vector<std::wstring> argStorage;
     auto addArg = [&argStorage](const std::string& value) {
@@ -3502,6 +3511,13 @@ void TrayIcon::StartConfiguredServer() {
     wxString previousLogFile;
     const bool hadPreviousLogFile = wxGetEnv("COMPUTER_CPP_LOG_FILE", &previousLogFile);
     wxSetEnv("COMPUTER_CPP_LOG_FILE", wxString::FromUTF8(ComputerCpp::AppLogPath().string()));
+    wxString previousInternalToken;
+    const bool hadPreviousInternalToken = wxGetEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+        &previousInternalToken);
+    wxSetEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+        wxString::FromUTF8(serverInternalControlToken_));
     AppendAppLog(
         "server",
         "start_requested configured listen=" + host + ":" +
@@ -3513,6 +3529,13 @@ void TrayIcon::StartConfiguredServer() {
         wxSetEnv("COMPUTER_CPP_LOG_FILE", previousLogFile);
     } else {
         wxUnsetEnv("COMPUTER_CPP_LOG_FILE");
+    }
+    if (hadPreviousInternalToken) {
+        wxSetEnv(
+            "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+            previousInternalToken);
+    } else {
+        wxUnsetEnv("COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN");
     }
 
     if (server_.pid == 0) {
@@ -3704,6 +3727,7 @@ TrayAppServerState TrayIcon::CurrentServerState() const {
     state.host = server_.host;
     state.port = server_.port;
     state.url = server_.url;
+    state.internalControlToken = serverInternalControlToken_;
     return state;
 }
 
@@ -3712,6 +3736,7 @@ void TrayIcon::ClearServerProcess() {
     server_.pid = 0;
     server_.port = 0;
     server_.url.clear();
+    serverInternalControlToken_.clear();
 }
 
 void TrayIcon::StopServerBlocking() {

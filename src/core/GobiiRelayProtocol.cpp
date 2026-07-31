@@ -1,6 +1,8 @@
 #include "computer_cpp/GobiiRelayProtocol.h"
 #include "computer_cpp/GobiiTypes.h"
 
+#include <algorithm>
+
 using json = nlohmann::json;
 
 namespace ComputerCpp {
@@ -127,9 +129,7 @@ void GobiiRequestLedger::PruneLocked(
             it = order_.erase(it);
             continue;
         }
-        const bool expired =
-            entry->second.state != Entry::State::Running &&
-            entry->second.expiresAt <= now;
+        const bool expired = entry->second.expiresAt <= now;
         const bool overCapacity =
             entries_.size() > capacity_ &&
             entry->second.state != Entry::State::Running;
@@ -159,11 +159,26 @@ GobiiRequestLedger::StartResult GobiiRequestLedger::Start(
         }
         return StartResult::CompletedDuplicate;
     }
+    while (entries_.size() >= capacity_) {
+        const auto evict = std::find_if(
+            order_.begin(),
+            order_.end(),
+            [this](const std::string& id) {
+                const auto entry = entries_.find(id);
+                return entry == entries_.end() ||
+                    entry->second.state != Entry::State::Running;
+            });
+        if (evict == order_.end()) break;
+        entries_.erase(*evict);
+        order_.erase(evict);
+    }
+    if (entries_.size() >= capacity_) {
+        return StartResult::CapacityExceeded;
+    }
     Entry entry;
     entry.expiresAt = now + ttl_;
     entries_.emplace(requestId, std::move(entry));
     order_.push_back(requestId);
-    PruneLocked(now);
     return StartResult::Started;
 }
 

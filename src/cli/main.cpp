@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
                 false
 #endif
             },
-            {"artifactUploadsAvailable", false},
+            {"artifactUploadsAvailable", true},
             {"websocketSupported", websocket},
             {"websocketError", websocketError},
             {"credentialStoreAvailable", credentialStore},

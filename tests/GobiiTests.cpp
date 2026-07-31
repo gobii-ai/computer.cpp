@@ -8,6 +8,7 @@
 #include "computer_cpp/GobiiLocalMcpClient.h"
 #include "computer_cpp/GobiiPairingClient.h"
 #include "computer_cpp/GobiiRelayProtocol.h"
+#include "computer_cpp/GobiiRelayClient.h"
 #include "computer_cpp/GobiiStatusPresentation.h"
 #include "computer_cpp/GobiiTypes.h"
 #include "computer_cpp/Sha256.h"
@@ -115,8 +116,10 @@ public:
     ConfiguredServerInfo Status() const override {
         return {
             true,
+            "127.0.0.1",
             8787,
             "local-token",
+            "internal-token",
             {{"gobii-desktop", "Gobii Desktop\n" +
                 std::string(64, 'a')}},
             "",
@@ -170,6 +173,13 @@ void TestConfigAndResources() {
     assert(!InstalledResourcePath(
         "apps/gobii-desktop.lua").empty());
 
+    if (FindLuaInterpreter().empty()) {
+        std::cout
+            << "[skip] Gobii desktop Lua schema: "
+               "Lua interpreter not available\n";
+        return;
+    }
+
     LuaRunOptions lua;
     lua.scriptPath = InstalledResourcePath(
         "apps/gobii-desktop.lua");
@@ -194,6 +204,16 @@ void TestConfigAndResources() {
 }
 
 void TestPairingAndRefresh() {
+    const auto utc = ParseGobiiTimestamp("2030-07-30T20:00:00Z");
+    const auto offset = ParseGobiiTimestamp(
+        "2030-07-30T16:00:00-04:00");
+    const auto fractionalOffset = ParseGobiiTimestamp(
+        "2030-07-30T22:30:00.123+02:30");
+    assert(utc && offset && fractionalOffset);
+    assert(*utc == *offset);
+    assert(*utc == *fractionalOffset);
+    assert(!ParseGobiiTimestamp("2030-07-30T20:00:00+24:00"));
+
     auto http = std::make_shared<FakeHttpTransport>();
     http->responses.push_back({
         201,
@@ -370,6 +390,23 @@ void TestRefreshFailureClassification() {
 }
 
 void TestRelayProtocolAndLedger() {
+    GobiiRelayMessageAssembler assembler;
+    std::string assembled;
+    std::string assemblyError;
+    assert(assembler.Consume(
+        true, false, false, true, 0, 0, "first-",
+        assembled, assemblyError) ==
+        GobiiRelayMessageAssembler::Result::Incomplete);
+    assert(assembler.Consume(
+        false, false, true, false, 0, 0, "ping",
+        assembled, assemblyError) ==
+        GobiiRelayMessageAssembler::Result::Incomplete);
+    assert(assembler.Consume(
+        true, false, false, false, 0, 0, "second",
+        assembled, assemblyError) ==
+        GobiiRelayMessageAssembler::Result::Complete);
+    assert(assembled == "first-second");
+
     const std::string request = nlohmann::json{
         {"type", "mcp.request"},
         {"request_id", "request-1"},
@@ -399,6 +436,20 @@ void TestRelayProtocolAndLedger() {
     assert(ledger.Start("one", &cached) ==
         GobiiRequestLedger::StartResult::CompletedDuplicate);
     assert(cached == "cached");
+    assert(ledger.Start("two") ==
+        GobiiRequestLedger::StartResult::Started);
+    assert(ledger.Start("three") ==
+        GobiiRequestLedger::StartResult::Started);
+    assert(!ledger.Find("one"));
+
+    GobiiRequestLedger runningLedger(
+        2, std::chrono::minutes(15));
+    assert(runningLedger.Start("one") ==
+        GobiiRequestLedger::StartResult::Started);
+    assert(runningLedger.Start("two") ==
+        GobiiRequestLedger::StartResult::Started);
+    assert(runningLedger.Start("three") ==
+        GobiiRequestLedger::StartResult::CapacityExceeded);
 }
 
 void TestLoopbackMcpForwarding() {
@@ -409,8 +460,10 @@ void TestLoopbackMcpForwarding() {
         "",
     });
     GobiiLocalMcpClient client(
+        "127.0.0.1",
         8787,
         "local-token",
+        "internal-token",
         {"gobii-desktop"},
         http);
     auto result = client.Forward(
@@ -431,6 +484,26 @@ void TestLoopbackMcpForwarding() {
         "Bearer local-token");
     assert(http->requests[0].headers.at(
         "MCP-Protocol-Version") == "2025-11-25");
+    assert(http->requests[0].headers.at(
+        "X-ComputerCpp-Internal-Token") == "internal-token");
+
+    http->responses.push_back({
+        0,
+        "",
+        "Timeout was reached",
+        GobiiHttpResponse::ErrorType::Timeout,
+    });
+    auto timedOut = client.Forward(
+        "gobii-desktop",
+        {
+            {"jsonrpc", "2.0"},
+            {"id", 2},
+            {"method", "tools/list"},
+        },
+        std::chrono::system_clock::now() +
+            std::chrono::seconds(10));
+    assert(!timedOut.ok);
+    assert(timedOut.code == "deadline_exceeded");
 
     auto unknown = client.Forward(
         "https://example.com",
@@ -439,6 +512,25 @@ void TestLoopbackMcpForwarding() {
             std::chrono::seconds(10));
     assert(!unknown.ok);
     assert(unknown.code == "unknown_app");
+
+    GobiiLocalMcpClient nonLoopback(
+        "192.0.2.10",
+        8787,
+        "local-token",
+        "internal-token",
+        {"gobii-desktop"},
+        http);
+    auto inaccessible = nonLoopback.Forward(
+        "gobii-desktop",
+        {
+            {"jsonrpc", "2.0"},
+            {"id", 3},
+            {"method", "tools/list"},
+        },
+        std::chrono::system_clock::now() +
+            std::chrono::seconds(10));
+    assert(!inaccessible.ok);
+    assert(inaccessible.code == "local_server_unavailable");
 }
 
 void TestArtifactGateAndStates() {
@@ -488,9 +580,11 @@ void TestArtifactGateAndStates() {
     assert(fakeUploader.uploadedBytes > 0);
     const auto& artifactContent =
         uploadedResponse["result"]["content"][0];
-    assert(artifactContent.size() == 1);
+    assert(artifactContent["type"] == "gobii_artifact");
     assert(artifactContent["_gobii_artifact"]["id"] ==
         "01234567-89ab-cdef-0123-456789abcdef");
+    assert(artifactContent["_gobii_artifact"]["mime_type"] ==
+        "image/png");
 
     auto artifactHttp = std::make_shared<FakeHttpTransport>();
     const std::string pngBytes =
@@ -724,6 +818,16 @@ void TestPairingPageLifetime() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     };
+    const auto waitForState = [&controller](
+        GobiiConnectionState expected) {
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            if (controller.Status().state == expected) {
+                return;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(5));
+        }
+    };
 
     controller.StartPairing();
     waitForPairing();
@@ -736,6 +840,7 @@ void TestPairingPageLifetime() {
     assert(opened[0] == opened[1]);
 
     controller.CancelPairing();
+    waitForState(GobiiConnectionState::Disconnected);
     assert(controller.Status().pairingCode.empty());
     assert(!controller.ReopenPairingPage());
 
@@ -743,6 +848,7 @@ void TestPairingPageLifetime() {
     controller.StartPairing();
     waitForPairing();
     controller.Disconnect();
+    waitForState(GobiiConnectionState::Disconnected);
     assert(controller.Status().state == GobiiConnectionState::Disconnected);
     assert(controller.Status().pairingCode.empty());
     assert(!controller.ReopenPairingPage());

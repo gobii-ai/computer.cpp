@@ -8,8 +8,10 @@ namespace ComputerCpp {
 
 struct ConfiguredServerInfo {
     bool running = false;
+    std::string host;
     int port = 0;
     std::string bearerToken;
+    std::string internalControlToken;
     std::map<std::string, std::string> apps;
     std::string error;
 };

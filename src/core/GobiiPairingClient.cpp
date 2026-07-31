@@ -350,24 +350,4 @@ bool GobiiPairingClient::Refresh(
     return true;
 }
 
-bool GobiiPairingClient::Revoke(
-    const std::string& refreshToken,
-    std::string& error
-) {
-    error.clear();
-    const GobiiHttpResponse response = transport_->Send(JsonRequest(
-        Endpoint("/api/computers/revoke/"),
-        json::object(),
-        refreshToken));
-    if (!response.error.empty()) {
-        error = "Gobii revoke failed: " + response.error;
-        return false;
-    }
-    if (response.status < 200 || response.status >= 300) {
-        error = "Gobii rejected the revoke request";
-        return false;
-    }
-    return true;
-}
-
 } // namespace ComputerCpp

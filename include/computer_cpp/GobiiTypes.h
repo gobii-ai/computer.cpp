@@ -25,7 +25,6 @@ struct GobiiConnectionStatus {
     std::string deviceId;
     std::string deviceName;
     std::string agentId;
-    std::string agentName;
     std::string pairingCode;
     std::optional<std::chrono::system_clock::time_point> lastConnectedAt;
     std::optional<std::chrono::system_clock::time_point> lastHeartbeatAt;

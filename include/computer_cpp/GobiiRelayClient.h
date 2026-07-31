@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace ComputerCpp {
@@ -16,6 +18,26 @@ struct GobiiRelayConnectOptions {
     std::string url;
     std::string accessToken;
     std::string userAgent;
+};
+
+class GobiiRelayMessageAssembler {
+public:
+    enum class Result { Incomplete, Complete, Error };
+
+    Result Consume(
+        bool text,
+        bool binary,
+        bool control,
+        bool moreFragments,
+        std::uint64_t frameOffset,
+        std::uint64_t frameBytesLeft,
+        std::string_view bytes,
+        std::string& message,
+        std::string& error);
+
+private:
+    std::string incoming_;
+    bool active_ = false;
 };
 
 class GobiiRelayClient {

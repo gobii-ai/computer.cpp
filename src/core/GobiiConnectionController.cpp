@@ -4,6 +4,7 @@
 #include "computer_cpp/GobiiLocalMcpClient.h"
 #include "computer_cpp/Platform.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <nlohmann/json.hpp>
@@ -38,13 +39,32 @@ std::string ArchitectureName() {
 
 void InterruptibleWait(
     std::stop_token stop,
-    std::chrono::seconds duration
+    std::chrono::milliseconds duration
 ) {
     std::mutex mutex;
     std::condition_variable_any condition;
     std::unique_lock lock(mutex);
     condition.wait_for(lock, stop, duration, [] { return false; });
 }
+
+template <typename Function>
+class ScopeExit {
+public:
+    explicit ScopeExit(Function function)
+        : function_(std::move(function)) {}
+    ~ScopeExit() noexcept {
+        try {
+            function_();
+        } catch (...) {
+        }
+    }
+
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+
+private:
+    Function function_;
+};
 
 } // namespace
 
@@ -64,6 +84,8 @@ GobiiConnectionController::GobiiConnectionController(
 #ifdef COMPUTER_CPP_PROJECT_VERSION
     status_.installedVersion = COMPUTER_CPP_PROJECT_VERSION;
 #endif
+    commandThread_ = std::jthread(
+        [this](std::stop_token stop) { CommandWorker(stop); });
 }
 
 GobiiConnectionController::~GobiiConnectionController() {
@@ -92,7 +114,12 @@ void GobiiConnectionController::Publish() {
         snapshot = status_;
     }
     if (observer) {
-        observer(snapshot);
+        try {
+            observer(snapshot);
+        } catch (...) {
+            // Observers are presentation adapters and must not terminate
+            // lifecycle or relay workers.
+        }
     }
 }
 
@@ -112,6 +139,84 @@ void GobiiConnectionController::SetState(
     Publish();
 }
 
+void GobiiConnectionController::Enqueue(Command command) {
+    if (shuttingDown_) return;
+    {
+        std::lock_guard lock(commandMutex_);
+        if (!commands_.empty() && commands_.back() == command) {
+            return;
+        }
+        commands_.push_back(command);
+    }
+    commandCondition_.notify_all();
+}
+
+void GobiiConnectionController::CommandWorker(
+    std::stop_token stop
+) {
+    while (!stop.stop_requested()) {
+        Command command;
+        {
+            std::unique_lock lock(commandMutex_);
+            if (!commandCondition_.wait(
+                    lock,
+                    stop,
+                    [this] { return !commands_.empty(); })) {
+                return;
+            }
+            command = commands_.front();
+            commands_.pop_front();
+        }
+        try {
+            switch (command) {
+                case Command::StartPairing: DoStartPairing(); break;
+                case Command::CancelPairing: DoCancelPairing(); break;
+                case Command::Connect: DoConnect(); break;
+                case Command::Pause: DoPause(); break;
+                case Command::Resume: DoResume(); break;
+                case Command::Disconnect: DoDisconnect(); break;
+            }
+        } catch (...) {
+            SetState(
+                GobiiConnectionState::Error,
+                "Gobii connection action failed unexpectedly");
+        }
+    }
+}
+
+void GobiiConnectionController::ReplaceThread(
+    std::jthread& slot,
+    std::jthread next
+) {
+    StopThread(slot);
+    std::lock_guard lock(threadMutex_);
+    slot = std::move(next);
+}
+
+void GobiiConnectionController::StopThread(std::jthread& slot) {
+    std::jthread previous;
+    {
+        std::lock_guard lock(threadMutex_);
+        previous = std::move(slot);
+    }
+    if (!previous.joinable()) return;
+    previous.request_stop();
+    if (previous.get_id() == std::this_thread::get_id()) {
+        previous.detach();
+    } else {
+        previous.join();
+    }
+}
+
+void GobiiConnectionController::RequestThreadStop(
+    std::jthread& slot
+) {
+    std::lock_guard lock(threadMutex_);
+    if (slot.joinable()) {
+        slot.request_stop();
+    }
+}
+
 void GobiiConnectionController::Initialize() {
     std::string error;
     AppConfig config = LoadAppConfig(&error);
@@ -124,7 +229,6 @@ void GobiiConnectionController::Initialize() {
         status_.deviceId = config.gobii.deviceId;
         status_.deviceName = config.gobii.deviceName;
         status_.agentId = config.gobii.assignedAgentId;
-        status_.agentName = config.gobii.assignedAgentName;
         status_.requiredVersion = config.gobii.requiredVersion;
     }
     if (!config.gobii.updateRequiredInstalledVersion.empty()) {
@@ -170,20 +274,24 @@ void GobiiConnectionController::Initialize() {
 }
 
 void GobiiConnectionController::StartPairing() {
-    if (shuttingDown_) return;
-    CancelPairing();
+    Enqueue(Command::StartPairing);
+}
+
+void GobiiConnectionController::DoStartPairing() {
+    DoCancelPairing();
     SetState(GobiiConnectionState::Pairing);
-    lifecycleThread_ = std::jthread(
+    ReplaceThread(lifecycleThread_, std::jthread(
         [this](std::stop_token stop) {
             PairingWorker(stop);
-        });
+        }));
 }
 
 void GobiiConnectionController::CancelPairing() {
-    if (lifecycleThread_.joinable()) {
-        lifecycleThread_.request_stop();
-        lifecycleThread_.join();
-    }
+    Enqueue(Command::CancelPairing);
+}
+
+void GobiiConnectionController::DoCancelPairing() {
+    StopThread(lifecycleThread_);
     const auto state = Status().state;
     if (state == GobiiConnectionState::Pairing ||
         state == GobiiConnectionState::PairingPending) {
@@ -205,7 +313,7 @@ bool GobiiConnectionController::SaveTokenAndConfig(
     if (!error.empty()) return false;
     config.gobii.deviceId = token.deviceId;
     config.gobii.assignedAgentId = token.agentId;
-    config.gobii.assignedAgentName = token.agentName;
+    config.gobii.assignedAgentName.clear();
     config.gobii.requiredVersion.clear();
     config.gobii.updateRequiredInstalledVersion.clear();
     config.gobii.paused = false;
@@ -218,7 +326,6 @@ bool GobiiConnectionController::SaveTokenAndConfig(
         status_.deviceId = token.deviceId;
         status_.deviceName = config.gobii.deviceName;
         status_.agentId = token.agentId;
-        status_.agentName = token.agentName;
     }
     return true;
 }
@@ -380,16 +487,17 @@ bool GobiiConnectionController::ReopenPairingPage() {
 }
 
 void GobiiConnectionController::Connect() {
-    if (shuttingDown_) return;
-    if (refreshThread_.joinable()) {
-        refreshThread_.request_stop();
-        refreshThread_.join();
-    }
-    CancelPairing();
-    lifecycleThread_ = std::jthread(
+    Enqueue(Command::Connect);
+}
+
+void GobiiConnectionController::DoConnect() {
+    DoCancelPairing();
+    StopThread(refreshThread_);
+    StopThread(reconnectThread_);
+    ReplaceThread(lifecycleThread_, std::jthread(
         [this](std::stop_token stop) {
             ConnectWorker(stop);
-        });
+        }));
 }
 
 void GobiiConnectionController::ConnectWorker(
@@ -582,7 +690,7 @@ void GobiiConnectionController::ConnectWorker(
         ? now + lifetime * 4 / 5
         : token.relayAccessTokenExpiresAt -
             std::chrono::seconds(60);
-    refreshThread_ = std::jthread([
+    ReplaceThread(refreshThread_, std::jthread([
         this,
         refreshAt
     ](std::stop_token stop) {
@@ -619,17 +727,27 @@ void GobiiConnectionController::ConnectWorker(
             if (std::chrono::system_clock::now() >= refreshAt) {
                 relay_.Stop();
                 if (!stop.stop_requested()) {
-                    lifecycleThread_ = std::jthread(
-                        [this](std::stop_token nextStop) {
-                            ConnectWorker(nextStop);
-                        });
+                    Enqueue(Command::Connect);
                 }
                 return;
             }
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(250));
+            const auto now = std::chrono::steady_clock::now();
+            const auto refreshDelay = std::max(
+                std::chrono::system_clock::duration::zero(),
+                refreshAt - std::chrono::system_clock::now());
+            const auto refreshDeadline = now +
+                std::chrono::duration_cast<
+                    std::chrono::steady_clock::duration>(refreshDelay);
+            InterruptibleWait(
+                stop,
+                std::max(
+                    std::chrono::milliseconds(1),
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::min({stableAt, nextHeartbeat,
+                                  refreshDeadline}) - now)));
         }
-    });
+    }));
 }
 
 void GobiiConnectionController::ScheduleReconnect(
@@ -643,7 +761,8 @@ void GobiiConnectionController::ScheduleReconnect(
         attempt = ++status_.reconnectAttempt;
     }
     Publish();
-    reconnectThread_ = std::jthread([
+    RequestThreadStop(refreshThread_);
+    ReplaceThread(reconnectThread_, std::jthread([
         this,
         attempt
     ](std::stop_token stop) {
@@ -653,18 +772,12 @@ void GobiiConnectionController::ScheduleReconnect(
         std::uniform_int_distribution<int> delay(
             std::max(1, capSeconds / 2),
             capSeconds);
-        const auto deadline =
-            std::chrono::steady_clock::now() +
-            std::chrono::seconds(delay(random));
-        while (!stop.stop_requested() &&
-               std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(100));
-        }
+        InterruptibleWait(
+            stop, std::chrono::seconds(delay(random)));
         if (!stop.stop_requested() && !shuttingDown_) {
-            Connect();
+            Enqueue(Command::Connect);
         }
-    });
+    }));
 }
 
 void GobiiConnectionController::HandleRelayMessage(
@@ -783,6 +896,14 @@ void GobiiConnectionController::HandleRelayMessage(
         relay_.Send(std::move(cached));
         return;
     }
+    if (start ==
+        GobiiRequestLedger::StartResult::CapacityExceeded) {
+        relay_.Send(GobiiRelayError(
+            request.requestId,
+            "busy",
+            "request history is at capacity").dump());
+        return;
+    }
     if (operationRunning_.exchange(true)) {
         const std::string response = GobiiRelayError(
             request.requestId,
@@ -792,94 +913,114 @@ void GobiiConnectionController::HandleRelayMessage(
         relay_.Send(response);
         return;
     }
-    operationThread_ = std::jthread(
+    ReplaceThread(operationThread_, std::jthread(
         [this, request = std::move(request)](
             std::stop_token) mutable {
             ExecuteRelayRequest(std::move(request));
-        });
+        }));
 }
 
 void GobiiConnectionController::ExecuteRelayRequest(
     GobiiRelayRequest request
 ) {
+    ScopeExit cleanup([this] {
+        {
+            std::lock_guard lock(mutex_);
+            status_.currentRequestId.clear();
+            status_.currentOperationName.clear();
+        }
+        operationRunning_ = false;
+        Publish();
+    });
     {
         std::lock_guard lock(mutex_);
         status_.currentRequestId = request.requestId;
         status_.currentOperationName =
-            request.payload.value("method", "");
+            request.payload.contains("method") &&
+            request.payload["method"].is_string()
+            ? request.payload["method"].get<std::string>()
+            : "";
     }
     Publish();
     std::string response;
-    bool failed = false;
-    const ConfiguredServerInfo server = server_.Status();
-    std::set<std::string> apps;
-    for (const auto& [name, _] : server.apps) {
-        apps.insert(name);
-    }
-    GobiiLocalMcpClient local(
-        server.port,
-        server.bearerToken,
-        std::move(apps),
-        http_);
-    GobiiLocalMcpResult result =
-        local.Forward(
+    bool failed = true;
+    try {
+        const ConfiguredServerInfo server = server_.Status();
+        std::set<std::string> apps;
+        for (const auto& [name, _] : server.apps) {
+            apps.insert(name);
+        }
+        GobiiLocalMcpClient local(
+            server.host,
+            server.port,
+            server.bearerToken,
+            server.internalControlToken,
+            std::move(apps),
+            http_);
+        GobiiLocalMcpResult result = local.Forward(
             request.app,
             request.payload,
             request.deadline);
-    if (!result.ok) {
-        failed = true;
-        json details = json::object();
-        if (result.code == "deadline_exceeded") {
-            details["completion"] = "unknown";
-        }
-        response = GobiiRelayError(
-            request.requestId,
-            result.code,
-            result.error,
-            std::move(details)).dump();
-    } else {
-        json payload =
-            json::parse(result.response, nullptr, false);
-        std::string artifactError;
-        if (payload.is_discarded() ||
-            !PrepareGobiiMcpImages(
-                payload,
-                request.requestId,
-                *artifacts_,
-                artifactError)) {
-            failed = true;
+        if (!result.ok) {
+            json details = json::object();
+            if (result.code == "deadline_exceeded") {
+                details["completion"] = "unknown";
+            }
             response = GobiiRelayError(
                 request.requestId,
-                artifactError == "artifact_upload_unavailable"
-                    ? artifactError
-                    : "internal_error",
-                artifactError).dump();
+                result.code,
+                result.error,
+                std::move(details)).dump(
+                    -1, ' ', false,
+                    json::error_handler_t::replace);
         } else {
-            response = GobiiRelayResponse(
-                request.requestId,
-                std::move(payload)).dump();
+            json payload =
+                json::parse(result.response, nullptr, false);
+            std::string artifactError;
+            if (payload.is_discarded() ||
+                !PrepareGobiiMcpImages(
+                    payload,
+                    request.requestId,
+                    *artifacts_,
+                    artifactError)) {
+                response = GobiiRelayError(
+                    request.requestId,
+                    artifactError == "artifact_upload_unavailable"
+                        ? artifactError
+                        : "internal_error",
+                    artifactError.empty()
+                        ? "local MCP response was invalid"
+                        : artifactError).dump(
+                            -1, ' ', false,
+                            json::error_handler_t::replace);
+            } else {
+                failed = false;
+                response = GobiiRelayResponse(
+                    request.requestId,
+                    std::move(payload)).dump(
+                        -1, ' ', false,
+                        json::error_handler_t::replace);
+            }
         }
+    } catch (...) {
+        failed = true;
+        response = GobiiRelayError(
+            request.requestId,
+            "internal_error",
+            "desktop operation failed unexpectedly").dump();
     }
     ledger_.Complete(request.requestId, response, failed);
     relay_.Send(response);
-    {
-        std::lock_guard lock(mutex_);
-        status_.currentRequestId.clear();
-        status_.currentOperationName.clear();
-    }
-    operationRunning_ = false;
-    Publish();
 }
 
 void GobiiConnectionController::Pause() {
-    if (refreshThread_.joinable()) {
-        refreshThread_.request_stop();
-        refreshThread_.join();
-    }
-    if (reconnectThread_.joinable()) {
-        reconnectThread_.request_stop();
-        reconnectThread_.join();
-    }
+    Enqueue(Command::Pause);
+}
+
+void GobiiConnectionController::DoPause() {
+    StopThread(lifecycleThread_);
+    StopThread(refreshThread_);
+    StopThread(reconnectThread_);
     relay_.Send(json{{"type", "pause"}}.dump());
     relay_.Stop();
     artifacts_->ClearAuthentication();
@@ -897,6 +1038,10 @@ void GobiiConnectionController::Pause() {
 }
 
 void GobiiConnectionController::Resume() {
+    Enqueue(Command::Resume);
+}
+
+void GobiiConnectionController::DoResume() {
     std::string error;
     AppConfig config = LoadAppConfig(&error);
     if (!error.empty()) {
@@ -908,32 +1053,25 @@ void GobiiConnectionController::Resume() {
         SetState(GobiiConnectionState::Error, error);
         return;
     }
-    Connect();
+    DoConnect();
 }
 
 void GobiiConnectionController::Disconnect() {
-    CancelPairing();
-    if (refreshThread_.joinable()) {
-        refreshThread_.request_stop();
-        refreshThread_.join();
-    }
-    if (reconnectThread_.joinable()) {
-        reconnectThread_.request_stop();
-        reconnectThread_.join();
-    }
+    Enqueue(Command::Disconnect);
+}
+
+void GobiiConnectionController::DoDisconnect() {
+    DoCancelPairing();
+    StopThread(refreshThread_);
+    StopThread(reconnectThread_);
     relay_.Stop();
     artifacts_->ClearAuthentication();
     std::string error;
     AppConfig config = LoadAppConfig(&error);
     if (error.empty() && !config.gobii.deviceId.empty()) {
-        auto token = credentials_->LoadRefreshToken(
-            config.gobii.deviceId, nullptr);
-        if (token && !token->empty()) {
-            GobiiPairingClient pairing(
-                config.gobii.baseUrl, http_);
-            std::string revokeError;
-            pairing.Revoke(*token, revokeError);
-        }
+        // The v1 device API does not currently define a token-revocation
+        // endpoint. Do not send a credential to an invented route; local
+        // disconnect still always deletes the secure credential below.
         credentials_->DeleteRefreshToken(
             config.gobii.deviceId, nullptr);
         config.gobii.deviceId.clear();
@@ -948,7 +1086,6 @@ void GobiiConnectionController::Disconnect() {
         std::lock_guard lock(mutex_);
         status_.deviceId.clear();
         status_.agentId.clear();
-        status_.agentName.clear();
         status_.requiredVersion.clear();
     }
     SetState(
@@ -961,28 +1098,26 @@ void GobiiConnectionController::Disconnect() {
 void GobiiConnectionController::Shutdown() {
     if (shuttingDown_.exchange(true)) return;
     {
+        std::lock_guard lock(commandMutex_);
+        commands_.clear();
+    }
+    commandThread_.request_stop();
+    commandCondition_.notify_all();
+    if (commandThread_.joinable() &&
+        commandThread_.get_id() != std::this_thread::get_id()) {
+        commandThread_.join();
+    }
+    {
         std::lock_guard lock(mutex_);
         status_.pairingCode.clear();
         pairingVerificationUrl_.clear();
     }
     relay_.Stop();
     artifacts_->ClearAuthentication();
-    if (lifecycleThread_.joinable()) {
-        lifecycleThread_.request_stop();
-        lifecycleThread_.join();
-    }
-    if (operationThread_.joinable()) {
-        operationThread_.request_stop();
-        operationThread_.join();
-    }
-    if (refreshThread_.joinable()) {
-        refreshThread_.request_stop();
-        refreshThread_.join();
-    }
-    if (reconnectThread_.joinable()) {
-        reconnectThread_.request_stop();
-        reconnectThread_.join();
-    }
+    StopThread(lifecycleThread_);
+    StopThread(operationThread_);
+    StopThread(refreshThread_);
+    StopThread(reconnectThread_);
 }
 
 } // namespace ComputerCpp

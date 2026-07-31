@@ -5,6 +5,10 @@
 #include <iomanip>
 #include <sstream>
 
+#if defined(COMPUTER_CPP_GOBII_UNSAFE_RELEASE_CONFIGURATION)
+#error "Gobii local-development features are forbidden in release-like builds"
+#endif
+
 namespace ComputerCpp {
 
 const char* GobiiConnectionStateName(GobiiConnectionState state) {
@@ -113,17 +117,50 @@ ParseGobiiTimestamp(const std::string& value) {
     if (input.fail()) {
         return std::nullopt;
     }
-    const std::string suffix = value.substr(19);
-    if (suffix != "Z") {
-        if (suffix.size() < 3 ||
-            suffix.front() != '.' ||
-            suffix.back() != 'Z') {
+    size_t suffixIndex = 19;
+    if (suffixIndex < value.size() && value[suffixIndex] == '.') {
+        const size_t fractionStart = ++suffixIndex;
+        while (suffixIndex < value.size() &&
+               std::isdigit(static_cast<unsigned char>(
+                   value[suffixIndex]))) {
+            ++suffixIndex;
+        }
+        if (suffixIndex == fractionStart) {
             return std::nullopt;
         }
-        for (size_t index = 1; index + 1 < suffix.size(); ++index) {
-            if (suffix[index] < '0' || suffix[index] > '9') {
-                return std::nullopt;
-            }
+    }
+    int offsetSeconds = 0;
+    if (suffixIndex < value.size() && value[suffixIndex] == 'Z') {
+        if (suffixIndex + 1 != value.size()) {
+            return std::nullopt;
+        }
+    } else {
+        if (suffixIndex + 6 != value.size() ||
+            (value[suffixIndex] != '+' &&
+             value[suffixIndex] != '-') ||
+            value[suffixIndex + 3] != ':' ||
+            !std::isdigit(static_cast<unsigned char>(
+                value[suffixIndex + 1])) ||
+            !std::isdigit(static_cast<unsigned char>(
+                value[suffixIndex + 2])) ||
+            !std::isdigit(static_cast<unsigned char>(
+                value[suffixIndex + 4])) ||
+            !std::isdigit(static_cast<unsigned char>(
+                value[suffixIndex + 5]))) {
+            return std::nullopt;
+        }
+        const int hours =
+            (value[suffixIndex + 1] - '0') * 10 +
+            (value[suffixIndex + 2] - '0');
+        const int minutes =
+            (value[suffixIndex + 4] - '0') * 10 +
+            (value[suffixIndex + 5] - '0');
+        if (hours > 23 || minutes > 59) {
+            return std::nullopt;
+        }
+        offsetSeconds = (hours * 60 + minutes) * 60;
+        if (value[suffixIndex] == '-') {
+            offsetSeconds = -offsetSeconds;
         }
     }
 #if defined(_WIN32)
@@ -131,10 +168,8 @@ ParseGobiiTimestamp(const std::string& value) {
 #else
     const time_t utc = timegm(&parsed);
 #endif
-    if (utc < 0) {
-        return std::nullopt;
-    }
-    return std::chrono::system_clock::from_time_t(utc);
+    return std::chrono::system_clock::from_time_t(utc) -
+        std::chrono::seconds(offsetSeconds);
 }
 
 } // namespace ComputerCpp

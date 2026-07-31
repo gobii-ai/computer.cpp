@@ -31,12 +31,23 @@ std::string SanitizeError(const std::string& error) {
 } // namespace
 
 GobiiLocalMcpClient::GobiiLocalMcpClient(
+    std::string bindHost,
     int port,
     std::string bearerToken,
+    std::string internalControlToken,
     std::set<std::string> knownApps,
     std::shared_ptr<GobiiHttpTransport> transport
-) : port_(port),
+) : loopbackHost_(
+        bindHost == "::1" || bindHost == "[::1]" ||
+            bindHost == "::"
+        ? "[::1]"
+        : bindHost == "127.0.0.1" || bindHost == "localhost" ||
+              bindHost == "0.0.0.0"
+            ? "127.0.0.1"
+            : ""),
+    port_(port),
     bearerToken_(std::move(bearerToken)),
+    internalControlToken_(std::move(internalControlToken)),
     knownApps_(std::move(knownApps)),
     transport_(std::move(transport)) {}
 
@@ -46,6 +57,12 @@ GobiiLocalMcpResult GobiiLocalMcpClient::Forward(
     std::chrono::system_clock::time_point deadline
 ) {
     GobiiLocalMcpResult result;
+    if (loopbackHost_.empty()) {
+        result.code = "local_server_unavailable";
+        result.error =
+            "configured server is not reachable through loopback";
+        return result;
+    }
     if (!ValidAppName(app) || !knownApps_.contains(app)) {
         result.code = "unknown_app";
         result.error = "requested app is not configured";
@@ -71,7 +88,7 @@ GobiiLocalMcpResult GobiiLocalMcpClient::Forward(
         return result;
     }
     GobiiHttpRequest request;
-    request.url = "http://127.0.0.1:" +
+    request.url = "http://" + loopbackHost_ + ":" +
         std::to_string(port_) + "/apps/" + app + "/mcp";
     request.headers = {
         {"Authorization", "Bearer " + bearerToken_},
@@ -82,14 +99,18 @@ GobiiLocalMcpResult GobiiLocalMcpClient::Forward(
         {"X-ComputerCpp-Deadline-Ms",
             std::to_string(remaining.count())},
     };
+    if (!internalControlToken_.empty()) {
+        request.headers["X-ComputerCpp-Internal-Token"] =
+            internalControlToken_;
+    }
     request.body = body;
     request.timeoutMs =
         std::max<long>(1, static_cast<long>(remaining.count()));
     request.responseLimit = 8 * 1024 * 1024;
     const GobiiHttpResponse response = transport_->Send(request);
     if (!response.error.empty()) {
-        result.code = response.error.find("timed out") !=
-                std::string::npos
+        result.code = response.errorType ==
+                GobiiHttpResponse::ErrorType::Timeout
             ? "deadline_exceeded"
             : "local_server_unavailable";
         result.error = SanitizeError(response.error);

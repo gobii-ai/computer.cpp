@@ -13,6 +13,51 @@
 
 namespace ComputerCpp {
 
+GobiiRelayMessageAssembler::Result
+GobiiRelayMessageAssembler::Consume(
+    bool text,
+    bool binary,
+    bool control,
+    bool moreFragments,
+    std::uint64_t frameOffset,
+    std::uint64_t frameBytesLeft,
+    std::string_view bytes,
+    std::string& message,
+    std::string& error
+) {
+    message.clear();
+    error.clear();
+    if (control) {
+        return Result::Incomplete;
+    }
+    if (binary) {
+        error = "relay sent an unsupported binary message";
+        return Result::Error;
+    }
+    if (!active_) {
+        if (!text || frameOffset != 0) {
+            error = "relay sent an invalid continuation frame";
+            return Result::Error;
+        }
+        active_ = true;
+    }
+    if (incoming_.size() + bytes.size() >
+        kGobiiRelayFrameLimit) {
+        error = "relay message exceeded size limit";
+        incoming_.clear();
+        active_ = false;
+        return Result::Error;
+    }
+    incoming_.append(bytes);
+    if (frameBytesLeft != 0 || moreFragments) {
+        return Result::Incomplete;
+    }
+    message = std::move(incoming_);
+    incoming_.clear();
+    active_ = false;
+    return Result::Complete;
+}
+
 GobiiRelayClient::GobiiRelayClient() = default;
 
 GobiiRelayClient::~GobiiRelayClient() {
@@ -73,6 +118,7 @@ void GobiiRelayClient::Stop() {
     std::lock_guard lock(mutex_);
     running_ = false;
     outgoing_.clear();
+    options_ = {};
 }
 
 bool GobiiRelayClient::Running() const {
@@ -86,12 +132,39 @@ void GobiiRelayClient::Run(std::stop_token stop) {
     {
         std::lock_guard lock(mutex_);
         options = options_;
+        options_.accessToken.clear();
     }
     CurlHandle curl;
+    if (!curl.valid()) {
+        DisconnectHandler disconnect;
+        {
+            std::lock_guard lock(mutex_);
+            running_ = false;
+            disconnect = onDisconnect_;
+        }
+        if (!stop.stop_requested() && disconnect) {
+            disconnect("could not initialize relay transport");
+        }
+        return;
+    }
     CurlHeaders headers;
-    headers.append("Authorization: Bearer " + options.accessToken);
-    headers.append(
-        "Sec-WebSocket-Protocol: gobii-computer-relay.v1");
+    if (!headers.append(
+            "Authorization: Bearer " + options.accessToken) ||
+        !headers.append(
+            "Sec-WebSocket-Protocol: gobii-computer-relay.v1")) {
+        DisconnectHandler disconnect;
+        {
+            std::lock_guard lock(mutex_);
+            running_ = false;
+            disconnect = onDisconnect_;
+        }
+        options.accessToken.clear();
+        if (!stop.stop_requested() && disconnect) {
+            disconnect("could not prepare relay headers");
+        }
+        return;
+    }
+    options.accessToken.clear();
     curl_easy_setopt(curl.get(), CURLOPT_URL, options.url.c_str());
     curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
     curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, options.userAgent.c_str());
@@ -109,7 +182,7 @@ void GobiiRelayClient::Run(std::stop_token stop) {
         auto lastTraffic = std::chrono::steady_clock::now();
         auto nextPing =
             lastTraffic + std::chrono::seconds(25);
-        std::string incoming;
+        GobiiRelayMessageAssembler assembler;
         std::array<char, 16384> buffer{};
         while (!stop.stop_requested()) {
             std::string outgoing;
@@ -152,24 +225,33 @@ void GobiiRelayClient::Run(std::stop_token stop) {
                     heartbeat = onHeartbeat_;
                 }
                 if (heartbeat) heartbeat();
-                if ((meta->flags & CURLWS_TEXT) != 0 ||
-                    !incoming.empty()) {
-                    if (incoming.size() + received >
-                        kGobiiRelayFrameLimit) {
-                        disconnectError =
-                            "relay frame exceeded size limit";
-                        break;
+                std::string message;
+                std::string assemblyError;
+                const int controlFlags =
+                    CURLWS_CLOSE | CURLWS_PING | CURLWS_PONG;
+                const auto assembly = assembler.Consume(
+                    (meta->flags & CURLWS_TEXT) != 0,
+                    (meta->flags & CURLWS_BINARY) != 0,
+                    (meta->flags & controlFlags) != 0,
+                    (meta->flags & CURLWS_CONT) != 0,
+                    static_cast<std::uint64_t>(meta->offset),
+                    static_cast<std::uint64_t>(meta->bytesleft),
+                    std::string_view(buffer.data(), received),
+                    message,
+                    assemblyError);
+                if (assembly ==
+                    GobiiRelayMessageAssembler::Result::Error) {
+                    disconnectError = std::move(assemblyError);
+                    break;
+                }
+                if (assembly ==
+                    GobiiRelayMessageAssembler::Result::Complete) {
+                    MessageHandler handler;
+                    {
+                        std::lock_guard lock(mutex_);
+                        handler = onMessage_;
                     }
-                    incoming.append(buffer.data(), received);
-                    if (meta->bytesleft == 0) {
-                        MessageHandler handler;
-                        {
-                            std::lock_guard lock(mutex_);
-                            handler = onMessage_;
-                        }
-                        if (handler) handler(incoming);
-                        incoming.clear();
-                    }
+                    if (handler) handler(message);
                 }
             } else if (code != CURLE_AGAIN) {
                 disconnectError =
@@ -197,7 +279,7 @@ void GobiiRelayClient::Run(std::stop_token stop) {
             condition_.wait_for(
                 lock,
                 stop,
-                std::chrono::milliseconds(50),
+                std::chrono::milliseconds(250),
                 [this] { return !outgoing_.empty(); });
         }
     }

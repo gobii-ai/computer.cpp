@@ -16,9 +16,16 @@ struct GobiiHttpRequest {
 };
 
 struct GobiiHttpResponse {
+    enum class ErrorType {
+        None,
+        Timeout,
+        Transport,
+    };
+
     long status = 0;
     std::string body;
     std::string error;
+    ErrorType errorType = ErrorType::None;
 };
 
 class GobiiHttpTransport {

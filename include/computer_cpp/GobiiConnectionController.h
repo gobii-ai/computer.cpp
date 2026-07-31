@@ -9,6 +9,8 @@
 #include "computer_cpp/GobiiTypes.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -49,6 +51,26 @@ public:
     void Shutdown();
 
 private:
+    enum class Command {
+        StartPairing,
+        CancelPairing,
+        Connect,
+        Pause,
+        Resume,
+        Disconnect,
+    };
+
+    void Enqueue(Command command);
+    void CommandWorker(std::stop_token stop);
+    void DoStartPairing();
+    void DoCancelPairing();
+    void DoConnect();
+    void DoPause();
+    void DoResume();
+    void DoDisconnect();
+    void ReplaceThread(std::jthread& slot, std::jthread next);
+    void StopThread(std::jthread& slot);
+    void RequestThreadStop(std::jthread& slot);
     void PairingWorker(std::stop_token stop);
     void ConnectWorker(
         std::stop_token stop,
@@ -77,6 +99,11 @@ private:
     std::string pairingVerificationUrl_;
     GobiiRequestLedger ledger_;
     GobiiRelayClient relay_;
+    std::mutex commandMutex_;
+    std::condition_variable_any commandCondition_;
+    std::deque<Command> commands_;
+    std::jthread commandThread_;
+    std::mutex threadMutex_;
     std::jthread lifecycleThread_;
     std::jthread operationThread_;
     std::jthread refreshThread_;

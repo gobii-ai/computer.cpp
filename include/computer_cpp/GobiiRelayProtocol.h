@@ -42,6 +42,7 @@ public:
         Started,
         RunningDuplicate,
         CompletedDuplicate,
+        CapacityExceeded,
     };
 
     struct Entry {

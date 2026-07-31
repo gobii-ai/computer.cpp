@@ -39,6 +39,7 @@ public:
         CurlHandle curl;
         if (!curl.valid()) {
             response.error = "could not initialize HTTP transport";
+            response.errorType = GobiiHttpResponse::ErrorType::Transport;
             return response;
         }
         ResponseBuffer buffer;
@@ -47,6 +48,8 @@ public:
         for (const auto& [name, value] : request.headers) {
             if (!headers.append(name + ": " + value)) {
                 response.error = "could not prepare HTTP headers";
+                response.errorType =
+                    GobiiHttpResponse::ErrorType::Transport;
                 return response;
             }
         }
@@ -69,6 +72,10 @@ public:
             response.error = buffer.exceeded
                 ? "HTTP response exceeded size limit"
                 : curl_easy_strerror(code);
+            response.errorType =
+                code == CURLE_OPERATION_TIMEDOUT
+                ? GobiiHttpResponse::ErrorType::Timeout
+                : GobiiHttpResponse::ErrorType::Transport;
             return response;
         }
         curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response.status);

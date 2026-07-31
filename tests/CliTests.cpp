@@ -2317,10 +2317,13 @@ void TestConfiguredMultiAppServer() {
 
     ScopedEnvVar logFileEnv("COMPUTER_CPP_LOG_FILE");
     ScopedEnvVar logFlagEnv("COMPUTER_CPP_LOG");
+    ScopedEnvVar internalControlTokenEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN");
     const std::filesystem::path serverLog =
         ComputerCpp::Tests::MakeTempHome() / "configured-server.log";
     logFileEnv.Set(serverLog.string());
     logFlagEnv.Set("1");
+    internalControlTokenEnv.Set("relay-only-test-token");
 
     const pid_t serverPid = SpawnSupervisedTestProcess({
         executable.string(),
@@ -2348,6 +2351,35 @@ void TestConfiguredMultiAppServer() {
     assert(healthJson["apps"]["primary"]["status"] == "ready");
     assert(healthJson["apps"]["secondary.app_name"]["status"] == "ready");
     assert(healthJson["apps"]["invalid"]["status"] == "invalid");
+
+    const std::string ping =
+        R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{}})";
+    const auto ordinaryControlHints = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        ping,
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"X-ComputerCpp-Control-Queue", "reject"},
+            {"X-ComputerCpp-Deadline-Ms", "invalid"},
+        });
+    assert(ordinaryControlHints.status == 200);
+    const auto authenticatedControlHints = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        ping,
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"X-ComputerCpp-Internal-Token",
+                "relay-only-test-token"},
+            {"X-ComputerCpp-Control-Queue", "reject"},
+            {"X-ComputerCpp-Deadline-Ms", "invalid"},
+        });
+    assert(authenticatedControlHints.status == 400);
 
     const auto unauthorized = SendTestHttpRequest(
         config.server.port,
@@ -2609,7 +2641,8 @@ void TestConfiguredMultiAppServer() {
         "ready");
     const auto& primaryStructured =
         primaryMcpResultJson["result"]["structuredContent"];
-    assert(!primaryStructured.contains("image"));
+    assert(primaryStructured["image"] ==
+        "[redacted local path]");
     assert(!primaryStructured["nested"].contains(
         "__ac_image_path"));
     assert(primaryStructured["nested"]["safe"] == "visible");

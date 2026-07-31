@@ -563,6 +563,7 @@ void TestTrayServerState() {
     configuredState.port = 8790;
     configuredState.url = "http://127.0.0.1:8790";
     configuredState.startedAt = "2026-07-30T00:00:00Z";
+    configuredState.internalControlToken = "relay-only-token";
     assert(ComputerCpp::SaveTrayAppServerState(configuredState, path, &error));
     auto configuredLoaded =
         ComputerCpp::LoadTrayAppServerState(path, &error);
@@ -570,6 +571,8 @@ void TestTrayServerState() {
     assert(configuredLoaded->version == 2);
     assert(configuredLoaded->configured);
     assert(configuredLoaded->appPath.empty());
+    assert(configuredLoaded->internalControlToken ==
+        "relay-only-token");
     assert(ComputerCpp::RemoveTrayAppServerState(path, &error));
 
     assert(ComputerCpp::SaveTrayAppServerState(state, path, &error));

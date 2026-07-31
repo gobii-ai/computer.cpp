@@ -117,6 +117,7 @@ private:
     ManagedServer server_;
     std::map<std::string, ConfiguredAppStatus> configuredApps_;
     std::string serverAuthToken_;
+    std::string serverInternalControlToken_;
     bool serverRestartRequired_ = false;
     std::vector<std::string> pendingServerNotifications_;
     bool serverNotificationScheduled_ = false;

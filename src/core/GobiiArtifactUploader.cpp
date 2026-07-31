@@ -108,10 +108,9 @@ public:
 
         std::string boundary =
             "----------------computer-cpp-gobii-artifact";
-        const std::string byteString(
-            reinterpret_cast<const char*>(bytes.data()),
-            bytes.size());
-        while (byteString.find(boundary) != std::string::npos) {
+        const std::string_view byteView(
+            reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        while (byteView.find(boundary) != std::string_view::npos) {
             boundary.push_back('x');
         }
         const std::string extension =
@@ -122,7 +121,7 @@ public:
         body += "Content-Disposition: form-data; name=\"file\"; "
             "filename=\"artifact" + extension + "\"\r\n";
         body += "Content-Type: " + mimeType + "\r\n\r\n";
-        body.append(byteString);
+        body.append(byteView);
         body += "\r\n--" + boundary + "--\r\n";
 
         GobiiHttpRequest request;
@@ -167,7 +166,7 @@ public:
             !IsSha256(payload["sha256"].get_ref<
                 const std::string&>()) ||
             payload["sha256"].get<std::string>() !=
-                Sha256Hex(byteString) ||
+                Sha256Hex(byteView) ||
             !payload.contains("expires_at") ||
             !payload["expires_at"].is_string() ||
             payload["expires_at"].get_ref<
@@ -279,9 +278,13 @@ bool PrepareGobiiMcpImages(
                 requestId, bytes, mime, reference, error)) {
             return false;
         }
+        // This private pre-MCP marker is resolved by Gobii into
+        // standard image content before the CallToolResult is validated.
         item = {
+            {"type", "gobii_artifact"},
             {"_gobii_artifact", {
                 {"id", reference.id},
+                {"mime_type", reference.mimeType},
             }},
         };
     }

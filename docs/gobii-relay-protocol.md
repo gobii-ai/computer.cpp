@@ -155,9 +155,16 @@ executed twice. Socket loss does not cancel or replay an in-flight action.
 ## Images
 
 Ordinary local MCP clients receive standard MCP image content. Relay delivery
-must replace image bodies with authenticated Gobii artifact references.
-The Gobii connection is available in supported production builds, but relay
-responses containing images fail with `artifact_upload_unavailable` until the
-authenticated upload contract is implemented. Development builds may retain
-inline images only when explicitly enabled and when their encoded body is at
-most 128 KiB. Release builds reject that development option.
+replaces image bodies with authenticated Gobii artifact references. Before
+the platform validates the final MCP `CallToolResult`, ComputerCpp sends this
+private transport marker:
+
+```json
+{"type":"gobii_artifact","_gobii_artifact":{"id":"artifact-id","mime_type":"image/png"}}
+```
+
+Gobii resolves the marker to standard MCP image content; it is not itself an
+MCP content type and must never be forwarded to an MCP consumer. Development
+builds may retain inline images only when explicitly enabled and when their
+encoded body is at most 128 KiB. Release-like builds reject that development
+option.

@@ -44,7 +44,6 @@ struct GobiiTokenResponse {
     std::chrono::system_clock::time_point relayAccessTokenExpiresAt;
     std::string relayUrl;
     std::string agentId;
-    std::string agentName;
 };
 
 enum class GobiiPairingPollState {
@@ -87,8 +86,6 @@ public:
         GobiiTokenResponse& token,
         std::string& error,
         GobiiRefreshFailure* failure = nullptr);
-    bool Revoke(const std::string& refreshToken, std::string& error);
-
 private:
     std::string Endpoint(const std::string& path) const;
 
