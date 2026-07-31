@@ -72,7 +72,8 @@ GobiiConnectionDialog::GobiiConnectionDialog(
     auto* root = new wxBoxSizer(wxVERTICAL);
 
     auto* header = new wxBoxSizer(wxHORIZONTAL);
-    statusBadge_ = new wxStaticText(this, wxID_ANY, "●");
+    statusBadge_ = new wxStaticText(
+        this, wxID_ANY, wxString::FromUTF8("●"));
     statusBadge_->SetFont(LargerFont(statusBadge_->GetFont(), 13));
     header->Add(statusBadge_, 0, wxRIGHT | wxALIGN_TOP, 14);
 
@@ -118,7 +119,9 @@ GobiiConnectionDialog::GobiiConnectionDialog(
     body->Add(progressRow, 0, wxTOP | wxEXPAND, 14);
 
     permissionsReady_ = new wxStaticText(
-        this, wxID_ANY, "✓  Permissions ready");
+        this,
+        wxID_ANY,
+        wxString::FromUTF8("✓  Permissions ready"));
     permissionsReady_->SetForegroundColour(
         ToneColour(GobiiPresentationTone::Success));
     body->Add(permissionsReady_, 0, wxTOP | wxEXPAND, 12);
@@ -141,7 +144,8 @@ GobiiConnectionDialog::GobiiConnectionDialog(
         name->SetForegroundColour(
             wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
         detailsGrid->Add(name, 0, wxALIGN_TOP);
-        value = new wxStaticText(details_->GetPane(), wxID_ANY, "—");
+        value = new wxStaticText(
+            details_->GetPane(), wxID_ANY, wxString::FromUTF8("—"));
         detailsGrid->Add(value, 1, wxEXPAND);
     };
     addDetail("Installed version", version_);
@@ -164,7 +168,7 @@ GobiiConnectionDialog::GobiiConnectionDialog(
     disconnect_ = new wxHyperlinkCtrl(
         this,
         wxID_ANY,
-        "Disconnect this computer…",
+        wxString::FromUTF8("Disconnect this computer…"),
         "disconnect");
     const wxColour destructive(205, 67, 67);
     disconnect_->SetNormalColour(destructive);

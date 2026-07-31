@@ -708,7 +708,7 @@ void TestStatusPresentationAndDiagnostics() {
     status.lastHeartbeatAt = now - std::chrono::seconds(2);
     view = PresentGobiiConnection(status, true, true, now);
     assert(view.title == "Connected");
-    assert(view.identityTitle == "This Mac");
+    assert(view.identityTitle == "This computer");
     assert(view.identityDetail.find("Active just now") !=
         std::string::npos);
     assert(view.primaryAction == GobiiDialogAction::Pause);

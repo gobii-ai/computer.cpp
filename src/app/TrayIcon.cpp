@@ -3273,9 +3273,9 @@ private:
         SetPermissionStatus(screenStatus_, status.screenCapture);
 
         const bool ready = status.accessibility && status.screenCapture;
-        summary_->SetLabel(ready
+        summary_->SetLabel(wxString::FromUTF8(ready
             ? "ComputerCpp is ready — all required permissions are granted."
-            : "ComputerCpp needs attention — complete each missing permission below.");
+            : "ComputerCpp needs attention — complete each missing permission below."));
         summary_->SetForegroundColour(
             ready ? wxColour(52, 150, 75) : wxColour(190, 110, 30));
         summary_->Wrap(FromDIP(620));
@@ -3799,10 +3799,10 @@ wxMenu* TrayIcon::CreatePopupMenu() {
                 break;
             case GobiiConnectionState::Pairing:
             case GobiiConnectionState::PairingPending:
-                label += "Waiting for approval…";
+                label += wxString::FromUTF8("Waiting for approval…");
                 break;
             case GobiiConnectionState::Connecting:
-                label += "Connecting…";
+                label += wxString::FromUTF8("Connecting…");
                 break;
             case GobiiConnectionState::PermissionsRequired:
                 label += "Permissions required";
@@ -3829,7 +3829,7 @@ wxMenu* TrayIcon::CreatePopupMenu() {
             status.state == GobiiConnectionState::Error) {
             menu->Append(
                 ID_GOBII_CONNECT,
-                "Connect to Gobii…");
+                wxString::FromUTF8("Connect to Gobii…"));
         } else if (status.state ==
             GobiiConnectionState::Paused) {
             menu->Append(
@@ -3845,12 +3845,12 @@ wxMenu* TrayIcon::CreatePopupMenu() {
             status.state == GobiiConnectionState::Error) {
             menu->Append(
                 ID_GOBII_STATUS,
-                "Gobii Connection…");
+                wxString::FromUTF8("Gobii Connection…"));
         }
         if (!status.deviceId.empty()) {
             menu->Append(
                 ID_GOBII_MANAGE,
-                "Manage in Gobii…");
+                wxString::FromUTF8("Manage in Gobii…"));
             menu->Append(
                 ID_GOBII_DISCONNECT,
                 "Disconnect from Gobii");
@@ -3864,10 +3864,10 @@ wxMenu* TrayIcon::CreatePopupMenu() {
             serverStatus = "Server: running on :" + std::to_string(server_.port);
             break;
         case ServerStatus::Starting:
-            serverStatus = "Server: starting…";
+            serverStatus = wxString::FromUTF8("Server: starting…");
             break;
         case ServerStatus::Stopping:
-            serverStatus = "Server: stopping…";
+            serverStatus = wxString::FromUTF8("Server: stopping…");
             break;
         case ServerStatus::Failed:
             serverStatus = "Server: failed";
@@ -3907,7 +3907,8 @@ wxMenu* TrayIcon::CreatePopupMenu() {
             app.status == "ready" ? "Ready" :
             app.status == "invalid" ? "Invalid" :
             app.status == "restart_required" ? "Restart Required" : "Configured";
-        wxString label = icon + app.displayName + " — " + status;
+        wxString label = wxString::FromUTF8(
+            icon + app.displayName + " — " + status);
         if (app.status == "invalid" && !app.error.empty()) {
             std::string detail = app.error;
             std::replace(detail.begin(), detail.end(), '\n', ' ');
@@ -3915,7 +3916,7 @@ wxMenu* TrayIcon::CreatePopupMenu() {
                 detail.resize(117);
                 detail += "...";
             }
-            label += ": " + detail;
+            label += wxString::FromUTF8(": " + detail);
         }
         wxMenuItem* item = menu->Append(wxID_ANY, label);
         item->Enable(false);
@@ -4648,7 +4649,10 @@ void TrayIcon::ShowPendingServerNotifications() {
         }
     }
     serverNotificationShowing_ = true;
-    wxMessageBox(message.str(), "ComputerCpp Server", wxOK | wxICON_ERROR);
+    wxMessageBox(
+        wxString::FromUTF8(message.str()),
+        "ComputerCpp Server",
+        wxOK | wxICON_ERROR);
     serverNotificationShowing_ = false;
     if (!pendingServerNotifications_.empty()) {
         serverNotificationScheduled_ = true;

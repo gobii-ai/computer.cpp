@@ -13,7 +13,7 @@ std::string ActiveDescription(
     std::chrono::system_clock::time_point now
 ) {
     if (!status.lastHeartbeatAt) {
-        return "Connected to This Mac";
+        return "Connected to this computer";
     }
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         now - *status.lastHeartbeatAt);
@@ -21,15 +21,15 @@ std::string ActiveDescription(
         elapsed = std::chrono::seconds::zero();
     }
     if (elapsed < std::chrono::seconds(10)) {
-        return "Connected to This Mac · Active just now";
+        return "Connected to this computer · Active just now";
     }
     if (elapsed < std::chrono::minutes(1)) {
-        return "Connected to This Mac · Active " +
+        return "Connected to this computer · Active " +
             std::to_string(elapsed.count()) + " seconds ago";
     }
     const auto minutes =
         std::chrono::duration_cast<std::chrono::minutes>(elapsed).count();
-    return "Connected to This Mac · Active " +
+    return "Connected to this computer · Active " +
         std::to_string(minutes) +
         (minutes == 1 ? " minute ago" : " minutes ago");
 }
@@ -163,7 +163,7 @@ GobiiConnectionPresentation PresentGobiiConnection(
             if (status.deviceId.empty()) {
                 presentation.title = "Not connected";
                 presentation.description =
-                    "Connect this Mac to let a Gobii agent securely view "
+                    "Connect this computer to let a Gobii agent securely view "
                     "and control it.";
                 presentation.primaryLabel = "Connect to Gobii…";
                 presentation.primaryAction =
@@ -172,7 +172,7 @@ GobiiConnectionPresentation PresentGobiiConnection(
                 SetPairedActions(presentation, status, true);
                 presentation.title = "Ready to connect";
                 presentation.description =
-                    "This Mac is paired with Gobii but is not connected.";
+                    "This computer is paired with Gobii but is not connected.";
                 presentation.primaryLabel = "Connect";
                 presentation.primaryAction = GobiiDialogAction::Connect;
             }
@@ -207,7 +207,7 @@ GobiiConnectionPresentation PresentGobiiConnection(
             presentation.tone = GobiiPresentationTone::Progress;
             presentation.title = "Connecting to Gobii…";
             presentation.description =
-                "Establishing a secure connection for this Mac.";
+                "Establishing a secure connection for this computer.";
             presentation.progressText = "Connecting…";
             presentation.busy = true;
             break;
@@ -216,9 +216,9 @@ GobiiConnectionPresentation PresentGobiiConnection(
             presentation.tone = GobiiPresentationTone::Success;
             presentation.title = "Connected";
             presentation.description =
-                "Gobii can currently view and control this Mac.";
+                "Gobii can currently view and control this computer.";
             presentation.identityTitle = status.deviceName.empty()
-                ? "This Mac"
+                ? "This computer"
                 : status.deviceName;
             presentation.identityDetail = ActiveDescription(status, now);
             presentation.primaryLabel = "Pause agent access";
@@ -229,10 +229,10 @@ GobiiConnectionPresentation PresentGobiiConnection(
             presentation.tone = GobiiPresentationTone::Warning;
             presentation.title = "Agent access is paused";
             presentation.description =
-                "Gobii cannot view or control this Mac until you resume "
+                "Gobii cannot view or control this computer until you resume "
                 "access.";
             presentation.identityTitle = status.deviceName.empty()
-                ? "This Mac"
+                ? "This computer"
                 : status.deviceName;
             presentation.identityDetail = "Paired with Gobii";
             presentation.primaryLabel = "Resume agent access";
@@ -258,7 +258,7 @@ GobiiConnectionPresentation PresentGobiiConnection(
             presentation.tone = GobiiPresentationTone::Warning;
             presentation.title = "Sign in again";
             presentation.description =
-                "This Mac’s Gobii authorization has expired.";
+                "This computer’s Gobii authorization has expired.";
             presentation.primaryLabel = "Connect again";
             presentation.primaryAction =
                 GobiiDialogAction::StartPairing;
