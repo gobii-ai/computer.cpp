@@ -6,7 +6,8 @@
       "name": "curl",
       "default-features": true,
       "features": [
-        "ssl"
+        "ssl",
+        "websockets"
       ]
     },
     "nlohmann-json",

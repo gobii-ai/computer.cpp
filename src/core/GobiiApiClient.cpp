@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <curl/curl.h>
 #include <memory>
+#include <string_view>
 
 namespace ComputerCpp {
 namespace {
@@ -105,6 +106,23 @@ bool GobiiWebSocketRuntimeSupported(std::string* error) {
     if (!info) {
         if (error) {
             *error = "could not inspect installed libcurl";
+        }
+        return false;
+    }
+    bool hasWs = false;
+    bool hasWss = false;
+    if (info->protocols) {
+        for (const char* const* protocol = info->protocols;
+             *protocol;
+             ++protocol) {
+            hasWs = hasWs || std::string_view(*protocol) == "ws";
+            hasWss = hasWss || std::string_view(*protocol) == "wss";
+        }
+    }
+    if (!hasWs || !hasWss) {
+        if (error) {
+            *error =
+                "installed libcurl does not enable ws/wss protocols";
         }
         return false;
     }
