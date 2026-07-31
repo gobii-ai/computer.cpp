@@ -253,7 +253,11 @@ std::filesystem::path ComputerCppCliHelperPath() {
             return bundled;
         }
     }
-    return executablePath.parent_path() / "computer.cpp";
+    std::filesystem::path cliPath = executablePath.parent_path() / "computer.cpp";
+#if defined(_WIN32)
+    cliPath += ".exe";
+#endif
+    return cliPath;
 }
 
 std::string NormalizeBindHost(std::string host) {
