@@ -1126,11 +1126,15 @@ local function app_schema(app)
   local commands = {}
   for _, name in ipairs(app.command_order or {}) do
     local spec = app.commands[name] or {}
-    commands[name] = {
+    local command_schema = {
       description = spec.description or "",
       input = normalize_schema(spec.input or {}, true),
-      output = normalize_schema(spec.output or {}, false),
     }
+    if spec.output ~= nil then
+      command_schema.output =
+        normalize_schema(spec.output, false)
+    end
+    commands[name] = command_schema
   end
   local schema = {
     name = app.name or "",
@@ -1218,6 +1222,53 @@ local function validate_value(schema, value, path, apply_defaults)
       end
     end
     return true, value
+  end
+  return true, value
+end
+
+local function validate_mcp_result(value, path)
+  path = path or "result"
+  if type(value) ~= "table" or value.__ac_mcp_result ~= true then
+    return false, path .. " must be an MCP result"
+  end
+  local allowed = {
+    __ac_mcp_result = true,
+    text = true,
+    structured = true,
+    images = true,
+  }
+  for name, _ in pairs(value) do
+    if not allowed[name] then
+      return false, path .. "." .. tostring(name) .. " is not allowed"
+    end
+  end
+  if type(value.text) ~= "string" then
+    return false, path .. ".text must be a string"
+  end
+  if type(value.structured) ~= "table" or is_array(value.structured) then
+    return false, path .. ".structured must be an object"
+  end
+  if type(value.images) ~= "table" or
+      (next(value.images) ~= nil and not is_array(value.images)) then
+    return false, path .. ".images must be an array"
+  end
+  for index, image in ipairs(value.images) do
+    if type(image) ~= "table" then
+      return false, path .. ".images[" .. tostring(index) .. "] must be an object"
+    end
+    for name, _ in pairs(image) do
+      if name ~= "path" and name ~= "mime_type" then
+        return false, path .. ".images[" .. tostring(index) .. "]." ..
+          tostring(name) .. " is not allowed"
+      end
+    end
+    if type(image.path) ~= "string" or image.path == "" then
+      return false, path .. ".images[" .. tostring(index) .. "].path must be a non-empty string"
+    end
+    if image.mime_type ~= "image/png" and image.mime_type ~= "image/jpeg" then
+      return false, path .. ".images[" .. tostring(index) ..
+        "].mime_type must be image/png or image/jpeg"
+    end
   end
   return true, value
 end
@@ -1610,8 +1661,13 @@ local function handle_app_mode(app)
     }
   end
 
-  local output_schema = normalize_schema(command.output or {}, false)
-  local output_ok, output_err = validate_value(output_schema, result, "result", false)
+  local output_ok, output_err
+  if type(result) == "table" and result.__ac_mcp_result == true then
+    output_ok, output_err = validate_mcp_result(result, "result")
+  else
+    local output_schema = normalize_schema(command.output or {}, false)
+    output_ok, output_err = validate_value(output_schema, result, "result", false)
+  end
   if not output_ok then
     log_line("app", "invalid output", {
       command = command_name,
@@ -2265,6 +2321,17 @@ function ac.tool_result.invalid(message, code)
   return ac.tool_result.error({ code = code or "invalid_input", message = message or "invalid input" })
 end
 
+ac.mcp = {}
+function ac.mcp.result(spec)
+  spec = spec or {}
+  return {
+    __ac_mcp_result = true,
+    text = tostring(spec.text or ""),
+    structured = spec.structured or {},
+    images = spec.images or {},
+  }
+end
+
 ac.tool = {}
 function ac.tool.define(name, spec)
   if type(name) ~= "string" or name == "" then
@@ -2629,6 +2696,15 @@ function ac.tools.activate_app(spec)
       pollMs = option_value(spec, "focusPollMs", "focus_poll_ms", 200),
       allowError = true,
     })
+    for _, step in ipairs(focused.data and focused.data.results or {}) do
+      if step.ok ~= true then
+        return ac.tool_result.error({
+          code = step.code or "app_launch_failed",
+          message = step.error or
+            ("could not launch or activate " .. tostring(args.app)),
+        })
+      end
+    end
     local result = action_tool_result(spec, store, {
       app = args.app,
       focused = response_data(focused),

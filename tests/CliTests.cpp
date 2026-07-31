@@ -2317,10 +2317,13 @@ void TestConfiguredMultiAppServer() {
 
     ScopedEnvVar logFileEnv("COMPUTER_CPP_LOG_FILE");
     ScopedEnvVar logFlagEnv("COMPUTER_CPP_LOG");
+    ScopedEnvVar internalControlTokenEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN");
     const std::filesystem::path serverLog =
         ComputerCpp::Tests::MakeTempHome() / "configured-server.log";
     logFileEnv.Set(serverLog.string());
     logFlagEnv.Set("1");
+    internalControlTokenEnv.Set("relay-only-test-token");
 
     const pid_t serverPid = SpawnSupervisedTestProcess({
         executable.string(),
@@ -2348,6 +2351,35 @@ void TestConfiguredMultiAppServer() {
     assert(healthJson["apps"]["primary"]["status"] == "ready");
     assert(healthJson["apps"]["secondary.app_name"]["status"] == "ready");
     assert(healthJson["apps"]["invalid"]["status"] == "invalid");
+
+    const std::string ping =
+        R"({"jsonrpc":"2.0","id":77,"method":"ping","params":{}})";
+    const auto ordinaryControlHints = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        ping,
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"X-ComputerCpp-Control-Queue", "reject"},
+            {"X-ComputerCpp-Deadline-Ms", "invalid"},
+        });
+    assert(ordinaryControlHints.status == 200);
+    const auto authenticatedControlHints = SendTestHttpRequest(
+        config.server.port,
+        config.server.authToken,
+        "POST",
+        "/mcp",
+        ping,
+        {
+            {"Accept", "application/json, text/event-stream"},
+            {"X-ComputerCpp-Internal-Token",
+                "relay-only-test-token"},
+            {"X-ComputerCpp-Control-Queue", "reject"},
+            {"X-ComputerCpp-Deadline-Ms", "invalid"},
+        });
+    assert(authenticatedControlHints.status == 400);
 
     const auto unauthorized = SendTestHttpRequest(
         config.server.port,
@@ -2535,16 +2567,26 @@ void TestConfiguredMultiAppServer() {
         nlohmann::json::parse(aggregateTools.body);
     std::set<std::string> aggregateToolNames;
     std::string undescribedToolDescription;
+    bool echoHasOutputSchema = false;
+    bool mcpResultHasOutputSchema = false;
     for (const auto& tool :
          aggregateToolsJson["result"]["tools"]) {
         const std::string name = tool["name"].get<std::string>();
         aggregateToolNames.insert(name);
+        if (name == "primary__echo") {
+            echoHasOutputSchema = tool.contains("outputSchema");
+        } else if (name == "primary__mcp_result") {
+            mcpResultHasOutputSchema =
+                tool.contains("outputSchema");
+        }
         if (name == "secondary.app_uname__undescribed") {
             undescribedToolDescription =
                 tool["description"].get<std::string>();
         }
     }
     assert(aggregateToolNames.contains("primary__echo"));
+    assert(echoHasOutputSchema);
+    assert(!mcpResultHasOutputSchema);
     assert(aggregateToolNames.contains("secondary.app_uname__echo"));
     assert(undescribedToolDescription ==
         "[Secondary] secondary.app_name command: undescribed");
@@ -2575,6 +2617,35 @@ void TestConfiguredMultiAppServer() {
     assert(primaryMcpEcho.status == 200);
     assert(nlohmann::json::parse(primaryMcpEcho.body)
         ["result"]["structuredContent"]["message"] == "from primary");
+    const auto primaryMcpResult = aggregateMcp({
+        {"jsonrpc", "2.0"},
+        {"id", aggregateMcpId++},
+        {"method", "tools/call"},
+        {"params", {
+            {"name", "primary__mcp_result"},
+            {"arguments", nlohmann::json::object()},
+        }},
+    });
+    const nlohmann::json primaryMcpResultJson =
+        nlohmann::json::parse(primaryMcpResult.body);
+    if (!primaryMcpResultJson.contains("result") ||
+        !primaryMcpResultJson["result"].is_object() ||
+        primaryMcpResultJson["result"].value("isError", true)) {
+        std::cerr << "Unexpected MCP result response: "
+                  << primaryMcpResult.body << '\n';
+    }
+    assert(primaryMcpResultJson["result"]["isError"] == false);
+    assert(primaryMcpResultJson["result"]["content"][0]["text"] ==
+        "MCP result ready");
+    assert(primaryMcpResultJson["result"]["structuredContent"]["status"] ==
+        "ready");
+    const auto& primaryStructured =
+        primaryMcpResultJson["result"]["structuredContent"];
+    assert(primaryStructured["image"] ==
+        "[redacted local path]");
+    assert(!primaryStructured["nested"].contains(
+        "__ac_image_path"));
+    assert(primaryStructured["nested"]["safe"] == "visible");
     const auto secondaryMcpEcho = aggregateMcp({
         {"jsonrpc", "2.0"},
         {"id", aggregateMcpId++},
@@ -2935,6 +3006,32 @@ void TestConfigCliCanonicalFile() {
     assert(config.profiles["vision"].params["presence_penalty"] == 0.1);
     assert(config.profiles["vision"].params["parallel_tool_calls"] == true);
     assert(config.profiles["vision"].openRouterProvider["allow_fallbacks"] == false);
+
+    auto gobii = RunConfigCommand({
+        "config",
+        "set-gobii",
+        "--base-url",
+#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
+        "http://127.0.0.1:8001"
+#else
+        "https://gobii.example.test"
+#endif
+    });
+    assert(gobii.exitCode == 0);
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+#if defined(COMPUTER_CPP_GOBII_LOCAL_DEVELOPMENT)
+    assert(config.gobii.baseUrl == "http://127.0.0.1:8001");
+#else
+    assert(config.gobii.baseUrl == "https://gobii.example.test");
+#endif
+    auto insecureRemoteGobii = RunConfigCommand({
+        "config",
+        "set-gobii",
+        "--base-url",
+        "http://gobii.example.test:8001"
+    });
+    assert(insecureRemoteGobii.exitCode != 0);
 
     auto keyProvider = RunConfigCommand({
         "config",

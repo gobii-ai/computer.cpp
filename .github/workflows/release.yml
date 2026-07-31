@@ -46,7 +46,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja wxwidgets dylibbundler lua
+          brew install cmake ninja wxwidgets dylibbundler lua curl
 
       - name: Bump version
         id: bump_version
@@ -201,11 +201,17 @@ jobs:
             echo "Bundled Lua executable is missing from ComputerCpp.app: $BUNDLED_LUA" >&2
             exit 1
           fi
+          GOBII_DESKTOP="$DIST_DIR/ComputerCpp.app/Contents/Resources/apps/gobii-desktop.lua"
+          if [[ ! -f "$GOBII_DESKTOP" ]]; then
+            echo "Bundled Gobii Desktop app is missing: $GOBII_DESKTOP" >&2
+            exit 1
+          fi
 
           mkdir -p "$DIST_DIR/ComputerCpp.app/Contents/Frameworks"
           HOMEBREW_PREFIX="$(brew --prefix)"
           WX_PREFIX="$(brew --prefix wxwidgets)"
           LUA_PREFIX="$(brew --prefix lua)"
+          CURL_PREFIX="$(brew --prefix curl)"
           dylibbundler \
             -od \
             -b \
@@ -213,6 +219,15 @@ jobs:
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
             -p "@executable_path/../Frameworks" \
             -s "$WX_PREFIX/lib" \
+            -s "$CURL_PREFIX/lib" \
+            -s "$HOMEBREW_PREFIX/lib"
+          dylibbundler \
+            -od \
+            -b \
+            -x "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp" \
+            -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks" \
+            -s "$CURL_PREFIX/lib" \
             -s "$HOMEBREW_PREFIX/lib"
           dylibbundler \
             -b \
@@ -220,6 +235,16 @@ jobs:
             -d "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" \
             -p "@executable_path/../../../Frameworks" \
             -s "$LUA_PREFIX/lib" \
+            -s "$CURL_PREFIX/lib" \
+            -s "$HOMEBREW_PREFIX/lib"
+          mkdir -p "$DIST_DIR/lib"
+          dylibbundler \
+            -od \
+            -b \
+            -x "$DIST_DIR/computer.cpp" \
+            -d "$DIST_DIR/lib" \
+            -p "@executable_path/lib" \
+            -s "$CURL_PREFIX/lib" \
             -s "$HOMEBREW_PREFIX/lib"
 
           if ! find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name 'libwx_*.dylib' | grep -q .; then
@@ -229,20 +254,31 @@ jobs:
           fi
 
           while IFS= read -r dependency; do
-            dylib="${dependency#@executable_path/../Frameworks/}"
-            dylib="${dylib#@executable_path/../../../Frameworks/}"
-            if [[ ! -f "$DIST_DIR/ComputerCpp.app/Contents/Frameworks/$dylib" ]]; then
+            dependency_root="$DIST_DIR/ComputerCpp.app/Contents/Frameworks"
+            if [[ "$dependency" == @executable_path/lib/* ]]; then
+              dependency_root="$DIST_DIR/lib"
+              dylib="${dependency#@executable_path/lib/}"
+            else
+              dylib="${dependency#@executable_path/../Frameworks/}"
+              dylib="${dylib#@executable_path/../../../Frameworks/}"
+            fi
+            if [[ ! -f "$dependency_root/$dylib" ]]; then
               echo "Bundled dependency is missing: $dylib" >&2
               exit 1
             fi
           done < <(
             {
               otool -L "$DIST_DIR/ComputerCpp.app/Contents/MacOS/ComputerCpp"
+              otool -L "$DIST_DIR/ComputerCpp.app/Contents/MacOS/computer.cpp"
               otool -L "$BUNDLED_LUA"
+              otool -L "$DIST_DIR/computer.cpp"
               while IFS= read -r -d '' dylib; do
                 otool -L "$dylib"
               done < <(find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib' -print0)
-            } | awk '/@executable_path\/.*\/Frameworks\// { print $1 }' | sort -u
+              while IFS= read -r -d '' dylib; do
+                otool -L "$dylib"
+              done < <(find "$DIST_DIR/lib" -type f -name '*.dylib' -print0)
+            } | awk '/@executable_path\/.*\/Frameworks\/|@executable_path\/lib\// { print $1 }' | sort -u
           )
 
           {
@@ -251,6 +287,7 @@ jobs:
             echo "$DIST_DIR/computer.cpp"
             echo "$BUNDLED_LUA"
             find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib'
+            find "$DIST_DIR/lib" -type f -name '*.dylib'
           } | while IFS= read -r binary; do
             if otool -L "$binary" | grep -Eq '/opt/homebrew|/usr/local'; then
               echo "$binary still references Homebrew dylibs after bundling" >&2
@@ -260,6 +297,10 @@ jobs:
           done
 
           find "$DIST_DIR/ComputerCpp.app/Contents/Frameworks" -type f -name '*.dylib' -print0 |
+            while IFS= read -r -d '' dylib; do
+              codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$dylib"
+            done
+          find "$DIST_DIR/lib" -type f -name '*.dylib' -print0 |
             while IFS= read -r -d '' dylib; do
               codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$dylib"
             done
@@ -283,6 +324,9 @@ jobs:
           spctl --assess --type execute --verbose=4 "$DIST_DIR/ComputerCpp.app"
 
           (cd "$DIST_ROOT" && ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_ROOT" "$RELEASE_ASSET")
+          cp \
+            "$DIST_ROOT/$RELEASE_ASSET" \
+            "$DIST_ROOT/computer.cpp-${NEW_VERSION}-macos-arm64.zip"
 
       - name: Commit version bump
         run: |
@@ -302,7 +346,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-release-assets
-          path: dist/computer.cpp-macos-arm64.zip
+          path: |
+            dist/computer.cpp-${{ steps.bump_version.outputs.new_version }}-macos-arm64.zip
+            dist/computer.cpp-macos-arm64.zip
           if-no-files-found: error
 
   windows:
@@ -399,8 +445,7 @@ jobs:
           WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           if (-not $env:WINDOWS_SIGNING_CERTIFICATE_BASE64) {
-            "Windows signing certificate not configured; leaving artifacts unsigned."
-            exit 0
+            throw "Windows signing certificate is required for public release artifacts."
           }
           $certPath = Join-Path $env:RUNNER_TEMP "computer-cpp-signing.pfx"
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64))
@@ -412,6 +457,18 @@ jobs:
             & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $certPath /p "$env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD" $_.FullName
           }
 
+      - name: Create versioned Windows aliases
+        shell: pwsh
+        env:
+          NEW_VERSION: ${{ needs.macos.outputs.new_version }}
+        run: |
+          Copy-Item `
+            "dist/computer.cpp-windows-x64.zip" `
+            "dist/computer.cpp-$env:NEW_VERSION-windows-x64.zip"
+          Copy-Item `
+            "dist/computer.cpp-windows-x64.msi" `
+            "dist/computer.cpp-$env:NEW_VERSION-windows-x64.msi"
+
       - name: Smoke packaged portable zip
         shell: pwsh
         run: |
@@ -422,6 +479,19 @@ jobs:
           $cli = Get-ChildItem $extract -Recurse -Filter computer.cpp.exe | Select-Object -First 1
           if (-not $cli) { throw "computer.cpp.exe not found in portable zip" }
           & $cli.FullName run --dry-run tests/lua/dry-run.lua
+          $diagnosis = (& $cli.FullName --json gobii diagnose | ConvertFrom-Json)
+          if (-not $diagnosis.gobiiDesktopAppFound) {
+            throw "Gobii Desktop resource was not found in the portable package"
+          }
+          if (-not $diagnosis.connectionAvailable) {
+            throw "Packaged Gobii connection is unexpectedly unavailable"
+          }
+          if ($diagnosis.developmentInlineImages) {
+            throw "Production package unexpectedly enabled inline Gobii images"
+          }
+          if ($diagnosis.localDevelopment) {
+            throw "Production package unexpectedly enabled local Gobii development mode"
+          }
           & $cli.FullName open
           & $cli.FullName ping
           & $cli.FullName close
@@ -431,6 +501,8 @@ jobs:
         with:
           name: windows-release-assets
           path: |
+            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.zip
+            dist/computer.cpp-${{ needs.macos.outputs.new_version }}-windows-x64.msi
             dist/computer.cpp-windows-x64.zip
             dist/computer.cpp-windows-x64.msi
           if-no-files-found: error
@@ -506,6 +578,9 @@ jobs:
           fi
 
           gh release create "${NEW_VERSION}" \
+            "artifacts/macos/computer.cpp-${NEW_VERSION}-macos-arm64.zip#computer.cpp-${NEW_VERSION}-macos-arm64.zip" \
+            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.zip#computer.cpp-${NEW_VERSION}-windows-x64.zip" \
+            "artifacts/windows/computer.cpp-${NEW_VERSION}-windows-x64.msi#computer.cpp-${NEW_VERSION}-windows-x64.msi" \
             "artifacts/macos/computer.cpp-macos-arm64.zip#computer.cpp-macos-arm64.zip" \
             "artifacts/windows/computer.cpp-windows-x64.zip#computer.cpp-windows-x64.zip" \
             "artifacts/windows/computer.cpp-windows-x64.msi#computer.cpp-windows-x64.msi" \

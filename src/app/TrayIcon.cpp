@@ -1,9 +1,14 @@
 #include "TrayIcon.h"
+#include "GobiiConnectionDialog.h"
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/Daemon.h"
+#include "computer_cpp/ConfiguredServerController.h"
+#include "computer_cpp/GobiiArtifactUploader.h"
+#include "computer_cpp/GobiiConnectionController.h"
+#include "computer_cpp/GobiiCredentialStore.h"
 #include "computer_cpp/InferenceClient.h"
 #include "computer_cpp/Platform.h"
 #include "computer_cpp/StringUtils.h"
@@ -24,6 +29,7 @@
 #include <ctime>
 #include <iomanip>
 #include <optional>
+#include <future>
 #include <sstream>
 #include <thread>
 #include <tuple>
@@ -72,6 +78,11 @@ enum {
     ID_CHECK_UPDATES,
     ID_START_SERVER,
     ID_STOP_SERVER,
+    ID_GOBII_CONNECT,
+    ID_GOBII_STATUS,
+    ID_GOBII_PAUSE_RESUME,
+    ID_GOBII_DISCONNECT,
+    ID_GOBII_MANAGE,
     ID_SERVER_PROCESS,
     ID_SERVER_TIMER,
     ID_STATE,
@@ -236,7 +247,7 @@ std::filesystem::path ComputerCppCliHelperPath() {
 std::string NormalizeBindHost(std::string host) {
     host = ComputerCpp::Trim(host);
     if (host.empty()) {
-        return "0.0.0.0";
+        return "127.0.0.1";
     }
     return host == "localhost" ? "127.0.0.1" : host;
 }
@@ -1710,7 +1721,7 @@ private:
     bool FlushServerFields() {
         std::string host = NormalizeBindHost(FieldValue(serverHost_));
         if (host.empty()) {
-            host = "0.0.0.0";
+            host = "127.0.0.1";
         }
         std::string portError;
         auto port = ParsePortField(serverPort_, "Port", &portError);
@@ -2573,6 +2584,15 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_MENU(ID_CHECK_UPDATES, TrayIcon::OnCheckForUpdates)
     EVT_MENU(ID_START_SERVER, TrayIcon::OnStartServer)
     EVT_MENU(ID_STOP_SERVER, TrayIcon::OnStopServer)
+    EVT_MENU(ID_GOBII_CONNECT, TrayIcon::OnGobiiConnect)
+    EVT_MENU(ID_GOBII_STATUS, TrayIcon::OnGobiiStatus)
+    EVT_MENU(
+        ID_GOBII_PAUSE_RESUME,
+        TrayIcon::OnGobiiPauseResume)
+    EVT_MENU(
+        ID_GOBII_DISCONNECT,
+        TrayIcon::OnGobiiDisconnect)
+    EVT_MENU(ID_GOBII_MANAGE, TrayIcon::OnGobiiManage)
     EVT_MENU(ID_STATE, TrayIcon::OnState)
     EVT_MENU(ID_TEST_SCREENSHOT, TrayIcon::OnTestScreenshot)
     EVT_MENU(ID_TEST_MOUSE, TrayIcon::OnTestMouse)
@@ -2581,6 +2601,106 @@ wxBEGIN_EVENT_TABLE(TrayIcon, wxTaskBarIcon)
     EVT_TIMER(ID_SERVER_TIMER, TrayIcon::OnServerTimer)
     EVT_MENU(ID_QUIT, TrayIcon::OnQuit)
 wxEND_EVENT_TABLE()
+
+class TrayConfiguredServerController final :
+    public ConfiguredServerController {
+public:
+    explicit TrayConfiguredServerController(TrayIcon& owner)
+        : owner_(owner) {}
+
+    bool EnsureRunning(std::string& error) override {
+        error.clear();
+        if (wxIsMainThread()) {
+            error = "configured server startup cannot run on the UI thread";
+            return false;
+        }
+        auto startPromise =
+            std::make_shared<std::promise<void>>();
+        auto startFuture = startPromise->get_future();
+        wxTheApp->CallAfter([
+            this,
+            startPromise
+        ] {
+            owner_.StartConfiguredServer();
+            startPromise->set_value();
+        });
+        startFuture.wait();
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(8);
+        bool serverRunning = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const ConfiguredServerInfo info = Status();
+            if (info.running) {
+                serverRunning = true;
+                if (ConfiguredServerCatalogReady(info)) {
+                    return true;
+                }
+            }
+            if (!info.error.empty()) {
+                error = info.error;
+                return false;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(100));
+        }
+        error = serverRunning
+            ? "local configured MCP server catalog did not become ready"
+            : "local configured MCP server did not become ready";
+        return false;
+    }
+
+    ConfiguredServerInfo Status() const override {
+        if (wxIsMainThread()) {
+            ConfiguredServerInfo info;
+            info.error =
+                "configured server status cannot run on the UI thread";
+            return info;
+        }
+        auto promise =
+            std::make_shared<
+                std::promise<ConfiguredServerInfo>>();
+        auto future = promise->get_future();
+        wxTheApp->CallAfter([
+            this,
+            promise
+        ] {
+            ConfiguredServerInfo info;
+            info.running =
+                owner_.server_.status ==
+                    TrayIcon::ServerStatus::Running;
+            info.host = owner_.server_.host;
+            info.port = owner_.server_.port;
+            info.bearerToken = owner_.serverAuthToken_;
+            info.internalControlToken =
+                owner_.serverInternalControlToken_;
+            info.error =
+                owner_.server_.status ==
+                    TrayIcon::ServerStatus::Failed
+                ? owner_.server_.failure
+                : "";
+            for (const auto& [name, app] :
+                owner_.configuredApps_) {
+                if (app.status != "invalid") {
+                    info.apps[name] =
+                        app.displayName + "\n" +
+                        app.schemaSha256;
+                }
+            }
+            promise->set_value(std::move(info));
+        });
+        return future.get();
+    }
+
+    void Stop() override {
+        wxTheApp->CallAfter([this] {
+            owner_.StopConfiguredServer();
+        });
+    }
+
+private:
+    TrayIcon& owner_;
+};
 
 TrayIcon::TrayIcon() {
 #ifdef __APPLE__
@@ -2593,6 +2713,20 @@ TrayIcon::TrayIcon() {
                           " bundle_path=" + ComputerCppBundlePath());
 #endif
     serverTimer_ = std::make_unique<wxTimer>(this, ID_SERVER_TIMER);
+    {
+        std::string configError;
+        AppConfig config = LoadAppConfig(&configError);
+        if (configError.empty() &&
+            EnsureGobiiDesktopApp(config, &configError)) {
+            SaveAppConfig(config, &configError);
+        }
+        if (!configError.empty()) {
+            AppendAppLog(
+                "gobii",
+                "default_app_registration_failed error=" +
+                    configError);
+        }
+    }
     updateFlow_ = std::make_unique<TrayUpdateFlow>([this] {
 #ifdef __APPLE__
         DestroyNativeTrayIcon(nativeTrayIcon_);
@@ -2605,6 +2739,48 @@ TrayIcon::TrayIcon() {
     StartOwnedDaemon();
     RefreshConfiguredServer(true);
     AdoptExistingServer(true);
+#if defined(__APPLE__) || defined(_WIN32)
+    configuredServerController_ =
+        std::make_unique<TrayConfiguredServerController>(*this);
+    auto http = std::shared_ptr<GobiiHttpTransport>(
+        CreateCurlGobiiHttpTransport());
+    gobiiController_ =
+        std::make_unique<GobiiConnectionController>(
+            http,
+            CreateGobiiCredentialStore(),
+            CreateGobiiArtifactUploader(http),
+            *configuredServerController_,
+            [](const std::string& url) {
+                return wxLaunchDefaultBrowser(
+                    wxString::FromUTF8(url));
+            },
+            [] {
+                const auto permissions =
+                    Platform::CheckPermissions(false);
+                const auto session =
+                    Platform::GetDesktopSessionState();
+                return permissions.accessibility &&
+                    permissions.screenCapture &&
+                    (!session.detectionSupported ||
+                     (session.available &&
+                      session.onConsole &&
+                      session.loginDone &&
+                      !session.screenLocked));
+            });
+    gobiiController_->SetObserver([](
+        const GobiiConnectionStatus& status) {
+        wxTheApp->CallAfter([status] {
+            AppendAppLog(
+                "gobii",
+                std::string("state=") +
+                    GobiiConnectionStateName(status.state) +
+                    (status.lastError.empty()
+                        ? ""
+                        : " error=" + status.lastError));
+        });
+    });
+    gobiiController_->Initialize();
+#endif
     wxTheApp->CallAfter([this] {
         Platform::PermissionStatus status = Platform::CheckPermissions(false);
         AppendPermissionTrace("tray_started status=" + PermissionStatusSummary(status) +
@@ -2616,6 +2792,10 @@ TrayIcon::TrayIcon() {
 }
 
 TrayIcon::~TrayIcon() {
+    if (gobiiController_) {
+        gobiiController_->Shutdown();
+        gobiiController_.reset();
+    }
 #ifdef __APPLE__
     DestroyNativeTrayIcon(nativeTrayIcon_);
     nativeTrayIcon_ = nullptr;
@@ -2627,6 +2807,10 @@ TrayIcon::~TrayIcon() {
     if (settingsDialog_) {
         settingsDialog_->Destroy();
         settingsDialog_ = nullptr;
+    }
+    if (gobiiDialog_) {
+        gobiiDialog_->Destroy();
+        gobiiDialog_ = nullptr;
     }
     updateFlow_.reset();
     if (serverTimer_) {
@@ -2660,6 +2844,81 @@ wxMenu* TrayIcon::CreatePopupMenu() {
     RefreshConfiguredServer();
 
     wxMenu* menu = new wxMenu;
+#if defined(__APPLE__) || defined(_WIN32)
+    if (gobiiController_) {
+        const GobiiConnectionStatus status =
+            gobiiController_->Status();
+        wxString label = "Gobii: ";
+        switch (status.state) {
+            case GobiiConnectionState::Connected:
+                label += status.currentRequestId.empty()
+                    ? "Connected"
+                    : "Agent is using this computer";
+                break;
+            case GobiiConnectionState::Paused:
+                label += "Paused";
+                break;
+            case GobiiConnectionState::Pairing:
+            case GobiiConnectionState::PairingPending:
+                label += "Waiting for approval…";
+                break;
+            case GobiiConnectionState::Connecting:
+                label += "Connecting…";
+                break;
+            case GobiiConnectionState::PermissionsRequired:
+                label += "Permissions required";
+                break;
+            case GobiiConnectionState::UpdateRequired:
+                label += "Update required";
+                break;
+            case GobiiConnectionState::AuthenticationExpired:
+                label += "Authentication expired";
+                break;
+            case GobiiConnectionState::Error:
+                label += "Error";
+                break;
+            case GobiiConnectionState::Disconnected:
+                label += "Not Connected";
+                break;
+        }
+        auto* statusItem = menu->Append(wxID_ANY, label);
+        statusItem->Enable(false);
+        if (status.state ==
+            GobiiConnectionState::Disconnected ||
+            status.state ==
+            GobiiConnectionState::AuthenticationExpired ||
+            status.state == GobiiConnectionState::Error) {
+            menu->Append(
+                ID_GOBII_CONNECT,
+                "Connect to Gobii…");
+        } else if (status.state ==
+            GobiiConnectionState::Paused) {
+            menu->Append(
+                ID_GOBII_PAUSE_RESUME,
+                "Resume Agent Access");
+        } else if (status.state ==
+            GobiiConnectionState::Connected) {
+            menu->Append(
+                ID_GOBII_PAUSE_RESUME,
+                "Pause Agent Access");
+        }
+        if (!status.deviceId.empty() ||
+            status.state == GobiiConnectionState::Error) {
+            menu->Append(
+                ID_GOBII_STATUS,
+                "Gobii Connection…");
+        }
+        if (!status.deviceId.empty()) {
+            menu->Append(
+                ID_GOBII_MANAGE,
+                "Manage in Gobii…");
+            menu->Append(
+                ID_GOBII_DISCONNECT,
+                "Disconnect from Gobii");
+        }
+        menu->AppendSeparator();
+    }
+#endif
     wxString serverStatus;
     switch (server_.status) {
         case ServerStatus::Running:
@@ -2837,6 +3096,68 @@ void TrayIcon::OnStopServer(wxCommandEvent&) {
     StopConfiguredServer();
 }
 
+void TrayIcon::OnGobiiStatus(wxCommandEvent&) {
+    if (!gobiiController_) return;
+    if (gobiiDialog_) {
+        gobiiDialog_->Raise();
+        return;
+    }
+    gobiiDialog_ =
+        new GobiiConnectionDialog(
+            *gobiiController_,
+            {
+                [this] { SetUpPermissionsIfNeeded(true); },
+                [this] {
+                    if (updateFlow_) {
+                        updateFlow_->CheckForUpdates();
+                    }
+                },
+            });
+    gobiiDialog_->Bind(
+        wxEVT_DESTROY,
+        [this](wxWindowDestroyEvent&) {
+            gobiiDialog_ = nullptr;
+        });
+    gobiiDialog_->Show();
+}
+
+void TrayIcon::OnGobiiConnect(wxCommandEvent&) {
+    if (!gobiiController_) return;
+    wxCommandEvent statusEvent;
+    OnGobiiStatus(statusEvent);
+}
+
+void TrayIcon::OnGobiiPauseResume(wxCommandEvent&) {
+    if (!gobiiController_) return;
+    if (gobiiController_->Status().state ==
+        GobiiConnectionState::Paused) {
+        gobiiController_->Resume();
+    } else {
+        gobiiController_->Pause();
+    }
+}
+
+void TrayIcon::OnGobiiDisconnect(wxCommandEvent&) {
+    if (!gobiiController_) return;
+    if (wxMessageBox(
+            "Disconnect this computer from Gobii and remove its "
+            "local secure credential?",
+            "Disconnect from Gobii",
+            wxYES_NO | wxNO_DEFAULT | wxICON_WARNING) == wxYES) {
+        gobiiController_->Disconnect();
+    }
+}
+
+void TrayIcon::OnGobiiManage(wxCommandEvent&) {
+    std::string error;
+    const AppConfig config = LoadAppConfig(&error);
+    if (error.empty()) {
+        wxLaunchDefaultBrowser(wxString::FromUTF8(
+            config.gobii.baseUrl +
+            "/app/integrations"));
+    }
+}
+
 void TrayIcon::OnServerProcessEnded(wxProcessEvent& event) {
     if (server_.pid != event.GetPid()) {
         return;
@@ -2914,6 +3235,7 @@ void TrayIcon::RefreshConfiguredServer(bool force) {
             previous->second.path == status.path) {
             status.status = previous->second.status;
             status.error = previous->second.error;
+            status.schemaSha256 = previous->second.schemaSha256;
         } else if (server_.status == ServerStatus::Running) {
             status.status = "restart_required";
         }
@@ -2953,6 +3275,8 @@ void TrayIcon::ApplyServerHealth(const std::string& responseBody) {
             served.contains("error") && served["error"].is_string()
             ? served["error"].get<std::string>()
             : "";
+        configured.schemaSha256 =
+            served.value("schemaSha256", "");
     }
     serverRestartRequired_ = serverRestartRequired_ || registryMismatch;
 }
@@ -2996,6 +3320,7 @@ void TrayIcon::AdoptExistingServer(bool removeInvalidState) {
     server_.port = state->port;
     server_.pid = state->pid;
     server_.url = state->url;
+    serverInternalControlToken_ = state->internalControlToken;
     server_.process = nullptr;
     server_.status = ServerStatus::Running;
     server_.statePath = statePath;
@@ -3161,6 +3486,7 @@ void TrayIcon::StartConfiguredServer() {
     server_.deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     server_.nextHealthProbe = std::chrono::steady_clock::now();
+    serverInternalControlToken_ = GenerateServerAuthToken();
 
     std::vector<std::wstring> argStorage;
     auto addArg = [&argStorage](const std::string& value) {
@@ -3185,6 +3511,13 @@ void TrayIcon::StartConfiguredServer() {
     wxString previousLogFile;
     const bool hadPreviousLogFile = wxGetEnv("COMPUTER_CPP_LOG_FILE", &previousLogFile);
     wxSetEnv("COMPUTER_CPP_LOG_FILE", wxString::FromUTF8(ComputerCpp::AppLogPath().string()));
+    wxString previousInternalToken;
+    const bool hadPreviousInternalToken = wxGetEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+        &previousInternalToken);
+    wxSetEnv(
+        "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+        wxString::FromUTF8(serverInternalControlToken_));
     AppendAppLog(
         "server",
         "start_requested configured listen=" + host + ":" +
@@ -3196,6 +3529,13 @@ void TrayIcon::StartConfiguredServer() {
         wxSetEnv("COMPUTER_CPP_LOG_FILE", previousLogFile);
     } else {
         wxUnsetEnv("COMPUTER_CPP_LOG_FILE");
+    }
+    if (hadPreviousInternalToken) {
+        wxSetEnv(
+            "COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN",
+            previousInternalToken);
+    } else {
+        wxUnsetEnv("COMPUTER_CPP_GOBII_INTERNAL_CONTROL_TOKEN");
     }
 
     if (server_.pid == 0) {
@@ -3387,6 +3727,7 @@ TrayAppServerState TrayIcon::CurrentServerState() const {
     state.host = server_.host;
     state.port = server_.port;
     state.url = server_.url;
+    state.internalControlToken = serverInternalControlToken_;
     return state;
 }
 
@@ -3395,6 +3736,7 @@ void TrayIcon::ClearServerProcess() {
     server_.pid = 0;
     server_.port = 0;
     server_.url.clear();
+    serverInternalControlToken_.clear();
 }
 
 void TrayIcon::StopServerBlocking() {

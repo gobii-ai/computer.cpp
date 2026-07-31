@@ -80,6 +80,7 @@ json TrayStateToJson(const TrayAppServerState& state) {
         {"configName", state.configName},
         {"displayName", state.displayName},
         {"startedAt", state.startedAt},
+        {"internalControlToken", state.internalControlToken},
     };
 }
 
@@ -99,6 +100,8 @@ std::optional<TrayAppServerState> TrayStateFromJson(const json& value) {
     state.configName = value.value("configName", "");
     state.displayName = value.value("displayName", "");
     state.startedAt = value.value("startedAt", "");
+    state.internalControlToken =
+        value.value("internalControlToken", "");
     if (state.pid <= 0 || state.host.empty() || state.port <= 0 ||
         state.url.empty() || (!state.configured && state.appPath.empty())) {
         return std::nullopt;
@@ -173,6 +176,22 @@ bool SaveTrayAppServerState(const TrayAppServerState& state, const fs::path& pat
         }
         return false;
     }
+#if defined(__unix__) || defined(__APPLE__)
+    fs::permissions(
+        path,
+        fs::perms::owner_read | fs::perms::owner_write,
+        fs::perm_options::replace,
+        ec);
+    if (ec) {
+        std::error_code removeError;
+        fs::remove(path, removeError);
+        if (error) {
+            *error = "could not secure tray server state file: " +
+                ec.message();
+        }
+        return false;
+    }
+#endif
     return true;
 }
 

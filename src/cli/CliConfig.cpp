@@ -2,6 +2,7 @@
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/GobiiTypes.h"
 #include "computer_cpp/InferenceClient.h"
 #include "computer_cpp/StringUtils.h"
 
@@ -127,6 +128,33 @@ int HandleShow(const CliOptions& options, const std::vector<std::string>& args) 
         std::cout << data.dump(2) << "\n";
     }
     return 0;
+}
+
+int HandleSetGobii(
+    const CliOptions& options,
+    const std::vector<std::string>& args
+) {
+    if (args.size() != 4 || args[2] != "--base-url") {
+        return ErrorExit(
+            "config set-gobii requires --base-url <url>");
+    }
+    const std::string& baseUrl = args[3];
+    if (!IsGobiiEndpointUrlAllowed(
+            baseUrl, "https", "http")) {
+        return ErrorExit(
+            "Gobii base URL must use https; a local-development "
+            "build also permits loopback http");
+    }
+    std::string error;
+    AppConfig config;
+    if (!LoadConfig(config, error)) {
+        return ErrorExit(error, 1);
+    }
+    config.gobii.baseUrl = baseUrl;
+    return SaveAndReport(
+        options,
+        config,
+        {{"gobiiBaseUrl", baseUrl}});
 }
 
 int HandleSetProvider(const CliOptions& options, const std::vector<std::string>& args) {
@@ -353,6 +381,7 @@ Usage:
   config open
   config init [--force]
   config show
+  config set-gobii --base-url url
   config set-provider <name> [--type openrouter|openai-compatible] [--base-url url]
                       [--api-key key|--api-key-stdin|--no-api-key]
   config set-profile <name> [--provider name] [--model id] [--temperature n]
@@ -375,6 +404,7 @@ Usage:
     }
     if (args[1] == "init") return HandleInit(options, args);
     if (args[1] == "show") return HandleShow(options, args);
+    if (args[1] == "set-gobii") return HandleSetGobii(options, args);
     if (args[1] == "set-provider") return HandleSetProvider(options, args);
     if (args[1] == "set-profile") return HandleSetProfile(options, args);
     if (args[1] == "use") return HandleUse(options, args);
