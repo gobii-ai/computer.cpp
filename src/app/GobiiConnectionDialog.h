@@ -31,11 +31,11 @@ private:
     wxStaticText* state_ = nullptr;
     wxStaticText* computer_ = nullptr;
     wxStaticText* agent_ = nullptr;
+    wxStaticText* verificationCode_ = nullptr;
     wxStaticText* permissions_ = nullptr;
     wxStaticText* version_ = nullptr;
     wxStaticText* lastError_ = nullptr;
     wxCheckBox* autoConnect_ = nullptr;
-    wxCheckBox* startAtLogin_ = nullptr;
     wxButton* connect_ = nullptr;
     wxButton* pauseResume_ = nullptr;
     wxButton* disconnect_ = nullptr;

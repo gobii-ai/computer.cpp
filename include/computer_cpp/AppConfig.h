@@ -52,6 +52,7 @@ struct RecordingConfig {
 
 struct GobiiConfig {
     std::string baseUrl = "https://gobii.ai";
+    std::string machineId;
     std::string deviceId;
     std::string deviceName;
     std::string assignedAgentId;

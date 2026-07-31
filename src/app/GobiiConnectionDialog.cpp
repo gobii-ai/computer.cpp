@@ -2,7 +2,6 @@
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/GobiiConnectionController.h"
-#include "computer_cpp/GobiiStartupRegistration.h"
 #include "computer_cpp/Platform.h"
 
 #include <wx/button.h>
@@ -62,6 +61,7 @@ GobiiConnectionDialog::GobiiConnectionDialog(
     row("Status", state_);
     row("Computer", computer_);
     row("Agent", agent_);
+    row("Verification code", verificationCode_);
     row("Permissions", permissions_);
     row("Installed version", version_);
     row("Last error", lastError_);
@@ -69,16 +69,10 @@ GobiiConnectionDialog::GobiiConnectionDialog(
 
     autoConnect_ = new wxCheckBox(
         this, wxID_ANY, "Connect automatically");
-    startAtLogin_ = new wxCheckBox(
-        this, wxID_ANY, "Start ComputerCpp at login");
     root->Add(autoConnect_, 0, wxTOP | wxLEFT | wxRIGHT, 14);
-    root->Add(startAtLogin_, 0, wxTOP | wxLEFT | wxRIGHT, 8);
     autoConnect_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
         SavePreferences();
     });
-    startAtLogin_->Bind(
-        wxEVT_CHECKBOX,
-        [this](wxCommandEvent&) { SavePreferences(); });
 
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     connect_ = new wxButton(this, wxID_ANY, "Connect…");
@@ -130,6 +124,8 @@ void GobiiConnectionDialog::RefreshStatus() {
         status.deviceName.empty() ? "—" : status.deviceName);
     agent_->SetLabel(
         status.agentName.empty() ? "—" : status.agentName);
+    verificationCode_->SetLabel(
+        status.pairingCode.empty() ? "—" : status.pairingCode);
     const auto permissions = Platform::CheckPermissions(false);
     permissions_->SetLabel(
         std::string("Accessibility ") +
@@ -156,7 +152,6 @@ void GobiiConnectionDialog::RefreshStatus() {
     const AppConfig config = LoadAppConfig(&error);
     if (error.empty()) {
         autoConnect_->SetValue(config.gobii.autoConnect);
-        startAtLogin_->SetValue(config.gobii.startAtLogin);
     }
 }
 
@@ -167,17 +162,7 @@ void GobiiConnectionDialog::SavePreferences() {
         wxMessageBox(error, "Gobii Connection", wxOK | wxICON_ERROR);
         return;
     }
-    const bool startupChanged =
-        config.gobii.startAtLogin != startAtLogin_->GetValue();
     config.gobii.autoConnect = autoConnect_->GetValue();
-    config.gobii.startAtLogin = startAtLogin_->GetValue();
-    if (startupChanged &&
-        !GobiiStartupRegistration::SetEnabled(
-            config.gobii.startAtLogin, &error)) {
-        startAtLogin_->SetValue(!config.gobii.startAtLogin);
-        wxMessageBox(error, "Gobii Connection", wxOK | wxICON_ERROR);
-        return;
-    }
     if (!SaveAppConfig(config, &error)) {
         wxMessageBox(error, "Gobii Connection", wxOK | wxICON_ERROR);
     }

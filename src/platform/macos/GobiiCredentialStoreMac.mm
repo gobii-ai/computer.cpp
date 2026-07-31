@@ -13,12 +13,22 @@ void SetError(std::string* error, OSStatus status, const char* action) {
     if (!error) {
         return;
     }
+    if (status == errSecAuthFailed) {
+        *error = std::string(action) +
+            ": macOS Keychain denied access. If ComputerCpp was "
+            "rebuilt or updated while it was running, quit and "
+            "reopen the app before trying again.";
+        return;
+    }
     CFStringRef message = SecCopyErrorMessageString(status, nullptr);
-    const char* text = message
-        ? CFStringGetCStringPtr(message, kCFStringEncodingUTF8)
-        : nullptr;
+    char text[256] = {};
+    const bool copied = message && CFStringGetCString(
+        message,
+        text,
+        sizeof(text),
+        kCFStringEncodingUTF8);
     *error = std::string(action) + ": " +
-        (text ? text : std::to_string(status));
+        (copied ? text : std::to_string(status));
     if (message) {
         CFRelease(message);
     }

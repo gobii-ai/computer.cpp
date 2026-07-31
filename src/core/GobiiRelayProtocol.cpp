@@ -46,8 +46,8 @@ bool ParseGobiiRelayRequest(
         !value["request_id"].is_string() ||
         !value.contains("app") ||
         !value["app"].is_string() ||
-        !value.contains("deadline") ||
-        !value["deadline"].is_string() ||
+        !value.contains("deadline_ms") ||
+        !value["deadline_ms"].is_number_integer() ||
         !value.contains("payload") ||
         !value["payload"].is_object()) {
         error = "relay request is missing required fields";
@@ -60,19 +60,15 @@ bool ParseGobiiRelayRequest(
         error = "request_id or app is invalid";
         return false;
     }
-    const std::string deadline =
-        value["deadline"].get<std::string>();
-    const auto parsed = ParseGobiiTimestamp(deadline);
-    if (!parsed) {
-        error = "deadline is not a valid timestamp";
+    const auto deadlineMs =
+        value["deadline_ms"].get<long long>();
+    if (deadlineMs <= 0 || deadlineMs > 3'600'000) {
+        error = "deadline_ms must be between 1 and 3600000";
         return false;
     }
-    request.deadline = *parsed;
-    if (request.deadline <= std::chrono::system_clock::now()) {
-        code = "deadline_exceeded";
-        error = "request deadline has expired";
-        return false;
-    }
+    request.deadline =
+        std::chrono::system_clock::now() +
+        std::chrono::milliseconds(deadlineMs);
     request.payload = value["payload"];
     if (request.payload.value("jsonrpc", "") != "2.0" ||
         !request.payload.contains("id") ||

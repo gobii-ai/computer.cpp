@@ -2754,7 +2754,10 @@ TrayIcon::TrayIcon() {
             AppendAppLog(
                 "gobii",
                 std::string("state=") +
-                    GobiiConnectionStateName(status.state));
+                    GobiiConnectionStateName(status.state) +
+                    (status.lastError.empty()
+                        ? ""
+                        : " error=" + status.lastError));
         });
     });
     gobiiController_->Initialize();
@@ -2886,10 +2889,13 @@ wxMenu* TrayIcon::CreatePopupMenu() {
                 ID_GOBII_PAUSE_RESUME,
                 "Pause Agent Access");
         }
-        if (!status.deviceId.empty()) {
+        if (!status.deviceId.empty() ||
+            status.state == GobiiConnectionState::Error) {
             menu->Append(
                 ID_GOBII_STATUS,
                 "Gobii Connection…");
+        }
+        if (!status.deviceId.empty()) {
             menu->Append(
                 ID_GOBII_MANAGE,
                 "Manage in Gobii…");
@@ -3124,6 +3130,8 @@ void TrayIcon::OnGobiiConnect(wxCommandEvent&) {
         wxOK | wxCANCEL | wxICON_WARNING);
     if (answer == wxOK) {
         gobiiController_->StartPairing();
+        wxCommandEvent statusEvent;
+        OnGobiiStatus(statusEvent);
     }
 }
 

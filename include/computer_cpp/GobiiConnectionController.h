@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -48,7 +49,10 @@ public:
 
 private:
     void PairingWorker(std::stop_token stop);
-    void ConnectWorker(std::stop_token stop);
+    void ConnectWorker(
+        std::stop_token stop,
+        std::optional<GobiiTokenResponse> initialToken =
+            std::nullopt);
     void HandleRelayMessage(const std::string& message);
     void ExecuteRelayRequest(GobiiRelayRequest request);
     void ScheduleReconnect(const std::string& error);
@@ -77,6 +81,7 @@ private:
     std::jthread reconnectThread_;
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> operationRunning_{false};
+    std::atomic<int> heartbeatIntervalSeconds_{20};
 };
 
 } // namespace ComputerCpp

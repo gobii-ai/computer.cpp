@@ -544,6 +544,7 @@ AppConfig LoadAppConfig(
     if (auto gobii = parsed["gobii"].as_table()) {
         config.gobii.baseUrl =
             TomlString(*gobii, "base_url", config.gobii.baseUrl);
+        config.gobii.machineId = TomlString(*gobii, "machine_id");
         config.gobii.deviceId = TomlString(*gobii, "device_id");
         config.gobii.deviceName = TomlString(*gobii, "device_name");
         config.gobii.assignedAgentId =
@@ -658,6 +659,7 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
     };
     out["gobii"] = {
         {"baseUrl", config.gobii.baseUrl},
+        {"machineId", config.gobii.machineId},
         {"deviceId", config.gobii.deviceId},
         {"deviceName", config.gobii.deviceName},
         {"assignedAgentId", config.gobii.assignedAgentId},
@@ -749,6 +751,10 @@ std::string AppConfigToToml(const AppConfig& config) {
 
     out << TomlTablePath({"gobii"}) << "\n";
     out << "base_url = " << TomlStringLiteral(config.gobii.baseUrl) << "\n";
+    if (!config.gobii.machineId.empty()) {
+        out << "machine_id = "
+            << TomlStringLiteral(config.gobii.machineId) << "\n";
+    }
     if (!config.gobii.deviceId.empty()) {
         out << "device_id = "
             << TomlStringLiteral(config.gobii.deviceId) << "\n";

@@ -7,22 +7,22 @@ application creates an authenticated outbound WebSocket using subprotocol
 
 ## Pairing
 
-Create a pairing with `POST /api/computers/pairings/`. The request contains
-`device_name`, `platform`, `architecture`, `client_version`,
-`relay_protocol_version: 1`, and the advertised capabilities. The response
+Create a pairing with `POST /api/computer/v1/pairings/`. The request contains
+`machine_id`, `display_name`, `platform`, `architecture`, `client_version`,
+`protocol_version: 1`, and the advertised app manifest. The response
 contains `pairing_id`, secret `device_code`, display `user_code`,
-`verification_uri`, `verification_uri_complete`, `expires_in`, and `interval`.
+`verification_uri`, `verification_uri_complete`, `expires_at`, and `interval`.
 
 The client opens only `verification_uri_complete` in the system browser and
-polls `POST /api/computers/pairings/token/` with `pairing_id` and
+polls `POST /api/computer/v1/pairings/{pairing_id}/exchange/` with
 `device_code`. Errors are `authorization_pending`, `slow_down`,
-`access_denied`, or `expired_token`.
+`access_denied`, or `expired`.
 
 Success returns the device identity, rotating device refresh token,
 short-lived relay access token and expiry, secure relay URL, and assigned
-agent. Refresh uses `POST /api/computers/token/refresh/`; revoke uses
-`POST /api/computers/revoke/`. Both authenticate with the device refresh
-token. Pairing secrets and access tokens are never persisted.
+agent ID. Refresh uses `POST /api/computer/v1/tokens/refresh/` with the
+refresh token, client version, and protocol version. Pairing secrets and
+access tokens are never persisted.
 
 ### Local platform development
 
@@ -65,21 +65,26 @@ The WebSocket upgrade includes the relay bearer token, subprotocol, and
   },
   "paused": false,
   "apps": [{
-    "name": "gobii-desktop",
+    "key": "gobii-desktop",
     "display_name": "Gobii Desktop",
-    "schema_sha256": "hex"
+    "schema_sha256": "hex",
+    "type": "bundled"
   }]
 }
 ```
 
-Gobii acknowledges with `{"type":"hello.ack","protocol_version":1}`. Either
-side may send WebSocket ping frames. ComputerCpp pings every 25 seconds and
-closes a connection with no traffic/pong for 60 seconds.
+Gobii acknowledges with `device_id`, `heartbeat_interval`, and
+`max_frame_bytes` in a `hello.ack`. ComputerCpp sends application
+`heartbeat` messages at the returned interval in addition to WebSocket ping
+frames every 25 seconds, and closes a connection with no traffic/pong for
+60 seconds.
 
 Gobii may send:
 
-- `{"type":"pause"}` to persistently pause and close the connection.
-- `{"type":"revoke"}` to remove the local secure credential and device link.
+- `{"type":"relay.state","paused":true}` to persistently pause and close the
+  connection.
+- `{"type":"relay.close"}` to remove the local secure credential and device
+  link.
 - `{"type":"update_required","required_version":"x.y.z"}` to prevent
   reconnect until the installed version changes.
 
@@ -90,7 +95,7 @@ Gobii may send:
   "type": "mcp.request",
   "request_id": "globally-unique-id",
   "app": "gobii-desktop",
-  "deadline": "2026-07-30T20:00:00Z",
+  "deadline_ms": 30000,
   "payload": {
     "jsonrpc": "2.0",
     "id": 1,
@@ -100,9 +105,10 @@ Gobii may send:
 }
 ```
 
-The payload must be one JSON-RPC 2.0 request object. Batch requests, expired
-deadlines, unknown apps, malformed identifiers, and oversized messages are
-rejected before local forwarding.
+The payload must be one JSON-RPC 2.0 request object. `deadline_ms` is a
+relative execution budget. Batch requests, invalid deadlines, unknown apps,
+malformed identifiers, and oversized messages are rejected before local
+forwarding.
 
 Success:
 

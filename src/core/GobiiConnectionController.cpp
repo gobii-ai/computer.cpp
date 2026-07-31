@@ -93,6 +93,9 @@ void GobiiConnectionController::SetState(
         std::lock_guard lock(mutex_);
         status_.state = state;
         status_.lastError = std::move(error);
+        if (state != GobiiConnectionState::PairingPending) {
+            status_.pairingCode.clear();
+        }
     }
     Publish();
 }
@@ -239,19 +242,60 @@ void GobiiConnectionController::PairingWorker(
             "non-loopback configured server");
         return;
     }
+    if (!server_.EnsureRunning(error)) {
+        SetState(GobiiConnectionState::Error, error);
+        return;
+    }
+    const ConfiguredServerInfo server = server_.Status();
+    if (!server.running || server.apps.empty()) {
+        SetState(
+            GobiiConnectionState::Error,
+            server.error.empty()
+                ? "local configured MCP server is unavailable"
+                : server.error);
+        return;
+    }
+    if (config.gobii.machineId.empty()) {
+        config.gobii.machineId = GenerateServerAuthToken();
+        if (!SaveAppConfig(config, &error)) {
+            SetState(GobiiConnectionState::Error, error);
+            return;
+        }
+    }
     GobiiPairingClient pairing(config.gobii.baseUrl, http_);
     GobiiPairingRequest request;
+    request.machineId = config.gobii.machineId;
     request.deviceName = config.gobii.deviceName.empty()
         ? "ComputerCpp Desktop"
         : config.gobii.deviceName;
     request.platform = PlatformName();
     request.architecture = ArchitectureName();
     request.clientVersion = status_.installedVersion;
+    for (const auto& [name, catalogValue] : server.apps) {
+        const size_t separator = catalogValue.find('\n');
+        const std::string displayName =
+            catalogValue.substr(0, separator);
+        const std::string schemaSha =
+            separator == std::string::npos
+            ? ""
+            : catalogValue.substr(separator + 1);
+        request.apps.push_back({
+            name,
+            displayName.empty() ? name : displayName,
+            schemaSha,
+            name == "gobii-desktop" ? "bundled" : "custom",
+        });
+    }
     GobiiPairingSession session;
     if (!pairing.CreatePairing(request, session, error)) {
         SetState(GobiiConnectionState::Error, error);
         return;
     }
+    {
+        std::lock_guard lock(mutex_);
+        status_.pairingCode = session.userCode;
+    }
+    Publish();
     if (stop.stop_requested()) return;
     if (!browserLauncher_ ||
         !browserLauncher_(session.verificationUriComplete)) {
@@ -275,7 +319,11 @@ void GobiiConnectionController::PairingWorker(
             continue;
         }
         if (result.state == GobiiPairingPollState::SlowDown) {
-            interval = std::min(interval + 5, 60);
+            interval =
+                result.intervalSeconds > 0 &&
+                result.intervalSeconds <= 60
+                ? result.intervalSeconds
+                : std::min(interval + 5, 60);
             continue;
         }
         if (result.state == GobiiPairingPollState::Approved) {
@@ -283,7 +331,7 @@ void GobiiConnectionController::PairingWorker(
                 SetState(GobiiConnectionState::Error, error);
                 return;
             }
-            ConnectWorker(stop);
+            ConnectWorker(stop, std::move(result.token));
             return;
         }
         const char* message =
@@ -318,7 +366,8 @@ void GobiiConnectionController::Connect() {
 }
 
 void GobiiConnectionController::ConnectWorker(
-    std::stop_token stop
+    std::stop_token stop,
+    std::optional<GobiiTokenResponse> initialToken
 ) {
     SetState(GobiiConnectionState::Connecting);
     if (permissionReady_ && !permissionReady_()) {
@@ -353,34 +402,46 @@ void GobiiConnectionController::ConnectWorker(
             "non-loopback configured server");
         return;
     }
-    auto refresh = credentials_->LoadRefreshToken(
-        config.gobii.deviceId, &error);
-    if (!refresh || refresh->empty()) {
-        SetState(
-            GobiiConnectionState::AuthenticationExpired,
-            error.empty() ? "Gobii credential is missing" : error);
-        return;
-    }
-    GobiiPairingClient pairing(config.gobii.baseUrl, http_);
     GobiiTokenResponse token;
-    if (!pairing.Refresh(*refresh, token, error)) {
-        SetState(
-            GobiiConnectionState::AuthenticationExpired,
-            error);
-        return;
+    if (initialToken) {
+        token = std::move(*initialToken);
+    } else {
+        auto refresh = credentials_->LoadRefreshToken(
+            config.gobii.deviceId, &error);
+        if (!refresh || refresh->empty()) {
+            SetState(
+                GobiiConnectionState::AuthenticationExpired,
+                error.empty()
+                    ? "Gobii credential is missing"
+                    : error);
+            return;
+        }
+        GobiiPairingClient pairing(config.gobii.baseUrl, http_);
+        if (!pairing.Refresh(
+                *refresh,
+                status_.installedVersion,
+                token,
+                error)) {
+            SetState(
+                GobiiConnectionState::AuthenticationExpired,
+                error);
+            return;
+        }
     }
     if (token.deviceId != config.gobii.deviceId) {
         SetState(
             GobiiConnectionState::AuthenticationExpired,
-            "Gobii token refresh returned a different device identity");
+            "Gobii returned a different device identity");
         return;
     }
-    if (!credentials_->SaveRefreshToken(
-            token.deviceId,
-            token.deviceRefreshToken,
-            &error)) {
-        SetState(GobiiConnectionState::Error, error);
-        return;
+    if (!initialToken) {
+        if (!credentials_->SaveRefreshToken(
+                token.deviceId,
+                token.deviceRefreshToken,
+                &error)) {
+            SetState(GobiiConnectionState::Error, error);
+            return;
+        }
     }
     if (stop.stop_requested()) return;
     if (!server_.EnsureRunning(error)) {
@@ -433,9 +494,12 @@ void GobiiConnectionController::ConnectWorker(
             ? ""
             : catalogValue.substr(separator + 1);
         apps.push_back({
-            {"name", name},
+            {"key", name},
             {"display_name", displayName},
             {"schema_sha256", schemaSha},
+            {"type", name == "gobii-desktop"
+                ? "bundled"
+                : "custom"},
         });
     }
     const auto permissions = Platform::CheckPermissions(false);
@@ -484,6 +548,10 @@ void GobiiConnectionController::ConnectWorker(
         const auto stableAt =
             std::chrono::steady_clock::now() +
             std::chrono::minutes(2);
+        auto nextHeartbeat =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(
+                heartbeatIntervalSeconds_.load());
         bool stableReset = false;
         while (!stop.stop_requested() &&
                relay_.Running()) {
@@ -495,6 +563,17 @@ void GobiiConnectionController::ConnectWorker(
                 }
                 stableReset = true;
                 Publish();
+            }
+            if (std::chrono::steady_clock::now() >=
+                nextHeartbeat) {
+                if (!relay_.Send(
+                        json{{"type", "heartbeat"}}.dump())) {
+                    return;
+                }
+                nextHeartbeat =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::seconds(
+                        heartbeatIntervalSeconds_.load());
             }
             if (std::chrono::system_clock::now() >= refreshAt) {
                 relay_.Stop();
@@ -557,7 +636,19 @@ void GobiiConnectionController::HandleRelayMessage(
             Pause();
             return;
         }
+        if (type == "relay.state") {
+            if (value.contains("paused") &&
+                value["paused"].is_boolean() &&
+                value["paused"].get<bool>()) {
+                Pause();
+            }
+            return;
+        }
         if (type == "revoke") {
+            Disconnect();
+            return;
+        }
+        if (type == "relay.close") {
             Disconnect();
             return;
         }
@@ -595,14 +686,30 @@ void GobiiConnectionController::HandleRelayMessage(
             return;
         }
         if (type == "hello.ack") {
-            if (!value.contains("protocol_version") ||
-                !value["protocol_version"].is_number_integer() ||
-                value["protocol_version"].get<int>() != 1) {
+            const auto status = Status();
+            if (!value.contains("device_id") ||
+                !value["device_id"].is_string() ||
+                value["device_id"].get<std::string>() !=
+                    status.deviceId ||
+                !value.contains("heartbeat_interval") ||
+                !value["heartbeat_interval"].is_number_integer() ||
+                value["heartbeat_interval"].get<int>() <= 0 ||
+                value["heartbeat_interval"].get<int>() > 60 ||
+                !value.contains("max_frame_bytes") ||
+                !value["max_frame_bytes"].is_number_integer() ||
+                value["max_frame_bytes"].get<size_t>() >
+                    kGobiiRelayFrameLimit) {
                 relay_.Stop();
                 SetState(
                     GobiiConnectionState::Error,
-                    "Gobii relay protocol version is unsupported");
+                    "Gobii relay hello acknowledgement is invalid");
+                return;
             }
+            heartbeatIntervalSeconds_ =
+                value["heartbeat_interval"].get<int>();
+            return;
+        }
+        if (type == "heartbeat.ack") {
             return;
         }
     }

@@ -42,18 +42,22 @@ void TestConfigAndResources() {
     assert(config.server.host == "127.0.0.1");
     assert(config.gobii.baseUrl == "https://gobii.ai");
     assert(config.gobii.autoConnect);
+    config.gobii.machineId = "machine";
     config.gobii.deviceId = "device";
     config.gobii.assignedAgentName = "Agent";
     config.gobii.requiredVersion = "1.0.0";
     config.gobii.updateRequiredInstalledVersion = "0.21.0";
     const std::string toml = AppConfigToToml(config);
     assert(toml.find("[gobii]") != std::string::npos);
+    assert(toml.find("machine_id = \"machine\"") !=
+        std::string::npos);
     assert(toml.find("device_id = \"device\"") !=
         std::string::npos);
     assert(toml.find("required_version = \"1.0.0\"") !=
         std::string::npos);
     const auto json = AppConfigToJson(config);
     assert(json["gobii"]["deviceId"] == "device");
+    assert(json["gobii"]["machineId"] == "machine");
     assert(!json["gobii"].contains("deviceRefreshToken"));
 
     std::string error;
@@ -94,13 +98,14 @@ void TestPairingAndRefresh() {
     http->responses.push_back({
         201,
         nlohmann::json{
-            {"pairing_id", "pair"},
+            {"pairing_id",
+                "01234567-89ab-cdef-0123-456789abcdef"},
             {"device_code", "secret"},
             {"user_code", "ABCD-EFGH"},
             {"verification_uri", "https://gobii.ai/connect"},
             {"verification_uri_complete",
                 "https://gobii.ai/connect?claim=x"},
-            {"expires_in", 600},
+            {"expires_at", "2030-07-30T20:00:00Z"},
             {"interval", 5},
         }.dump(),
         "",
@@ -114,26 +119,48 @@ void TestPairingAndRefresh() {
         200,
         nlohmann::json{
             {"device_id", "device"},
-            {"device_refresh_token", "refresh"},
-            {"relay_access_token", "access"},
-            {"relay_access_token_expires_at",
-                "2030-07-30T20:00:00Z"},
+            {"refresh_token", "refresh"},
+            {"access_token", "access"},
+            {"token_type", "Bearer"},
+            {"expires_in", 300},
             {"relay_url", "wss://gobii.ai/ws/computers/connect/"},
-            {"agent", {
-                {"id", "agent"},
-                {"name", "Desktop Assistant"},
-            }},
+            {"agent_id", "agent"},
+        }.dump(),
+        "",
+    });
+    http->responses.push_back({
+        200,
+        nlohmann::json{
+            {"device_id", "device"},
+            {"refresh_token", "rotated-refresh"},
+            {"access_token", "rotated-access"},
+            {"token_type", "Bearer"},
+            {"expires_in", 300},
+            {"relay_url", "wss://gobii.ai/ws/computers/connect/"},
         }.dump(),
         "",
     });
     GobiiPairingClient client("https://gobii.ai", http);
     GobiiPairingSession session;
     std::string error;
+    GobiiPairingRequest request;
+    request.machineId = "machine";
+    request.deviceName = "Desktop";
+    request.platform = "macos";
+    request.architecture = "arm64";
+    request.clientVersion = "0.21.0";
+    request.apps.push_back({
+        "gobii-desktop",
+        "Gobii Desktop",
+        std::string(64, 'a'),
+        "bundled",
+    });
     assert(client.CreatePairing(
-        {"Desktop", "macos", "arm64", "0.21.0"},
+        request,
         session,
         error));
     assert(session.deviceCode == "secret");
+    assert(session.userCode == "ABCD-EFGH");
     assert(client.Poll(session).state ==
         GobiiPairingPollState::Pending);
     auto approved = client.Poll(session);
@@ -144,8 +171,51 @@ void TestPairingAndRefresh() {
     assert(approved.state ==
         GobiiPairingPollState::Approved);
     assert(approved.token.deviceId == "device");
-    assert(http->requests[0].body.find("secret") ==
-        std::string::npos);
+    assert(http->requests[0].url ==
+        "https://gobii.ai/api/computer/v1/pairings/");
+    const auto pairingBody =
+        nlohmann::json::parse(http->requests[0].body);
+    assert(pairingBody["machine_id"] == "machine");
+    assert(pairingBody["protocol_version"] == 1);
+    assert(pairingBody["apps"][0]["key"] ==
+        "gobii-desktop");
+    assert(http->requests[1].url ==
+        "https://gobii.ai/api/computer/v1/pairings/"
+        "01234567-89ab-cdef-0123-456789abcdef/exchange/");
+    GobiiTokenResponse refreshed;
+    assert(client.Refresh(
+        "refresh", "0.21.0", refreshed, error));
+    assert(refreshed.deviceRefreshToken ==
+        "rotated-refresh");
+    assert(http->requests[3].url ==
+        "https://gobii.ai/api/computer/v1/tokens/refresh/");
+    const auto refreshBody =
+        nlohmann::json::parse(http->requests[3].body);
+    assert(refreshBody["refresh_token"] == "refresh");
+    assert(refreshBody["protocol_version"] == 1);
+}
+
+void TestPairingHttpError() {
+    auto http = std::make_shared<FakeHttpTransport>();
+    http->responses.push_back({
+        404,
+        "<!doctype html><title>Not Found</title>",
+        "",
+    });
+    GobiiPairingClient client("http://127.0.0.1:8001", http);
+    GobiiPairingSession session;
+    std::string error;
+    GobiiPairingRequest request;
+    request.machineId = "machine";
+    request.deviceName = "Desktop";
+    request.platform = "macos";
+    request.architecture = "arm64";
+    request.clientVersion = "0.21.0";
+    assert(!client.CreatePairing(
+        request,
+        session,
+        error));
+    assert(error == "Gobii request returned HTTP 404");
 }
 
 void TestRelayProtocolAndLedger() {
@@ -153,7 +223,7 @@ void TestRelayProtocolAndLedger() {
         {"type", "mcp.request"},
         {"request_id", "request-1"},
         {"app", "gobii-desktop"},
-        {"deadline", "2030-07-30T20:00:00Z"},
+        {"deadline_ms", 30000},
         {"payload", {
             {"jsonrpc", "2.0"},
             {"id", 1},
@@ -263,6 +333,7 @@ void TestArtifactGateAndStates() {
 void RunGobiiTests() {
     TestConfigAndResources();
     TestPairingAndRefresh();
+    TestPairingHttpError();
     TestRelayProtocolAndLedger();
     TestLoopbackMcpForwarding();
     TestArtifactGateAndStates();

@@ -3,6 +3,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <limits>
+
 using json = nlohmann::json;
 
 namespace ComputerCpp {
@@ -26,6 +31,7 @@ bool RequiredString(
 
 bool ParseToken(
     const json& value,
+    bool requireAgent,
     GobiiTokenResponse& token,
     std::string& error
 ) {
@@ -33,45 +39,59 @@ bool ParseToken(
         !RequiredString(value, "device_id", token.deviceId, error) ||
         !RequiredString(
             value,
-            "device_refresh_token",
+            "refresh_token",
             token.deviceRefreshToken,
             error) ||
         !RequiredString(
             value,
-            "relay_access_token",
+            "access_token",
             token.relayAccessToken,
             error) ||
         !RequiredString(value, "relay_url", token.relayUrl, error)) {
         return false;
     }
-    std::string expiresAt;
-    if (!RequiredString(
-            value,
-            "relay_access_token_expires_at",
-            expiresAt,
-            error)) {
+    if (!value.contains("expires_in") ||
+        !value["expires_in"].is_number_integer()) {
+        error = "response field 'expires_in' must be an integer";
         return false;
     }
-    const auto parsed = ParseGobiiTimestamp(expiresAt);
-    if (!parsed) {
-        error = "relay_access_token_expires_at is not a valid timestamp";
+    const auto expiresIn = value["expires_in"].get<long long>();
+    if (expiresIn <= 0 ||
+        expiresIn > std::chrono::seconds::max().count()) {
+        error = "response field 'expires_in' must be positive";
         return false;
     }
-    token.relayAccessTokenExpiresAt = *parsed;
-    if (token.relayAccessTokenExpiresAt <=
-        std::chrono::system_clock::now()) {
-        error = "relay access token is already expired";
+    if (!value.contains("token_type") ||
+        !value["token_type"].is_string() ||
+        value["token_type"].get<std::string>() != "Bearer") {
+        error = "response field 'token_type' must be 'Bearer'";
         return false;
     }
+    token.relayAccessTokenExpiresAt =
+        std::chrono::system_clock::now() +
+        std::chrono::seconds(expiresIn);
     if (!IsGobiiEndpointUrlAllowed(
             token.relayUrl, "wss", "ws")) {
         error = "relay_url must use wss";
         return false;
     }
-    if (!value.contains("agent") || !value["agent"].is_object() ||
-        !RequiredString(value["agent"], "id", token.agentId, error) ||
-        !RequiredString(value["agent"], "name", token.agentName, error)) {
+    if (requireAgent &&
+        !RequiredString(value, "agent_id", token.agentId, error)) {
         return false;
+    }
+    return true;
+}
+
+bool IsUuid(const std::string& value) {
+    if (value.size() != 36) return false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+            continue;
+        }
+        const unsigned char ch =
+            static_cast<unsigned char>(value[i]);
+        if (!std::isxdigit(ch)) return false;
     }
     return true;
 }
@@ -103,7 +123,11 @@ bool ParseObject(
     }
     value = json::parse(response.body, nullptr, false);
     if (value.is_discarded() || !value.is_object()) {
-        error = "Gobii returned malformed JSON";
+        error =
+            response.status < 200 || response.status >= 300
+            ? "Gobii request returned HTTP " +
+                std::to_string(response.status)
+            : "Gobii returned malformed JSON";
         return false;
     }
     return true;
@@ -120,7 +144,9 @@ GobiiPairingClient::GobiiPairingClient(
     }
 }
 
-std::string GobiiPairingClient::Endpoint(const char* path) const {
+std::string GobiiPairingClient::Endpoint(
+    const std::string& path
+) const {
     return baseUrl_ + path;
 }
 
@@ -130,19 +156,27 @@ bool GobiiPairingClient::CreatePairing(
     std::string& error
 ) {
     error.clear();
+    json apps = json::array();
+    for (const auto& app : request.apps) {
+        apps.push_back({
+            {"key", app.key},
+            {"display_name", app.displayName},
+            {"schema_sha256", app.schemaSha256},
+            {"type", app.type},
+        });
+    }
     json body = {
-        {"device_name", request.deviceName},
+        {"machine_id", request.machineId},
+        {"display_name", request.deviceName},
         {"platform", request.platform},
         {"architecture", request.architecture},
         {"client_version", request.clientVersion},
-        {"relay_protocol_version", 1},
-        {"capabilities", {
-            "mcp", "catalog_updates", "pause"
-        }},
+        {"protocol_version", 1},
+        {"apps", std::move(apps)},
     };
     json value;
     const GobiiHttpResponse response = transport_->Send(JsonRequest(
-        Endpoint("/api/computers/pairings/"),
+        Endpoint("/api/computer/v1/pairings/"),
         body));
     if (!ParseObject(response, value, error)) {
         return false;
@@ -164,8 +198,8 @@ bool GobiiPairingClient::CreatePairing(
             "verification_uri_complete",
             session.verificationUriComplete,
             error) ||
-        !value.contains("expires_in") ||
-        !value["expires_in"].is_number_integer() ||
+        !value.contains("expires_at") ||
+        !value["expires_at"].is_string() ||
         !value.contains("interval") ||
         !value["interval"].is_number_integer()) {
         if (error.empty()) {
@@ -173,7 +207,26 @@ bool GobiiPairingClient::CreatePairing(
         }
         return false;
     }
-    session.expiresInSeconds = value["expires_in"].get<int>();
+    if (!IsUuid(session.pairingId)) {
+        error = "response field 'pairing_id' must be a UUID";
+        return false;
+    }
+    const auto expiresAt =
+        ParseGobiiTimestamp(value["expires_at"].get<std::string>());
+    if (!expiresAt) {
+        error = "response field 'expires_at' must be a timestamp";
+        return false;
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::seconds>(
+            *expiresAt - std::chrono::system_clock::now());
+    if (remaining <= std::chrono::seconds::zero() ||
+        remaining.count() > std::numeric_limits<int>::max()) {
+        error = "pairing response contains an invalid expiry";
+        return false;
+    }
+    session.expiresInSeconds =
+        static_cast<int>(remaining.count());
     session.intervalSeconds = value["interval"].get<int>();
     if (session.expiresInSeconds <= 0 ||
         session.intervalSeconds <= 0 ||
@@ -195,10 +248,16 @@ GobiiPairingPollResult GobiiPairingClient::Poll(
     const GobiiPairingSession& session
 ) {
     GobiiPairingPollResult result;
+    if (!IsUuid(session.pairingId)) {
+        result.error = "pairing_id must be a UUID";
+        return result;
+    }
     const GobiiHttpResponse response = transport_->Send(JsonRequest(
-        Endpoint("/api/computers/pairings/token/"),
+        Endpoint(
+            "/api/computer/v1/pairings/" +
+            session.pairingId +
+            "/exchange/"),
         {
-            {"pairing_id", session.pairingId},
             {"device_code", session.deviceCode},
         }));
     json value;
@@ -206,7 +265,7 @@ GobiiPairingPollResult GobiiPairingClient::Poll(
         return result;
     }
     if (response.status == 200) {
-        if (ParseToken(value, result.token, result.error)) {
+        if (ParseToken(value, true, result.token, result.error)) {
             result.state = GobiiPairingPollState::Approved;
         }
         return result;
@@ -216,9 +275,15 @@ GobiiPairingPollResult GobiiPairingClient::Poll(
         result.state = GobiiPairingPollState::Pending;
     } else if (code == "slow_down") {
         result.state = GobiiPairingPollState::SlowDown;
+        if (value.contains("interval") &&
+            value["interval"].is_number_integer()) {
+            result.intervalSeconds =
+                value["interval"].get<int>();
+        }
     } else if (code == "access_denied") {
         result.state = GobiiPairingPollState::AccessDenied;
-    } else if (code == "expired_token") {
+    } else if (code == "expired" ||
+               code == "expired_token") {
         result.state = GobiiPairingPollState::Expired;
     } else {
         result.error = value.value("error_description", "pairing failed");
@@ -228,23 +293,31 @@ GobiiPairingPollResult GobiiPairingClient::Poll(
 
 bool GobiiPairingClient::Refresh(
     const std::string& refreshToken,
+    const std::string& clientVersion,
     GobiiTokenResponse& token,
     std::string& error
 ) {
     error.clear();
     const GobiiHttpResponse response = transport_->Send(JsonRequest(
-        Endpoint("/api/computers/token/refresh/"),
-        json::object(),
-        refreshToken));
+        Endpoint("/api/computer/v1/tokens/refresh/"),
+        {
+            {"refresh_token", refreshToken},
+            {"client_version", clientVersion},
+            {"protocol_version", 1},
+        }));
     json value;
     if (!ParseObject(response, value, error)) {
         return false;
     }
     if (response.status != 200) {
-        error = value.value("detail", "Gobii token refresh failed");
+        error = value.value(
+            "error_description",
+            value.value(
+                "error",
+                "Gobii token refresh failed"));
         return false;
     }
-    return ParseToken(value, token, error);
+    return ParseToken(value, false, token, error);
 }
 
 bool GobiiPairingClient::Revoke(
