@@ -1917,9 +1917,9 @@ private:
         if (recordingRetentionText_) {
             recordingRetentionText_->SetLabel(
                 config_.recording.retentionDays < 0
-                    ? "Recordings are kept until you delete them."
+                    ? wxString("Recordings are kept until you delete them.")
                     : config_.recording.retentionDays == 0
-                        ? "Recordings are removed as soon as they finish."
+                        ? wxString("Recordings are removed as soon as they finish.")
                         : wxString::Format(
                               "Recordings are removed after %d days.",
                               config_.recording.retentionDays));
