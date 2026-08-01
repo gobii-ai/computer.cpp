@@ -49,7 +49,11 @@ app:command("slow", {
       return ac.cancelled()
     end
     if args.delay > 0 then
-      os.execute("sleep " .. tostring(args.delay))
+      if package.config:sub(1, 1) == "\\" then
+        os.execute("ping -n " .. tostring(args.delay + 1) .. " 127.0.0.1 >NUL")
+      else
+        os.execute("sleep " .. tostring(args.delay))
+      end
     end
     if ctx:cancelled() then
       return ac.cancelled()

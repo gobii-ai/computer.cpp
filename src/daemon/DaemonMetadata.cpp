@@ -185,6 +185,7 @@ json SchemaJson() {
             {"script", "required non-empty read-only JavaScript expression for DOM/page inspection"},
             {"targetId", "optional exact Chrome DevTools page target id; remains stable while that tab navigates"},
             {"targetUrlPrefix", "optional URL prefix that the Chrome DevTools page target must match"},
+            {"targetTitle", "optional exact Chrome DevTools page title that the target must match"},
             {"browserContextId", "optional Chrome DevTools browser context id filter"},
             {"browser", "optional browser app name for launch attempt; default Google Chrome"},
             {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},

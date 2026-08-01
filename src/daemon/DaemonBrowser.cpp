@@ -323,6 +323,7 @@ std::optional<SelectedTarget> ChooseTarget(
     const json& targets,
     const std::string& targetId,
     const std::string& targetUrlPrefix,
+    const std::string& targetTitle,
     const std::string& browserContextId
 ) {
     if (!targets.is_array()) {
@@ -341,6 +342,7 @@ std::optional<SelectedTarget> ChooseTarget(
         }
         const std::string id = target.value("id", "");
         const std::string url = target.value("url", "");
+        const std::string title = target.value("title", "");
         const std::string ws = target["webSocketDebuggerUrl"].get<std::string>();
         SelectedTarget selected{ws, id, url, target.value("browserContextId", "")};
         if (!targetId.empty() && id == targetId) {
@@ -349,14 +351,16 @@ std::optional<SelectedTarget> ChooseTarget(
         if (!targetId.empty()) {
             continue;
         }
-        if (!targetUrlPrefix.empty() && url.rfind(targetUrlPrefix, 0) == 0) {
+        const bool urlMatches = targetUrlPrefix.empty() || url.rfind(targetUrlPrefix, 0) == 0;
+        const bool titleMatches = targetTitle.empty() || title == targetTitle;
+        if ((!targetUrlPrefix.empty() || !targetTitle.empty()) && urlMatches && titleMatches) {
             return selected;
         }
         if (!firstPage) {
             firstPage = selected;
         }
     }
-    if (!targetId.empty() || !targetUrlPrefix.empty()) {
+    if (!targetId.empty() || !targetUrlPrefix.empty() || !targetTitle.empty()) {
         return std::nullopt;
     }
     return firstPage;
@@ -634,6 +638,7 @@ json CdpEvaluate(
     int port,
     const std::string& targetId,
     const std::string& targetUrlPrefix,
+    const std::string& targetTitle,
     const std::string& browserContextId,
     const std::string& script,
     int timeoutMs
@@ -646,7 +651,7 @@ json CdpEvaluate(
     if (targets.is_discarded()) {
         return Error("Chrome DevTools target list was not valid JSON", "browser_debug_invalid_response");
     }
-    auto selectedTarget = ChooseTarget(targets, targetId, targetUrlPrefix, browserContextId);
+    auto selectedTarget = ChooseTarget(targets, targetId, targetUrlPrefix, targetTitle, browserContextId);
     if (!selectedTarget) {
         return Error("no debuggable browser page target was found", "browser_target_not_found");
     }
@@ -700,6 +705,7 @@ json CdpEvaluate(
             {"targetUrl", selectedTarget->url},
             {"browserContextId", selectedTarget->browserContextId},
             {"targetUrlPrefix", targetUrlPrefix},
+            {"targetTitle", targetTitle},
             {"type", remote.value("type", "")}
         };
         if (remote.contains("value")) {
@@ -724,6 +730,7 @@ json RunBrowserEvalCommand(const json& params) {
             "script",
             "targetId",
             "targetUrlPrefix",
+            "targetTitle",
             "browserContextId",
             "browser",
             "host",
@@ -740,6 +747,7 @@ json RunBrowserEvalCommand(const json& params) {
     auto script = StringParam(params, "script", "");
     auto targetId = StringParam(params, "targetId", "");
     auto targetUrlPrefix = StringParam(params, "targetUrlPrefix", "");
+    auto targetTitle = StringParam(params, "targetTitle", "");
     auto browserContextId = StringParam(params, "browserContextId", "");
     auto browser = StringParam(params, "browser", "Google Chrome");
     auto host = StringParam(params, "host", "127.0.0.1");
@@ -747,8 +755,8 @@ json RunBrowserEvalCommand(const json& params) {
     auto launch = BoolParam(params, "launch", true);
     auto timeoutMs = IntParam(params, "timeoutMs", 5000);
     auto readOnly = BoolParam(params, "readOnly", true);
-    if (!script || !targetId || !targetUrlPrefix || !browserContextId || !browser || !host || !port || !launch || !timeoutMs || !readOnly) {
-        return Error("browser_eval requires string script/targetId/targetUrlPrefix/browserContextId/browser/host, integer port/timeoutMs, and boolean launch/readOnly", "invalid_browser_eval");
+    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !browserContextId || !browser || !host || !port || !launch || !timeoutMs || !readOnly) {
+        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/host, integer port/timeoutMs, and boolean launch/readOnly", "invalid_browser_eval");
     }
     if (IsBlank(*script)) {
         return Error("browser_eval script must be non-empty", "invalid_browser_eval");
@@ -773,7 +781,7 @@ json RunBrowserEvalCommand(const json& params) {
             "Chrome DevTools is not available; restart Chrome with --remote-debugging-port=" + std::to_string(*port),
             "browser_debug_unavailable");
     }
-    return CdpEvaluate(*host, *port, *targetId, *targetUrlPrefix, *browserContextId, *script, *timeoutMs);
+    return CdpEvaluate(*host, *port, *targetId, *targetUrlPrefix, *targetTitle, *browserContextId, *script, *timeoutMs);
 }
 
 } // namespace ComputerCpp
