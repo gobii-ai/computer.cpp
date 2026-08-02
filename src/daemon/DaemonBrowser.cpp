@@ -316,6 +316,7 @@ struct SelectedTarget {
     std::string webSocketUrl;
     std::string id;
     std::string url;
+    std::string title;
     std::string browserContextId;
 };
 
@@ -344,7 +345,7 @@ std::optional<SelectedTarget> ChooseTarget(
         const std::string url = target.value("url", "");
         const std::string title = target.value("title", "");
         const std::string ws = target["webSocketDebuggerUrl"].get<std::string>();
-        SelectedTarget selected{ws, id, url, target.value("browserContextId", "")};
+        SelectedTarget selected{ws, id, url, title, target.value("browserContextId", "")};
         if (!targetId.empty() && id == targetId) {
             return selected;
         }
@@ -364,6 +365,39 @@ std::optional<SelectedTarget> ChooseTarget(
         return std::nullopt;
     }
     return firstPage;
+}
+
+std::vector<SelectedTarget> MatchingTargets(
+    const json& targets,
+    const std::string& targetId,
+    const std::string& targetUrlPrefix,
+    const std::string& targetTitle,
+    const std::string& browserContextId
+) {
+    std::vector<SelectedTarget> matches;
+    if (!targets.is_array()) return matches;
+    for (const auto& target : targets) {
+        if (!target.is_object() || target.value("type", "") != "page" ||
+            !target.contains("webSocketDebuggerUrl") ||
+            !target["webSocketDebuggerUrl"].is_string()) {
+            continue;
+        }
+        const std::string id = target.value("id", "");
+        const std::string url = target.value("url", "");
+        const std::string title = target.value("title", "");
+        if (!targetId.empty() && id != targetId) continue;
+        if (!targetUrlPrefix.empty() && url.rfind(targetUrlPrefix, 0) != 0) continue;
+        if (!targetTitle.empty() && title != targetTitle) continue;
+        if (!browserContextId.empty() && target.value("browserContextId", "") != browserContextId) continue;
+        matches.push_back({
+            target["webSocketDebuggerUrl"].get<std::string>(),
+            id,
+            url,
+            title,
+            target.value("browserContextId", "")
+        });
+    }
+    return matches;
 }
 
 bool SetSocketTimeouts(SocketHandle socket, int timeoutMs) {
@@ -558,6 +592,52 @@ bool WebSocketUpgrade(SocketHandle socket, const ParsedWebSocketUrl& url) {
     return response.rfind("HTTP/1.1 101", 0) == 0 || response.rfind("HTTP/1.0 101", 0) == 0;
 }
 
+bool TargetHasDocumentFocus(const SelectedTarget& target, int timeoutMs) {
+    auto parsedUrl = ParseWebSocketUrl(target.webSocketUrl);
+    if (!parsedUrl) return false;
+    auto socket = ConnectTcp(parsedUrl->host, parsedUrl->port, timeoutMs);
+    if (!socket.valid() || !WebSocketUpgrade(socket.socket, *parsedUrl)) return false;
+
+    const json message = {
+        {"id", 1},
+        {"method", "Runtime.evaluate"},
+        {"params", {
+            {"expression", "document.hasFocus()"},
+            {"returnByValue", true},
+            {"awaitPromise", true},
+            {"userGesture", false}
+        }}
+    };
+    if (!SendTextFrame(socket.socket, message.dump())) return false;
+    for (int i = 0; i < 100; ++i) {
+        auto responseText = ReceiveTextFrame(socket.socket);
+        if (!responseText) return false;
+        const json response = json::parse(*responseText, nullptr, false);
+        if (response.is_discarded() || response.value("id", 0) != 1) continue;
+        if (response.contains("error")) return false;
+        const json result = response.value("result", json::object());
+        if (result.contains("exceptionDetails")) return false;
+        const json remote = result.value("result", json::object());
+        return remote.contains("value") && remote["value"].is_boolean() && remote["value"].get<bool>();
+    }
+    return false;
+}
+
+std::optional<SelectedTarget> ChooseFocusedTarget(
+    const json& targets,
+    const std::string& targetId,
+    const std::string& targetUrlPrefix,
+    const std::string& targetTitle,
+    const std::string& browserContextId,
+    int timeoutMs
+) {
+    for (const auto& candidate : MatchingTargets(
+             targets, targetId, targetUrlPrefix, targetTitle, browserContextId)) {
+        if (TargetHasDocumentFocus(candidate, timeoutMs)) return candidate;
+    }
+    return std::nullopt;
+}
+
 std::string ToLowerAscii(std::string value) {
     for (char& ch : value) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -639,6 +719,7 @@ json CdpEvaluate(
     const std::string& targetId,
     const std::string& targetUrlPrefix,
     const std::string& targetTitle,
+    bool targetFocused,
     const std::string& browserContextId,
     const std::string& script,
     int timeoutMs
@@ -651,7 +732,9 @@ json CdpEvaluate(
     if (targets.is_discarded()) {
         return Error("Chrome DevTools target list was not valid JSON", "browser_debug_invalid_response");
     }
-    auto selectedTarget = ChooseTarget(targets, targetId, targetUrlPrefix, targetTitle, browserContextId);
+    auto selectedTarget = targetFocused
+        ? ChooseFocusedTarget(targets, targetId, targetUrlPrefix, targetTitle, browserContextId, timeoutMs)
+        : ChooseTarget(targets, targetId, targetUrlPrefix, targetTitle, browserContextId);
     if (!selectedTarget) {
         return Error("no debuggable browser page target was found", "browser_target_not_found");
     }
@@ -706,6 +789,7 @@ json CdpEvaluate(
             {"browserContextId", selectedTarget->browserContextId},
             {"targetUrlPrefix", targetUrlPrefix},
             {"targetTitle", targetTitle},
+            {"targetFocused", targetFocused},
             {"type", remote.value("type", "")}
         };
         if (remote.contains("value")) {
@@ -731,6 +815,7 @@ json RunBrowserEvalCommand(const json& params) {
             "targetId",
             "targetUrlPrefix",
             "targetTitle",
+            "targetFocused",
             "browserContextId",
             "browser",
             "host",
@@ -748,6 +833,7 @@ json RunBrowserEvalCommand(const json& params) {
     auto targetId = StringParam(params, "targetId", "");
     auto targetUrlPrefix = StringParam(params, "targetUrlPrefix", "");
     auto targetTitle = StringParam(params, "targetTitle", "");
+    auto targetFocused = BoolParam(params, "targetFocused", false);
     auto browserContextId = StringParam(params, "browserContextId", "");
     auto browser = StringParam(params, "browser", "Google Chrome");
     auto host = StringParam(params, "host", "127.0.0.1");
@@ -755,8 +841,8 @@ json RunBrowserEvalCommand(const json& params) {
     auto launch = BoolParam(params, "launch", true);
     auto timeoutMs = IntParam(params, "timeoutMs", 5000);
     auto readOnly = BoolParam(params, "readOnly", true);
-    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !browserContextId || !browser || !host || !port || !launch || !timeoutMs || !readOnly) {
-        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/host, integer port/timeoutMs, and boolean launch/readOnly", "invalid_browser_eval");
+    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !targetFocused || !browserContextId || !browser || !host || !port || !launch || !timeoutMs || !readOnly) {
+        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/host, integer port/timeoutMs, and boolean targetFocused/launch/readOnly", "invalid_browser_eval");
     }
     if (IsBlank(*script)) {
         return Error("browser_eval script must be non-empty", "invalid_browser_eval");
@@ -781,7 +867,7 @@ json RunBrowserEvalCommand(const json& params) {
             "Chrome DevTools is not available; restart Chrome with --remote-debugging-port=" + std::to_string(*port),
             "browser_debug_unavailable");
     }
-    return CdpEvaluate(*host, *port, *targetId, *targetUrlPrefix, *targetTitle, *browserContextId, *script, *timeoutMs);
+    return CdpEvaluate(*host, *port, *targetId, *targetUrlPrefix, *targetTitle, *targetFocused, *browserContextId, *script, *timeoutMs);
 }
 
 } // namespace ComputerCpp

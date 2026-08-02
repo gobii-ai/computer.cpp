@@ -178,6 +178,7 @@ void TestDaemonDispatch() {
     assert(commands.find("wait.stable-screen") != std::string::npos);
     assert(commands.find("llm.chat") != std::string::npos);
     assert(commands.find("browser.eval") != std::string::npos);
+    assert(commands.find("browser.eval.focused-target") != std::string::npos);
     assert(commands.find("canvas.") == std::string::npos);
     assert(commands.find("observe.text") == std::string::npos);
     assert(commands.find("observe.find") == std::string::npos);
@@ -219,6 +220,7 @@ void TestDaemonDispatch() {
     auto browserEvalSchema = schema["data"]["browserEval"].dump();
     assert(browserEvalSchema.find("read-only") != std::string::npos);
     assert(browserEvalSchema.find("exact Chrome DevTools page target id") != std::string::npos);
+    assert(browserEvalSchema.find("document.hasFocus") != std::string::npos);
     assert(browserEvalSchema.find("native click/type/press/mouse") != std::string::npos);
     auto batchSchema = schema["data"]["batch"].dump();
     assert(batchSchema.find("CLI reads the array from stdin") != std::string::npos);
@@ -254,6 +256,17 @@ void TestDaemonDispatch() {
         }}
     });
     assert(browserEvalWithControlMetadata["code"] != "invalid_browser_eval");
+
+    auto invalidFocusedBrowserEval = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "browser_eval"},
+        {"params", {
+            {"script", "document.title"},
+            {"targetFocused", "yes"},
+            {"launch", false}
+        }}
+    });
+    assert(invalidFocusedBrowserEval["ok"] == false);
+    assert(invalidFocusedBrowserEval["code"] == "invalid_browser_eval");
     assert(batchSchema.find("requested, executed, failed") != std::string::npos);
     auto targetSchema = schema["data"]["target"].dump();
     assert(targetSchema.find("rect:left,top,right,bottom") != std::string::npos);

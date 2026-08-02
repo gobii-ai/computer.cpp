@@ -1742,7 +1742,222 @@ function ac.browser.eval(script, opts)
   return ac.request("browser_eval", merge({ script = script, readOnly = true }, opts or {}), { allow_error = true })
 end
 
-function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
+-- Browser-backed semantic apps share one native Chrome window containing one
+-- managed tab. The target id is persisted between Lua processes, while every
+-- reuse is verified against both the native window and document.hasFocus().
+-- Navigation and window creation remain native keyboard actions; CDP is used
+-- only to inspect and bind the exact page that received those actions.
+ac.browser.managed = {}
+
+local function managed_browser_state_path()
+  local root = os.getenv("TEMP") or os.getenv("TMPDIR") or os.getenv("TMP") or "/tmp"
+  local separator = package.config:sub(1, 1)
+  return root .. separator .. ".computer.cpp" .. separator .. "managed-browser-surfaces.json"
+end
+
+local function read_managed_browser_state()
+  local file = io.open(managed_browser_state_path(), "r")
+  if not file then return {} end
+  local text = file:read("*a") or ""
+  file:close()
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return {} end
+  return value
+end
+
+local function write_managed_browser_state(state)
+  local file = io.open(managed_browser_state_path(), "w")
+  if not file then return false end
+  local ok = file:write(json.encode(state))
+  file:close()
+  return ok ~= nil
+end
+
+local function managed_browser_options(opts, extra)
+  opts = opts or {}
+  return merge({
+    browser = opts.browser or "Google Chrome",
+    host = opts.host or os.getenv("COMPUTER_CPP_CHROME_CDP_HOST") or "127.0.0.1",
+    port = tonumber(opts.port or os.getenv("COMPUTER_CPP_CHROME_CDP_PORT") or "9222") or 9222,
+    launch = false,
+    readOnly = true,
+  }, extra or {})
+end
+
+local function managed_window_active()
+  local response = ac.request("window_active", {}, { allow_error = true })
+  return response and response.ok and response.data and response.data.window or nil
+end
+
+local function managed_delay(ms)
+  ac.request("wait", { delayMs = ms, timeoutMs = ms }, { allow_error = true })
+end
+
+local function managed_wait(predicate, timeout_ms, interval_ms)
+  local deadline = os.time() + math.max(1, math.ceil((tonumber(timeout_ms) or 5000) / 1000))
+  repeat
+    local ok, value = pcall(predicate)
+    if ok and value then return value end
+    managed_delay(math.max(50, tonumber(interval_ms) or 150))
+  until os.time() >= deadline
+  return nil
+end
+
+local function managed_target_is_focused(record, opts)
+  if type(record) ~= "table" or tostring(record.targetId or "") == "" then return false end
+  local result = ac.browser.eval("document.hasFocus()", managed_browser_options(opts, {
+    targetId = tostring(record.targetId),
+    launch = false,
+  }))
+  return result and result.ok and result.data and result.data.value == true and result or false
+end
+
+local function reuse_managed_browser_surface(record, opts)
+  if type(record) ~= "table" or tostring(record.windowId or "") == "" then return nil end
+  local exists = ac.browser.eval("location.href", managed_browser_options(opts, {
+    targetId = tostring(record.targetId or ""),
+    launch = false,
+  }))
+  if not exists or not exists.ok then return nil end
+
+  local activated = ac.request("window_activate", { id = tostring(record.windowId) }, { allow_error = true })
+  if not activated or not activated.ok then return nil end
+  local active = managed_wait(function()
+    local window = managed_window_active()
+    return window and tostring(window.id or "") == tostring(record.windowId) and window or false
+  end, opts.focusTimeoutMs or 5000, 150)
+  if not active then return nil end
+
+  local focused = managed_target_is_focused(record, opts)
+  if not focused then
+    -- Escape releases Chrome UI such as the omnibox without changing page DOM.
+    ac.request("press", { keys = "escape", holdMs = 40 }, { allow_error = true })
+    focused = managed_wait(function()
+      return managed_target_is_focused(record, opts)
+    end, 2000, 150)
+  end
+  if not focused then return nil end
+  return {
+    targetId = tostring(record.targetId),
+    windowId = tostring(record.windowId),
+    browserPid = tonumber(record.browserPid),
+    currentUrl = tostring(focused.data and focused.data.targetUrl or exists.data and exists.data.value or ""),
+    reused = true,
+  }
+end
+
+function ac.browser.managed.clear(name)
+  local key = tostring(name or "web.primary")
+  local state = read_managed_browser_state()
+  state[key] = nil
+  write_managed_browser_state(state)
+  return { ok = true, data = { name = key, cleared = true } }
+end
+
+function ac.browser.managed.ensure(opts)
+  opts = opts or {}
+  local name = tostring(opts.name or "web.primary")
+  local start_url = tostring(opts.startUrl or "")
+  if start_url == "" or not start_url:match("^https?://") then
+    return { ok = false, code = "invalid_managed_browser", error = "managed browser startUrl must be an absolute HTTP(S) URL" }
+  end
+  local state = read_managed_browser_state()
+  local reused = reuse_managed_browser_surface(state[name], opts)
+  if reused then
+    reused.name = name
+    return { ok = true, data = reused }
+  end
+
+  local bootstrap = ac.browser.eval("location.href", managed_browser_options(opts, {
+    targetId = "",
+    targetUrlPrefix = "",
+    targetTitle = "",
+    launch = opts.launch ~= false,
+  }))
+  if not bootstrap or not bootstrap.ok or not bootstrap.data then
+    return bootstrap or { ok = false, code = "browser_debug_unavailable", error = "Chrome DevTools is unavailable" }
+  end
+  local browser_pid = tonumber(bootstrap.data.browserPid)
+  if not browser_pid or browser_pid <= 0 then
+    return { ok = false, code = "browser_pid_unavailable", error = "Chrome DevTools did not report its browser process id" }
+  end
+
+  local activated = ac.request("app_activate_pid", { pid = browser_pid }, { allow_error = true })
+  if not activated or not activated.ok then
+    return { ok = false, code = "browser_focus_failed", error = "could not activate the debuggable Chrome process" }
+  end
+  managed_wait(function()
+    local window = managed_window_active()
+    return window and tonumber(window.pid) == browser_pid and window or false
+  end, opts.focusTimeoutMs or 7000, 150)
+  local before = managed_window_active()
+  local before_id = before and tostring(before.id or "") or ""
+
+  local opened = ac.request("press", { keys = { "primary", "n" }, holdMs = 40 }, { allow_error = true })
+  if not opened or not opened.ok then
+    return { ok = false, code = "browser_window_create_failed", error = "could not create the managed Chrome window" }
+  end
+  local window = managed_wait(function()
+    local current = managed_window_active()
+    local current_id = current and tostring(current.id or "") or ""
+    return current and tonumber(current.pid) == browser_pid and current_id ~= "" and current_id ~= before_id and current or false
+  end, opts.createTimeoutMs or 7000, 150)
+  if not window then
+    return { ok = false, code = "browser_window_create_failed", error = "Chrome did not expose the new managed window" }
+  end
+
+  ac.request("press", { keys = { "primary", "l" }, holdMs = 40 }, { allow_error = true })
+  managed_delay(80)
+  local typed = ac.request("type", { text = start_url, paste = true, holdMs = 20 }, { allow_error = true })
+  if not typed or not typed.ok then
+    return { ok = false, code = "browser_navigation_failed", error = "could not type the managed browser start URL" }
+  end
+  managed_delay(80)
+  ac.request("press", { keys = "enter", holdMs = 40 }, { allow_error = true })
+
+  local expected_prefix = tostring(opts.startUrlPrefix or start_url)
+  local selected = managed_wait(function()
+    local result = ac.browser.eval("location.href", managed_browser_options(opts, {
+      targetId = "",
+      targetUrlPrefix = "",
+      targetTitle = "",
+      targetFocused = true,
+      launch = false,
+    }))
+    if not result or not result.ok or not result.data then return false end
+    local current_url = tostring(result.data.value or result.data.targetUrl or "")
+    if expected_prefix ~= "" and current_url:sub(1, #expected_prefix) ~= expected_prefix then return false end
+    return result
+  end, opts.navigationTimeoutMs or 15000, 200)
+  if not selected then
+    return { ok = false, code = "browser_target_not_found", error = "could not bind the focused tab in the new managed Chrome window" }
+  end
+
+  local record = {
+    targetId = tostring(selected.data.targetId or ""),
+    windowId = tostring(window.id or ""),
+    browserPid = browser_pid,
+  }
+  if record.targetId == "" or record.windowId == "" then
+    return { ok = false, code = "browser_target_not_found", error = "managed Chrome surface did not expose stable target and window ids" }
+  end
+  state[name] = record
+  write_managed_browser_state(state)
+  return { ok = true, data = {
+    name = name,
+    targetId = record.targetId,
+    windowId = record.windowId,
+    browserPid = record.browserPid,
+    currentUrl = tostring(selected.data.value or selected.data.targetUrl or ""),
+    reused = false,
+  } }
+end
+
+function ac.browser.managed.focus(opts)
+  return ac.browser.managed.ensure(opts or {})
+end
+
+)LUA" R"LUA(function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
 function ac.wait_frontmost(app, opts) return ac.wait(merge({ frontmost = app }, opts)) end
 function ac.wait_stable_screen(ms, opts) return ac.wait(merge({ stable_screen_ms = ms }, opts)) end
 function ac.sleep(ms)

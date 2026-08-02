@@ -27,7 +27,7 @@ json CapabilitiesJson() {
             "target.find", "target.explain", "get", "click", "click.multi", "click.motion", "click.timing", "click.hover-safe", "click.park", "mouse.click", "mouse.click.motion", "mouse.move", "mouse.drag", "mouse.down", "mouse.up",
             "window.active", "window.list", "window.close", "window.bounds", "scroll", "scroll.anchor", "scroll.clustered", "scroll.humanize", "scroll.read",
             "image.info", "image.split", "llm.chat", "open.url", "press", "type",
-            "browser.eval", "browser.eval.cdp", "browser.eval.read-only",
+            "browser.eval", "browser.eval.cdp", "browser.eval.read-only", "browser.eval.focused-target",
             "clipboard", "clipboard.read", "clipboard.write", "clipboard.paste",
             "wait", "wait.frontmost", "wait.stable-screen", "batch"
         }},
@@ -186,6 +186,7 @@ json SchemaJson() {
             {"targetId", "optional exact Chrome DevTools page target id; remains stable while that tab navigates"},
             {"targetUrlPrefix", "optional URL prefix that the Chrome DevTools page target must match"},
             {"targetTitle", "optional exact Chrome DevTools page title that the target must match"},
+            {"targetFocused", "optional boolean requiring the selected page target to report document.hasFocus(); useful for binding native input to the same tab"},
             {"browserContextId", "optional Chrome DevTools browser context id filter"},
             {"browser", "optional browser app name for launch attempt; default Google Chrome"},
             {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},
