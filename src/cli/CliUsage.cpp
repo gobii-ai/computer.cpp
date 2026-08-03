@@ -37,6 +37,7 @@ Daemon:
   config show                         Show redacted model/provider config
   config set-provider <name> ...      Configure an LLM endpoint and API key
   config set-profile <name> ...       Configure model and sampling defaults
+  config set-browser ...              Configure the managed automation browser
   config set-gobii --base-url url     Configure the Gobii platform endpoint
   config import-env                   One-time import from legacy LLM env vars
   config test [profile] [--live]      Validate or test configured inference
@@ -66,7 +67,7 @@ Observation:
   app activate-pid <pid>               Activate app by process id
   desktop session-state                Inspect desktop lock, screensaver, and display state
   desktop wake [--force]               Wake a screensaver or display; force sends activity despite a false-ready state
-  open url <http-url> [--browser app] [--new-window|--no-new-window] [--new-instance]
+  open url <http-url> [--browser id] [--profile name] [--new-window|--no-new-window] [--new-instance]
                                       Open a URL in a browser
   observe events [limit]               List recent observed input events
   observe frames [@evN|last] [limit]   List frames captured for an event

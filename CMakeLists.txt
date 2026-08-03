@@ -127,6 +127,7 @@ string(TIMESTAMP COMPUTER_CPP_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
 add_library(computer_cpp_core
     src/core/AppPaths.cpp
     src/core/AppConfig.cpp
+    src/core/Browser.cpp
     src/core/ConfiguredServerController.cpp
     src/core/GobiiApiClient.cpp
     src/core/GobiiArtifactUploader.cpp

@@ -207,6 +207,15 @@ bool IsAllowedProviderType(const std::string& type) {
     return type == "openrouter" || type == "openai-compatible";
 }
 
+bool IsStableName(const std::string& value) {
+    if (value.empty() || !std::isalnum(static_cast<unsigned char>(value.front()))) {
+        return false;
+    }
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '.' || ch == '_' || ch == '-';
+    });
+}
+
 void AddProfileScalarParams(LlmProfileConfig& profile) {
     if (profile.temperature.has_value()) {
         profile.params["temperature"] = *profile.temperature;
@@ -284,6 +293,22 @@ std::optional<double> ParseDouble(const std::string& raw) {
 }
 
 } // namespace
+
+bool IsSupportedBrowserId(const std::string& browser) {
+    return browser == "chrome" || browser == "edge" ||
+        browser == "brave" || browser == "chromium";
+}
+
+bool IsValidBrowserProfileName(const std::string& profile) {
+    return IsStableName(profile);
+}
+
+bool IsValidBrowserProxyServer(const std::string& proxyServer) {
+    if (proxyServer.empty()) return true;
+    return std::none_of(proxyServer.begin(), proxyServer.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0 || std::iscntrl(ch) != 0;
+    });
+}
 
 std::string GenerateServerAuthToken() {
     std::array<unsigned char, 32> bytes {};
@@ -432,9 +457,21 @@ AppConfig LoadAppConfig(
     config.profiles.clear();
     config.server = ServerConfig{};
     config.recording = RecordingConfig{};
+    config.browser = BrowserConfig{};
     config.gobii = GobiiConfig{};
     config.version = static_cast<int>(parsed["version"].value_or<int64_t>(1));
     config.defaultProfile = parsed["default_profile"].value_or("main");
+
+    if (auto browser = parsed["browser"].as_table()) {
+        config.browser.defaultBrowser =
+            TomlString(*browser, "default", config.browser.defaultBrowser);
+        config.browser.profile =
+            TomlString(*browser, "profile", config.browser.profile);
+        config.browser.userDataDir =
+            TomlString(*browser, "user_data_dir");
+        config.browser.proxyServer =
+            TomlString(*browser, "proxy");
+    }
 
     if (auto providers = parsed["providers"].as_table()) {
         for (const auto& [key, node] : *providers) {
@@ -600,6 +637,31 @@ AppConfig LoadAppConfig(
             return {};
         }
     }
+    if (!IsSupportedBrowserId(config.browser.defaultBrowser)) {
+        if (error) {
+            *error = "browser.default must be chrome, edge, brave, or chromium";
+        }
+        return {};
+    }
+    if (!IsValidBrowserProfileName(config.browser.profile)) {
+        if (error) {
+            *error = "browser.profile must match [A-Za-z0-9][A-Za-z0-9._-]*";
+        }
+        return {};
+    }
+    if (!config.browser.userDataDir.empty() &&
+        !fs::path(config.browser.userDataDir).is_absolute()) {
+        if (error) {
+            *error = "browser.user_data_dir must be an absolute path";
+        }
+        return {};
+    }
+    if (!IsValidBrowserProxyServer(config.browser.proxyServer)) {
+        if (error) {
+            *error = "browser.proxy must be a Chromium proxy endpoint or rule without whitespace";
+        }
+        return {};
+    }
     return config;
 }
 
@@ -657,6 +719,12 @@ json AppConfigToJson(const AppConfig& config, bool redactSecrets) {
         {"includesCursor", true},
         {"includesAudio", false},
     };
+    out["browser"] = {
+        {"default", config.browser.defaultBrowser},
+        {"profile", config.browser.profile},
+        {"userDataDir", config.browser.userDataDir},
+        {"proxy", config.browser.proxyServer},
+    };
     out["gobii"] = {
         {"baseUrl", config.gobii.baseUrl},
         {"machineId", config.gobii.machineId},
@@ -688,6 +756,17 @@ std::string AppConfigToToml(const AppConfig& config) {
     out << "# Keep this file private; it may contain provider API keys.\n\n";
     out << "version = " << config.version << "\n";
     out << "default_profile = " << TomlStringLiteral(config.defaultProfile) << "\n\n";
+
+    out << TomlTablePath({"browser"}) << "\n";
+    out << "default = " << TomlStringLiteral(config.browser.defaultBrowser) << "\n";
+    out << "profile = " << TomlStringLiteral(config.browser.profile) << "\n";
+    if (!config.browser.userDataDir.empty()) {
+        out << "user_data_dir = " << TomlStringLiteral(config.browser.userDataDir) << "\n";
+    }
+    if (!config.browser.proxyServer.empty()) {
+        out << "proxy = " << TomlStringLiteral(config.browser.proxyServer) << "\n";
+    }
+    out << "\n";
 
     for (const auto& [name, provider] : config.providers) {
         out << TomlTablePath({"providers", name}) << "\n";

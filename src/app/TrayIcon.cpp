@@ -3,6 +3,7 @@
 
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/Browser.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/ConfiguredServerController.h"
@@ -40,6 +41,7 @@
 #include <wx/clipbrd.h>
 #include <wx/collpane.h>
 #include <wx/dcmemory.h>
+#include <wx/dirdlg.h>
 #include <wx/filedlg.h>
 #include <wx/graphics.h>
 #include <wx/icon.h>
@@ -887,6 +889,7 @@ class LlmSettingsDialog : public wxDialog {
     enum class SettingsPage : size_t {
         Profiles,
         Providers,
+        Browser,
         Server,
         Recording,
         Advanced,
@@ -905,6 +908,7 @@ class LlmSettingsDialog : public wxDialog {
         kSettingsPageLabels = {
             "Model Profiles",
             "AI Providers",
+            "Browser",
             "Local Server",
             "Recording",
             "Advanced"
@@ -999,6 +1003,7 @@ public:
         pages_ = new wxSimplebook(this, wxID_ANY);
         BuildProfilesPage();
         BuildProvidersPage();
+        BuildBrowserPage();
         BuildServerPage();
         BuildRecordingPage();
         BuildConfigPage();
@@ -1651,6 +1656,109 @@ private:
         BindDirty(serverAppPath_);
     }
 
+    void BuildBrowserPage() {
+        auto* page = AddSettingsPage();
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        AddPageHeader(
+            page,
+            root,
+            "Managed Browser",
+            "Choose the browser ComputerCpp opens for browser-based apps.");
+        auto* content = new wxBoxSizer(wxVERTICAL);
+        auto* browserBox = AddSectionCard(
+            page,
+            content,
+            "Automation browser",
+            "ComputerCpp starts this browser automatically with local inspection enabled.");
+        wxWindow* browserParent = browserBox->GetStaticBox();
+        auto* grid = new wxFlexGridSizer(2, 8, 10);
+        grid->AddGrowableCol(1, 1);
+        grid->Add(new wxStaticText(browserParent, wxID_ANY, "Browser"),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, 8);
+        browserChoice_ = new wxChoice(browserParent, wxID_ANY);
+        grid->Add(browserChoice_, 1, wxEXPAND | wxBOTTOM, 8);
+        browserBox->Add(grid, 0, wxALL | wxEXPAND, 12);
+        browserStatus_ = AddHelperText(browserParent, browserBox, "", 12);
+
+        auto* advanced = new wxCollapsiblePane(
+            page,
+            wxID_ANY,
+            "Advanced browser settings",
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxCP_NO_TLW_RESIZE);
+        auto* advancedRoot = new wxBoxSizer(wxVERTICAL);
+        auto* advancedGrid = new wxFlexGridSizer(2, 8, 10);
+        advancedGrid->AddGrowableCol(1, 1);
+        browserProfile_ = AddTextField(
+            advanced->GetPane(), advancedGrid, "Managed profile");
+        browserProfile_->SetHint("default");
+        advancedGrid->Add(
+            new wxStaticText(
+                advanced->GetPane(), wxID_ANY, "User data directory"),
+            0,
+            wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM,
+            8);
+        auto* userDataRow = new wxBoxSizer(wxHORIZONTAL);
+        browserUserDataDir_ = new wxTextCtrl(advanced->GetPane(), wxID_ANY);
+        browserUserDataDir_->SetHint("Managed automatically");
+        auto* chooseUserDataDir = new wxButton(
+            advanced->GetPane(), wxID_ANY, "Choose...");
+        auto* clearUserDataDir = new wxButton(
+            advanced->GetPane(), wxID_ANY, "Use Default");
+        userDataRow->Add(browserUserDataDir_, 1, wxRIGHT | wxEXPAND, 8);
+        userDataRow->Add(chooseUserDataDir, 0, wxRIGHT, 8);
+        userDataRow->Add(clearUserDataDir, 0);
+        advancedGrid->Add(userDataRow, 1, wxEXPAND | wxBOTTOM, 8);
+        browserProxy_ = AddTextField(
+            advanced->GetPane(), advancedGrid, "Proxy server");
+        browserProxy_->SetHint("https://proxy.example:8080");
+        advancedRoot->Add(advancedGrid, 0, wxALL | wxEXPAND, 10);
+        auto* browserProfileHelp = AddHelperText(
+            advanced->GetPane(),
+            advancedRoot,
+            "Each browser/profile pair has separate persistent sign-in data. "
+            "Leave the directory empty to let ComputerCpp manage it. If you "
+            "choose one, use a dedicated automation directory rather than your "
+            "everyday browser data directory. Leave the proxy empty to use the "
+            "system default. Store proxy credentials in the managed browser's "
+            "native sign-in prompt, not in this field. Proxy changes apply the "
+            "next time the managed browser starts.",
+            10);
+        browserProfileHelp->Wrap(FromDIP(720));
+        advanced->GetPane()->SetSizer(advancedRoot);
+        content->Add(advanced, 0, wxTOP | wxEXPAND, 18);
+
+        root->Add(content, 0, wxALL | wxEXPAND, 22);
+        root->AddStretchSpacer();
+        page->SetSizer(root);
+
+        browserChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent& event) {
+            RefreshBrowserStatus();
+            OnControlChanged(event);
+        });
+        chooseUserDataDir->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            const std::string current = FieldValue(browserUserDataDir_);
+            const wxString initial = current.empty()
+                ? wxString::FromUTF8(ConfigDir().string())
+                : wxString::FromUTF8(current);
+            wxDirDialog dialog(
+                this,
+                "Choose a dedicated browser user data directory",
+                initial,
+                wxDD_DEFAULT_STYLE | wxDD_NEW_DIR_BUTTON);
+            if (dialog.ShowModal() == wxID_OK) {
+                browserUserDataDir_->SetValue(dialog.GetPath());
+            }
+        });
+        clearUserDataDir->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            browserUserDataDir_->SetValue("");
+        });
+        BindDirty(browserProfile_);
+        BindDirty(browserUserDataDir_);
+        BindDirty(browserProxy_);
+    }
+
     void BuildConfigPage() {
         auto* page = AddSettingsPage();
         auto* root = new wxBoxSizer(wxVERTICAL);
@@ -1669,7 +1777,7 @@ private:
         AddHelperText(
             cardParent,
             box,
-            "Providers, profiles, server settings, and recording preferences are stored here.",
+            "Providers, profiles, browser, server, and recording preferences are stored here.",
             12);
         auto* grid = new wxFlexGridSizer(2, 8, 10);
         grid->AddGrowableCol(1, 1);
@@ -1929,6 +2037,7 @@ private:
                               config_.recording.retentionDays));
         }
         RefreshRecordingPermissionStatus();
+        LoadBrowserFields();
         PopulateProviderLists(FirstProviderName());
         PopulateProviderChoices();
         PopulateProfileList(config_.defaultProfile.empty() ? FirstProfileName() : config_.defaultProfile);
@@ -2085,6 +2194,66 @@ private:
         serverAllowedOrigins_->ChangeValue(JoinTextList(config_.server.allowedOrigins));
         RefreshServerUrlPreview();
         loading_ = false;
+    }
+
+    void LoadBrowserFields() {
+        if (!browserChoice_ || !browserProfile_ || !browserUserDataDir_ ||
+            !browserProxy_) return;
+        loading_ = true;
+        browserChoice_->Clear();
+        browserIds_.clear();
+        for (const auto& browser : BrowserCatalog()) {
+            browserIds_.push_back(browser.id);
+            wxString label = wxString::FromUTF8(browser.displayName);
+            if (browser.recommended) label += "  (Recommended)";
+            if (!browser.installed) label += "  (Not installed)";
+            browserChoice_->Append(label);
+        }
+        auto found = std::find(
+            browserIds_.begin(), browserIds_.end(),
+            config_.browser.defaultBrowser);
+        browserChoice_->SetSelection(found == browserIds_.end()
+            ? 0
+            : static_cast<int>(std::distance(browserIds_.begin(), found)));
+        browserProfile_->ChangeValue(config_.browser.profile);
+        browserUserDataDir_->ChangeValue(config_.browser.userDataDir);
+        browserProxy_->ChangeValue(config_.browser.proxyServer);
+        loading_ = false;
+        RefreshBrowserStatus();
+    }
+
+    void RefreshBrowserStatus() {
+        if (!browserStatus_ || !browserChoice_) return;
+        const int selection = browserChoice_->GetSelection();
+        if (selection == wxNOT_FOUND ||
+            static_cast<size_t>(selection) >= browserIds_.size()) {
+            browserStatus_->SetLabel("Choose a managed browser.");
+            return;
+        }
+        const BrowserDescriptor browser =
+            DescribeBrowser(browserIds_[static_cast<size_t>(selection)]);
+        if (browser.installed) {
+            const auto windows = Platform::ListWindows(browser.applicationName);
+            const bool running = std::any_of(
+                windows.begin(), windows.end(),
+                [](const Platform::WindowInfo& window) {
+                    return window.available;
+                });
+            browserStatus_->SetLabel(
+                browser.displayName +
+                (running
+                    ? " is running. ComputerCpp will reuse its managed profile when available."
+                    : " is installed and will open automatically for browser tasks."));
+            browserStatus_->SetForegroundColour(
+                wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
+        } else {
+            browserStatus_->SetLabel(
+                browser.displayName +
+                " is not installed. Ordinary links use the system browser; automation apps will ask you to choose an installed browser.");
+            browserStatus_->SetForegroundColour(wxColour(190, 110, 30));
+        }
+        browserStatus_->Wrap(FromDIP(720));
+        Layout();
     }
 
     void PopulateServerAppList(const std::string& selected) {
@@ -2396,6 +2565,45 @@ private:
         return true;
     }
 
+    bool FlushBrowserFields() {
+        if (!browserChoice_ || !browserProfile_ || !browserUserDataDir_ ||
+            !browserProxy_) return true;
+        const int selection = browserChoice_->GetSelection();
+        if (selection == wxNOT_FOUND ||
+            static_cast<size_t>(selection) >= browserIds_.size()) {
+            SetStatus("Choose a managed browser.", StatusKind::Error);
+            return false;
+        }
+        const std::string profile = FieldValue(browserProfile_);
+        if (!IsValidBrowserProfileName(profile)) {
+            SetStatus(
+                "Managed browser profile must match [A-Za-z0-9][A-Za-z0-9._-]*.",
+                StatusKind::Error);
+            return false;
+        }
+        const std::string userDataDir = FieldValue(browserUserDataDir_);
+        if (!userDataDir.empty() &&
+            !std::filesystem::path(userDataDir).is_absolute()) {
+            SetStatus(
+                "Browser user data directory must be an absolute path.",
+                StatusKind::Error);
+            return false;
+        }
+        const std::string proxyServer = FieldValue(browserProxy_);
+        if (!IsValidBrowserProxyServer(proxyServer)) {
+            SetStatus(
+                "Browser proxy must be a Chromium proxy endpoint or rule without whitespace.",
+                StatusKind::Error);
+            return false;
+        }
+        config_.browser.defaultBrowser =
+            browserIds_[static_cast<size_t>(selection)];
+        config_.browser.profile = profile;
+        config_.browser.userDataDir = userDataDir;
+        config_.browser.proxyServer = proxyServer;
+        return true;
+    }
+
     bool FlushServerAppFields() {
         if (activeServerApp_.empty()) {
             return true;
@@ -2468,13 +2676,15 @@ private:
         if (recordingEnabled_) {
             config_.recording.enabled = recordingEnabled_->GetValue();
         }
-        return FlushProviderFields() && FlushProfileFields() && FlushServerFields();
+        return FlushBrowserFields() && FlushProviderFields() &&
+            FlushProfileFields() && FlushServerFields();
     }
 
     void RefreshAfterMutation(const std::string& profile, const std::string& provider) {
         PopulateProviderLists(provider.empty() ? activeProvider_ : provider);
         PopulateProviderChoices();
         PopulateProfileList(profile.empty() ? activeProfile_ : profile);
+        LoadBrowserFields();
         LoadServerFields();
         PopulateServerAppList(activeServerApp_);
     }
@@ -2992,6 +3202,13 @@ private:
     wxRadioButton* providerUseApiKey_ = nullptr;
     std::map<std::string, std::string> providerApiKeyDrafts_;
     std::map<std::string, bool> providerUseApiKeyModes_;
+
+    wxChoice* browserChoice_ = nullptr;
+    wxTextCtrl* browserProfile_ = nullptr;
+    wxTextCtrl* browserUserDataDir_ = nullptr;
+    wxTextCtrl* browserProxy_ = nullptr;
+    wxStaticText* browserStatus_ = nullptr;
+    std::vector<std::string> browserIds_;
 
     wxListBox* serverAppList_ = nullptr;
     wxTextCtrl* serverHost_ = nullptr;

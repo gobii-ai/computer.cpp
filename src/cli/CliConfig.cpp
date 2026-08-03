@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -222,6 +223,72 @@ int HandleSetProvider(const CliOptions& options, const std::vector<std::string>&
     return SaveAndReport(options, config, extra);
 }
 
+int HandleSetBrowser(const CliOptions& options, const std::vector<std::string>& args) {
+    AppConfig config;
+    std::string error;
+    if (!LoadConfig(config, error)) {
+        return ErrorExit(error, 1);
+    }
+    bool changed = false;
+    for (size_t i = 2; i < args.size(); ++i) {
+        if (args[i] == "--browser") {
+            if (i + 1 >= args.size()) return ErrorExit("config set-browser --browser requires a value");
+            const std::string value = Lowercase(Trim(args[++i]));
+            if (!IsSupportedBrowserId(value)) {
+                return ErrorExit("browser must be chrome, edge, brave, or chromium");
+            }
+            config.browser.defaultBrowser = value;
+            changed = true;
+        } else if (args[i] == "--profile") {
+            if (i + 1 >= args.size()) return ErrorExit("config set-browser --profile requires a value");
+            const std::string value = Trim(args[++i]);
+            if (!IsValidBrowserProfileName(value)) {
+                return ErrorExit("browser profile must match [A-Za-z0-9][A-Za-z0-9._-]*");
+            }
+            config.browser.profile = value;
+            changed = true;
+        } else if (args[i] == "--user-data-dir") {
+            if (i + 1 >= args.size()) return ErrorExit("config set-browser --user-data-dir requires a value");
+            const std::string value = Trim(args[++i]);
+            if (value.empty() || !std::filesystem::path(value).is_absolute()) {
+                return ErrorExit("browser user data directory must be an absolute path");
+            }
+            config.browser.userDataDir = value;
+            changed = true;
+        } else if (args[i] == "--no-user-data-dir") {
+            config.browser.userDataDir.clear();
+            changed = true;
+        } else if (args[i] == "--proxy" || args[i] == "--proxy-server") {
+            if (i + 1 >= args.size()) {
+                return ErrorExit("config set-browser --proxy requires a value");
+            }
+            const std::string value = Trim(args[++i]);
+            if (value.empty() || !IsValidBrowserProxyServer(value)) {
+                return ErrorExit(
+                    "browser proxy must be a Chromium proxy endpoint or rule without whitespace");
+            }
+            config.browser.proxyServer = value;
+            changed = true;
+        } else if (args[i] == "--no-proxy" || args[i] == "--no-proxy-server") {
+            config.browser.proxyServer.clear();
+            changed = true;
+        } else {
+            return ErrorExit("unknown config set-browser option: " + args[i]);
+        }
+    }
+    if (!changed) {
+        return ErrorExit(
+            "config set-browser requires --browser, --profile, "
+            "--user-data-dir, --proxy, or a corresponding --no-* option");
+    }
+    return SaveAndReport(options, config, {
+        {"browser", config.browser.defaultBrowser},
+        {"profile", config.browser.profile},
+        {"userDataDir", config.browser.userDataDir},
+        {"proxy", config.browser.proxyServer},
+    });
+}
+
 int HandleSetProfile(const CliOptions& options, const std::vector<std::string>& args) {
     if (args.size() < 3 || IsBlank(args[2])) {
         return ErrorExit("config set-profile requires a profile name");
@@ -381,6 +448,9 @@ Usage:
   config open
   config init [--force]
   config show
+  config set-browser [--browser chrome|edge|brave|chromium] [--profile name]
+                     [--user-data-dir absolute-path|--no-user-data-dir]
+                     [--proxy endpoint-or-rule|--no-proxy]
   config set-gobii --base-url url
   config set-provider <name> [--type openrouter|openai-compatible] [--base-url url]
                       [--api-key key|--api-key-stdin|--no-api-key]
@@ -406,6 +476,7 @@ Usage:
     if (args[1] == "show") return HandleShow(options, args);
     if (args[1] == "set-gobii") return HandleSetGobii(options, args);
     if (args[1] == "set-provider") return HandleSetProvider(options, args);
+    if (args[1] == "set-browser") return HandleSetBrowser(options, args);
     if (args[1] == "set-profile") return HandleSetProfile(options, args);
     if (args[1] == "use") return HandleUse(options, args);
     if (args[1] == "import-env") return HandleImportEnv(options, args);

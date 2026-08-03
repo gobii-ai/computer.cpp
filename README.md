@@ -1040,6 +1040,48 @@ computer.cpp clipboard write "hello"
 computer.cpp clipboard paste
 ```
 
+## Managed Browser Configuration
+
+Browser-based Lua apps use a persistent ComputerCpp-managed Chromium profile.
+Google Chrome is the default and recommended browser. When a task needs browser
+inspection, ComputerCpp launches the configured browser automatically with CDP
+on an ephemeral loopback port and reuses it for later tasks.
+
+```bash
+computer.cpp config set-browser --browser chrome --profile default \
+  --user-data-dir /absolute/path/to/dedicated-browser-data \
+  --proxy https://proxy.example:8001
+```
+
+The equivalent configuration is:
+
+```toml
+[browser]
+default = "chrome"
+profile = "default"
+# Optional. Omit this to use ComputerCpp's managed directory.
+user_data_dir = "/absolute/path/to/dedicated-browser-data"
+# Optional Chromium proxy endpoint or rule. Do not include credentials.
+proxy = "https://proxy.example:8001"
+```
+
+Supported managed browser ids are `chrome`, `edge`, `brave`, and `chromium`.
+Each browser/profile pair has isolated persistent sign-in data. If the selected
+browser is not installed, ordinary URL opens fall back to the operating system
+default browser, while inspection-dependent apps return setup guidance.
+The advanced Browser settings page can select or clear a custom user-data
+directory. Use a dedicated automation directory; Chrome may reject remote
+debugging when its normal everyday user-data directory is selected. Clear the
+field, or run `config set-browser --no-user-data-dir`, to restore the managed
+directory.
+The optional proxy is passed to Chromium as `--proxy-server`. Leave it empty to
+use the system default. Proxy credentials belong in the managed browser's native
+sign-in prompt, where ComputerCpp can submit an already-filled proxy prompt;
+they are not stored in `config.toml`. Use `config set-browser --no-proxy` to
+clear the proxy.
+Because Chromium fixes proxy settings at launch, a changed proxy takes effect
+after the managed browser is closed and ComputerCpp starts it again.
+
 ## LLM Configuration
 
 LLM calls use one canonical user config file. The tray settings window and the
@@ -1057,8 +1099,8 @@ computer.cpp config test
 ```
 
 Use `computer.cpp config open` to open the editable TOML file. The config stores
-providers, profiles, model ids, timeouts, sampling defaults, OpenRouter routing
-preferences, and provider API keys. `config show` redacts keys, and the file is
+providers, profiles, managed-browser settings, model ids, timeouts, sampling
+defaults, OpenRouter routing preferences, and provider API keys. `config show` redacts keys, and the file is
 created in the platform user config directory. On macOS/Linux it is written
 owner-read/write only.
 
@@ -1122,6 +1164,9 @@ window edits the same `config.toml` file:
   id, optional temperature, top-p, max token, timeout, extra request params, and
   optional OpenRouter routing JSON. Use `Set Active` to make a profile the
   default and `Test Inference` to verify it.
+- `Browser` chooses the managed Chromium browser, persistent profile, optional
+  custom user-data directory, and proxy used by browser-based Lua apps. Chrome
+  is recommended and selected by default.
 - `Config` shows the config file path. `Open Config` opens the TOML file in the
   default editor, `Reload` discards unsaved UI changes, and `Save Changes`
   writes the TOML file.

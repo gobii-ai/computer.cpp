@@ -1,5 +1,9 @@
 #include "DaemonDesktop.h"
 
+#include "DaemonBrowser.h"
+
+#include "computer_cpp/AppConfig.h"
+#include "computer_cpp/Browser.h"
 #include "computer_cpp/ControlSession.h"
 #include "computer_cpp/Platform.h"
 #include "computer_cpp/StringUtils.h"
@@ -59,6 +63,15 @@ Platform::WindowInfo WaitForOpenedWindow(const std::string& appQuery, const std:
         return {};
     }
     return Platform::GetActiveWindow();
+}
+
+bool WaitForActivePid(int pid) {
+    if (pid <= 0) return false;
+    for (int attempt = 0; attempt < 70; ++attempt) {
+        if (Platform::GetFrontmostAppPid() == pid) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
 }
 
 bool IsHttpUrl(const std::string& url) {
@@ -426,16 +439,17 @@ json RunAppActiveCommand() {
 
 json RunOpenUrlCommand(const json& params, const std::string& activeControlToken) {
     if (auto unknown = UnknownParam(params, {
-        "url", "browser", "newWindow", "newInstance", "controlSession", "controlSessionToken", "controlScope"
+        "url", "browser", "profile", "newWindow", "newInstance", "controlSession", "controlSessionToken", "controlScope"
     })) {
         return Error("unknown open_url parameter: " + *unknown, "invalid_url");
     }
     auto urlParam = StringParam(params, "url", "");
-    auto browserParam = StringParam(params, "browser", "firefox");
+    auto browserParam = StringParam(params, "browser", "");
+    auto profileParam = StringParam(params, "profile", "");
     auto newWindow = BoolParam(params, "newWindow", true);
     auto newInstance = BoolParam(params, "newInstance", false);
-    if (!urlParam || !browserParam || !newWindow || !newInstance) {
-        return Error("open_url requires string url/browser and boolean newWindow/newInstance", "invalid_url");
+    if (!urlParam || !browserParam || !profileParam || !newWindow || !newInstance) {
+        return Error("open_url requires string url/browser/profile and boolean newWindow/newInstance", "invalid_url");
     }
     std::string url = *urlParam;
     if (IsBlank(url)) {
@@ -447,6 +461,74 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
     std::string browser = *browserParam;
     if (params.contains("browser") && IsBlank(browser)) {
         return Error("open_url browser must be non-empty when provided", "invalid_url");
+    }
+    if (params.contains("profile") && !IsValidBrowserProfileName(*profileParam)) {
+        return Error("open_url profile must match [A-Za-z0-9][A-Za-z0-9._-]*", "invalid_url");
+    }
+
+    const std::string normalizedBrowser = NormalizeBrowserId(browser);
+    const bool explicitUnsupported = params.contains("browser") &&
+        !IsSupportedBrowserId(normalizedBrowser);
+    if (!*newInstance && !explicitUnsupported) {
+        const ManagedBrowserSession session = ResolveManagedBrowserSession(params, true, true);
+        if (session.ok) {
+            if (session.pid <= 0) {
+                return Error("managed browser did not report its process id", "browser_pid_unavailable");
+            }
+            auto beforeIds = VisibleWindowIds(
+                Platform::ListWindows(session.applicationName));
+            if (!Platform::ActivateAppByPid(session.pid) ||
+                !WaitForActivePid(session.pid)) {
+                return Error("could not activate managed browser", "browser_focus_failed");
+            }
+            if (*newWindow && !Platform::SendHotkey({"primary", "n"}, 40)) {
+                return Error("could not create managed browser window", "browser_window_create_failed");
+            }
+            if (!Platform::SendHotkey({"primary", "l"}, 40) ||
+                !Platform::TypeText(url, 20) ||
+                !Platform::SendHotkey({"enter"}, 40)) {
+                return Error("could not navigate managed browser", "browser_navigation_failed");
+            }
+            auto activeWindow = WaitForOpenedWindow(
+                session.applicationName, beforeIds);
+            if (activeWindow.available && !activeWindow.id.empty()) {
+                RegisterControlSessionResource(activeControlToken, "window",
+                    activeWindow.id, session.applicationName,
+                    WindowToJson(activeWindow));
+            }
+            return Ok({
+                {"url", url},
+                {"browser", session.browser},
+                {"profile", session.profile},
+                {"managed", true},
+                {"newWindow", *newWindow},
+                {"newInstance", false},
+                {"window", WindowToJson(activeWindow)}
+            });
+        }
+        if (session.code != "browser_automation_unavailable") {
+            return Error(session.error, session.code);
+        }
+        browser.clear();
+    }
+
+    if (!explicitUnsupported) {
+        std::string configError;
+        const AppConfig config = LoadAppConfig(&configError);
+        if (!configError.empty()) return Error(configError, "browser_config_invalid");
+        const std::string browserId = browser.empty()
+            ? config.browser.defaultBrowser
+            : normalizedBrowser;
+        const BrowserDescriptor descriptor = DescribeBrowser(browserId);
+        if (descriptor.installed) {
+#if defined(__APPLE__)
+            browser = descriptor.applicationName;
+#else
+            browser = descriptor.executable;
+#endif
+        } else {
+            browser.clear();
+        }
     }
     auto beforeIds = VisibleWindowIds(Platform::ListWindows(browser));
     bool opened = Platform::OpenUrl(url, browser, *newWindow, *newInstance);
@@ -460,6 +542,8 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
     return Ok({
         {"url", url},
         {"browser", browser},
+        {"profile", ""},
+        {"managed", false},
         {"newWindow", *newWindow},
         {"newInstance", *newInstance},
         {"window", WindowToJson(activeWindow)}

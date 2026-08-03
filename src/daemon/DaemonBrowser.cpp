@@ -1,5 +1,7 @@
 #include "DaemonBrowser.h"
 
+#include "computer_cpp/AppConfig.h"
+#include "computer_cpp/Browser.h"
 #include "computer_cpp/StringUtils.h"
 
 #include "DaemonParsing.h"
@@ -13,7 +15,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -34,9 +38,11 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <spawn.h>
 #include <sys/socket.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
@@ -155,74 +161,21 @@ bool ProbeCdp(const std::string& host, int port) {
     return !HttpGet(CdpBaseUrl(host, port) + "/json/version", 500).empty();
 }
 
-std::string LowerBrowserName(std::string value) {
-    for (char& ch : value) {
-        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    }
-    return value;
-}
-
-std::string CdpUserDataDir() {
-    if (const char* configured = std::getenv("COMPUTER_CPP_CHROME_USER_DATA_DIR")) {
-        if (*configured != '\0') {
-            return configured;
-        }
-    }
-#if defined(_WIN32)
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-        return (std::filesystem::path(localAppData) / "computer.cpp" / "chrome-cdp").string();
-    }
-#elif defined(__APPLE__)
-    if (const char* home = std::getenv("HOME")) {
-        return (std::filesystem::path(home) / "Library" / "Application Support" / "computer.cpp" / "chrome-cdp").string();
-    }
-#else
-    if (const char* stateHome = std::getenv("XDG_STATE_HOME")) {
-        return (std::filesystem::path(stateHome) / "computer.cpp" / "chrome-cdp").string();
-    }
-    if (const char* home = std::getenv("HOME")) {
-        return (std::filesystem::path(home) / ".local" / "state" / "computer.cpp" / "chrome-cdp").string();
-    }
-#endif
-    return {};
-}
-
-#if defined(_WIN32)
-std::vector<std::string> WindowsBrowserCandidates(const std::string& browser) {
-    std::vector<std::string> candidates;
-    if (!browser.empty()) {
-        candidates.push_back(browser);
-    }
-    const std::string lower = LowerBrowserName(browser);
-    const bool chrome = lower.empty() || lower.find("chrome") != std::string::npos;
-    const bool edge = lower.find("edge") != std::string::npos;
-    const std::string executable = edge ? "msedge.exe" : "chrome.exe";
-    if (chrome || edge) {
-        for (const char* variable : {"PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"}) {
-            if (const char* root = std::getenv(variable)) {
-                std::filesystem::path path(root);
-                path /= edge ? "Microsoft/Edge/Application/msedge.exe" : "Google/Chrome/Application/chrome.exe";
-                std::error_code ec;
-                if (std::filesystem::is_regular_file(path, ec) && !ec) {
-                    candidates.push_back(path.string());
-                }
-            }
-        }
-        candidates.push_back(executable);
-    }
-    return candidates;
-}
-#endif
-
-bool LaunchBrowserForCdp(const std::string& browser, int port) {
+bool LaunchBrowserForCdp(
+    const BrowserDescriptor& browser,
+    const std::filesystem::path& userDataDir,
+    const std::string& proxyServer,
+    int port
+) {
     const std::string flag = "--remote-debugging-port=" + std::to_string(port);
-    const std::string userDataDir = CdpUserDataDir();
-    const std::string userDataFlag = userDataDir.empty() ? "" : "--user-data-dir=" + userDataDir;
+    const std::string userDataFlag = "--user-data-dir=" + userDataDir.string();
+    const std::string proxyFlag = "--proxy-server=" + proxyServer;
 #if defined(__APPLE__)
     pid_t pid = 0;
-    std::string app = browser.empty() ? "Google Chrome" : browser;
-    std::vector<std::string> args = {"/usr/bin/open", "-n", "-a", app, "--args", flag};
-    if (!userDataFlag.empty()) args.push_back(userDataFlag);
+    std::vector<std::string> args = {
+        "/usr/bin/open", "-n", "-a", browser.applicationName,
+        "--args", flag, userDataFlag, "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
@@ -233,52 +186,101 @@ bool LaunchBrowserForCdp(const std::string& browser, int port) {
     int status = 0;
     return waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #elif defined(_WIN32)
-    for (const auto& chosen : WindowsBrowserCandidates(browser)) {
-        std::vector<std::string> args = {chosen, flag};
-        if (!userDataFlag.empty()) args.push_back(userDataFlag);
-        if (Windows::LaunchDetached(args)) return true;
-    }
-    return false;
+    if (browser.executable.empty()) return false;
+    std::vector<std::string> args = {browser.executable, flag, userDataFlag,
+        "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
+    return Windows::LaunchDetached(args);
 #else
-    std::vector<std::string> candidates;
-    const std::string lower = LowerBrowserName(browser);
-    if (!browser.empty()) candidates.push_back(browser);
-    if (lower.empty() || lower.find("chrome") != std::string::npos) {
-        candidates.push_back("google-chrome");
-        candidates.push_back("chromium");
-        candidates.push_back("chromium-browser");
-    }
-    for (auto& chosen : candidates) {
-        std::vector<std::string> args = {chosen, flag};
-        if (!userDataFlag.empty()) args.push_back(userDataFlag);
-        std::vector<char*> argv;
-        for (auto& arg : args) argv.push_back(arg.data());
-        argv.push_back(nullptr);
-        pid_t pid = 0;
-        if (posix_spawnp(&pid, chosen.c_str(), nullptr, nullptr, argv.data(), environ) == 0) return true;
-    }
-    return false;
+    if (browser.executable.empty()) return false;
+    std::vector<std::string> args = {browser.executable, flag, userDataFlag,
+        "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    return posix_spawn(&pid, browser.executable.c_str(), nullptr, nullptr, argv.data(), environ) == 0;
 #endif
 }
 
-bool EnsureCdp(const std::string& browser, const std::string& host, int port, bool launch) {
-    if (ProbeCdp(host, port)) {
-        return true;
-    }
-    if (!launch) {
-        return false;
-    }
-    if (!LaunchBrowserForCdp(browser, port)) {
-        return false;
-    }
-    for (int i = 0; i < 40; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        if (ProbeCdp(host, port)) {
-            return true;
-        }
-    }
-    return false;
+std::optional<int> ReadActivePort(const std::filesystem::path& userDataDir) {
+    std::ifstream input(userDataDir / "DevToolsActivePort");
+    int port = 0;
+    if (input >> port && port > 0 && port <= 65535) return port;
+    return std::nullopt;
 }
+
+std::optional<int> EnvPort() {
+    const char* raw = std::getenv("COMPUTER_CPP_CHROME_CDP_PORT");
+    if (!raw || !*raw) return std::nullopt;
+    try {
+        int value = std::stoi(raw);
+        if (value > 0 && value <= 65535) return value;
+    } catch (...) {
+    }
+    return std::nullopt;
+}
+
+class BrowserLaunchLock {
+public:
+    explicit BrowserLaunchLock(const std::filesystem::path& path) {
+#if defined(_WIN32)
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            handle_ = CreateFileW(
+                path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle_ != INVALID_HANDLE_VALUE) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+#else
+        fd_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
+        if (fd_ >= 0) {
+            bool acquired = false;
+            for (int attempt = 0; attempt < 100; ++attempt) {
+                if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) {
+                    acquired = true;
+                    break;
+                }
+                if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!acquired) {
+                ::close(fd_);
+                fd_ = -1;
+            }
+        }
+#endif
+    }
+
+    ~BrowserLaunchLock() {
+#if defined(_WIN32)
+        if (handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+#else
+        if (fd_ >= 0) {
+            ::flock(fd_, LOCK_UN);
+            ::close(fd_);
+        }
+#endif
+    }
+
+    bool valid() const {
+#if defined(_WIN32)
+        return handle_ != INVALID_HANDLE_VALUE;
+#else
+        return fd_ >= 0;
+#endif
+    }
+
+private:
+#if defined(_WIN32)
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    int fd_ = -1;
+#endif
+};
 
 std::optional<ParsedWebSocketUrl> ParseWebSocketUrl(const std::string& url) {
     std::string_view view(url);
@@ -809,6 +811,182 @@ json CdpEvaluate(
 
 } // namespace
 
+ManagedBrowserSession ResolveManagedBrowserSession(
+    const json& params,
+    bool launch,
+    bool includePid
+) {
+    ManagedBrowserSession session;
+    std::string configError;
+    const AppConfig config = LoadAppConfig(&configError);
+    if (!configError.empty()) {
+        session.code = "browser_config_invalid";
+        session.error = configError;
+        return session;
+    }
+
+    const bool explicitBrowser = params.contains("browser");
+    const bool explicitProfile = params.contains("profile");
+    const std::string requestedBrowser = explicitBrowser
+        ? params.value("browser", "")
+        : config.browser.defaultBrowser;
+    session.browser = NormalizeBrowserId(requestedBrowser);
+    session.profile = explicitProfile
+        ? params.value("profile", "")
+        : config.browser.profile;
+    if (!IsSupportedBrowserId(session.browser)) {
+        session.code = "browser_automation_unavailable";
+        session.error = "browser '" + requestedBrowser +
+            "' does not support managed Chromium automation";
+        return session;
+    }
+    if (!IsValidBrowserProfileName(session.profile)) {
+        session.code = "invalid_browser_profile";
+        session.error = "browser profile must match [A-Za-z0-9][A-Za-z0-9._-]*";
+        return session;
+    }
+
+    const BrowserDescriptor descriptor = DescribeBrowser(session.browser);
+    session.applicationName = descriptor.applicationName;
+    const char* envHost = std::getenv("COMPUTER_CPP_CHROME_CDP_HOST");
+    const auto envPort = EnvPort();
+    const bool explicitEndpoint = params.contains("host") || params.contains("port") ||
+        (envHost && *envHost) || envPort.has_value();
+    std::filesystem::path userDataDir =
+        ManagedBrowserDataDir(session.browser, session.profile);
+    const char* legacyUserDataDir =
+        std::getenv("COMPUTER_CPP_CHROME_USER_DATA_DIR");
+    const bool legacyUserDataOverride =
+        session.browser == "chrome" && session.profile == "default" &&
+        legacyUserDataDir && *legacyUserDataDir;
+    if (!legacyUserDataOverride &&
+        session.browser == config.browser.defaultBrowser &&
+        session.profile == config.browser.profile &&
+        !config.browser.userDataDir.empty()) {
+        userDataDir = config.browser.userDataDir;
+    }
+    const std::string proxyServer =
+        session.browser == config.browser.defaultBrowser &&
+            session.profile == config.browser.profile
+        ? config.browser.proxyServer
+        : "";
+
+    if (explicitEndpoint) {
+        session.managed = false;
+        session.host = params.contains("host")
+            ? params.value("host", "127.0.0.1")
+            : envHost && *envHost ? std::string(envHost) : "127.0.0.1";
+        session.port = params.contains("port")
+            ? params.value("port", 9222)
+            : envPort.value_or(9222);
+        if (session.host != "127.0.0.1" && session.host != "localhost" &&
+            session.host != "::1") {
+            session.code = "invalid_browser_eval";
+            session.error = "browser inspection only supports loopback Chrome DevTools hosts";
+            return session;
+        }
+        if (ProbeCdp(session.host, session.port)) {
+            session.ok = true;
+        } else if (!launch) {
+            session.code = "browser_debug_unavailable";
+            session.error = "Chrome DevTools endpoint is not available on " +
+                session.host + ":" + std::to_string(session.port);
+            return session;
+        } else if (!descriptor.installed) {
+            session.code = "browser_automation_unavailable";
+            session.error = descriptor.displayName +
+                " is not installed; choose an installed browser in ComputerCpp settings";
+            return session;
+        } else {
+            PrepareManagedBrowserDataDir(userDataDir);
+            BrowserLaunchLock lock(userDataDir / ".computer-cpp-launch.lock");
+            if (!lock.valid()) {
+                session.code = "browser_launch_failed";
+                session.error = "could not lock managed browser profile '" + session.profile + "'";
+                return session;
+            }
+            if (ProbeCdp(session.host, session.port)) {
+                session.ok = true;
+            } else {
+                if (!LaunchBrowserForCdp(
+                        descriptor, userDataDir, proxyServer, session.port)) {
+                    session.code = "browser_launch_failed";
+                    session.error = "could not launch " + descriptor.displayName;
+                    return session;
+                }
+                for (int attempt = 0; attempt < 100; ++attempt) {
+                    if (ProbeCdp(session.host, session.port)) {
+                        session.ok = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        }
+    } else {
+        session.managed = true;
+        session.host = "127.0.0.1";
+        if (auto activePort = ReadActivePort(userDataDir);
+            activePort && ProbeCdp(session.host, *activePort)) {
+            session.port = *activePort;
+            session.ok = true;
+        } else if (!launch) {
+            session.code = "browser_debug_unavailable";
+            session.error = "managed " + descriptor.displayName +
+                " profile '" + session.profile + "' is not running";
+            return session;
+        } else if (!descriptor.installed) {
+            session.code = "browser_automation_unavailable";
+            session.error = descriptor.displayName +
+                " is not installed; choose an installed browser in ComputerCpp settings";
+            return session;
+        } else {
+            PrepareManagedBrowserDataDir(userDataDir);
+            BrowserLaunchLock lock(userDataDir / ".computer-cpp-launch.lock");
+            if (!lock.valid()) {
+                session.code = "browser_launch_failed";
+                session.error = "could not lock managed browser profile '" + session.profile + "'";
+                return session;
+            }
+            if (auto activePort = ReadActivePort(userDataDir);
+                activePort && ProbeCdp(session.host, *activePort)) {
+                session.port = *activePort;
+                session.ok = true;
+            } else {
+                std::error_code ec;
+                std::filesystem::remove(userDataDir / "DevToolsActivePort", ec);
+                if (!LaunchBrowserForCdp(descriptor, userDataDir, proxyServer, 0)) {
+                    session.code = "browser_launch_failed";
+                    session.error = "could not launch " + descriptor.displayName;
+                    return session;
+                }
+                for (int attempt = 0; attempt < 100; ++attempt) {
+                    auto activePort = ReadActivePort(userDataDir);
+                    if (activePort && ProbeCdp(session.host, *activePort)) {
+                        session.port = *activePort;
+                        session.ok = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+        }
+    }
+
+    if (!session.ok) {
+        session.code = "browser_debug_unavailable";
+        session.error = "Chrome DevTools did not become available for " +
+            descriptor.displayName + " profile '" + session.profile + "'";
+        return session;
+    }
+    if (includePid) {
+        if (auto pid = CdpBrowserProcessId(session.host, session.port, 2000)) {
+            session.pid = static_cast<int>(*pid);
+        }
+    }
+    return session;
+}
+
 json RunBrowserEvalCommand(const json& params) {
     if (auto unknown = UnknownParam(params, {
             "script",
@@ -818,6 +996,7 @@ json RunBrowserEvalCommand(const json& params) {
             "targetFocused",
             "browserContextId",
             "browser",
+            "profile",
             "host",
             "port",
             "launch",
@@ -835,22 +1014,29 @@ json RunBrowserEvalCommand(const json& params) {
     auto targetTitle = StringParam(params, "targetTitle", "");
     auto targetFocused = BoolParam(params, "targetFocused", false);
     auto browserContextId = StringParam(params, "browserContextId", "");
-    auto browser = StringParam(params, "browser", "Google Chrome");
-    auto host = StringParam(params, "host", "127.0.0.1");
-    auto port = IntParam(params, "port", 9222);
+    auto browser = StringParam(params, "browser", "");
+    auto profile = StringParam(params, "profile", "");
+    auto host = StringParam(params, "host", "");
+    auto port = IntParam(params, "port", 0);
     auto launch = BoolParam(params, "launch", true);
     auto timeoutMs = IntParam(params, "timeoutMs", 5000);
     auto readOnly = BoolParam(params, "readOnly", true);
-    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !targetFocused || !browserContextId || !browser || !host || !port || !launch || !timeoutMs || !readOnly) {
-        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/host, integer port/timeoutMs, and boolean targetFocused/launch/readOnly", "invalid_browser_eval");
+    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !targetFocused || !browserContextId || !browser || !profile || !host || !port || !launch || !timeoutMs || !readOnly) {
+        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/profile/host, integer port/timeoutMs, and boolean targetFocused/launch/readOnly", "invalid_browser_eval");
     }
     if (IsBlank(*script)) {
         return Error("browser_eval script must be non-empty", "invalid_browser_eval");
     }
-    if (*host != "127.0.0.1" && *host != "localhost" && *host != "::1") {
+    if (params.contains("browser") && IsBlank(*browser)) {
+        return Error("browser_eval browser must be non-empty when provided", "invalid_browser_eval");
+    }
+    if (params.contains("profile") && !IsValidBrowserProfileName(*profile)) {
+        return Error("browser_eval profile must match [A-Za-z0-9][A-Za-z0-9._-]*", "invalid_browser_eval");
+    }
+    if (params.contains("host") && *host != "127.0.0.1" && *host != "localhost" && *host != "::1") {
         return Error("browser_eval only supports loopback Chrome DevTools hosts", "invalid_browser_eval");
     }
-    if (*port <= 0 || *port > 65535) {
+    if (params.contains("port") && (*port <= 0 || *port > 65535)) {
         return Error("browser_eval port must be 1..65535", "invalid_browser_eval");
     }
     if (*timeoutMs < 500 || *timeoutMs > 30000) {
@@ -862,12 +1048,20 @@ json RunBrowserEvalCommand(const json& params) {
     if (LooksMutatingScript(*script)) {
         return Error("browser_eval rejected a script that appears to mutate browser/UI state", "invalid_browser_eval");
     }
-    if (!EnsureCdp(*browser, *host, *port, *launch)) {
-        return Error(
-            "Chrome DevTools is not available; restart Chrome with --remote-debugging-port=" + std::to_string(*port),
-            "browser_debug_unavailable");
+    const ManagedBrowserSession session = ResolveManagedBrowserSession(params, *launch);
+    if (!session.ok) {
+        return Error(session.error, session.code);
     }
-    return CdpEvaluate(*host, *port, *targetId, *targetUrlPrefix, *targetTitle, *targetFocused, *browserContextId, *script, *timeoutMs);
+    json response = CdpEvaluate(session.host, session.port, *targetId,
+        *targetUrlPrefix, *targetTitle, *targetFocused, *browserContextId,
+        *script, *timeoutMs);
+    if (response.value("ok", false) && response.contains("data")) {
+        response["data"]["browser"] = session.browser;
+        response["data"]["profile"] = session.profile;
+        response["data"]["managed"] = session.managed;
+        if (session.pid > 0) response["data"]["browserPid"] = session.pid;
+    }
+    return response;
 }
 
 } // namespace ComputerCpp
