@@ -4,6 +4,8 @@
 
 #include <nlohmann/json_fwd.hpp>
 
+#include <filesystem>
+#include <optional>
 #include <string>
 
 namespace ComputerCpp {
@@ -25,6 +27,14 @@ struct ManagedBrowserSession {
 };
 
 AppConfig LoadDaemonAppConfig(std::string* error);
+
+std::optional<int> ReadManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir);
+bool WriteManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir,
+    int port);
+void RemoveManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir);
 
 ManagedBrowserSession ResolveManagedBrowserSession(
     const nlohmann::json& params,

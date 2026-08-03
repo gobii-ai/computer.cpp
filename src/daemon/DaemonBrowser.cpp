@@ -126,6 +126,9 @@ struct SocketOwner {
     }
 };
 
+constexpr const char* kCompatibilityActivePortFile =
+    ".computer-cpp-active-port";
+
 size_t CurlWriteString(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* out = static_cast<std::string*>(userdata);
     out->append(ptr, size * nmemb);
@@ -224,11 +227,15 @@ bool LaunchBrowserForCdp(
 #endif
 }
 
-std::optional<int> ReadActivePort(const std::filesystem::path& userDataDir) {
-    std::ifstream input(userDataDir / "DevToolsActivePort");
+std::optional<int> ReadPortFile(const std::filesystem::path& path) {
+    std::ifstream input(path);
     int port = 0;
     if (input >> port && port > 0 && port <= 65535) return port;
     return std::nullopt;
+}
+
+std::optional<int> ReadActivePort(const std::filesystem::path& userDataDir) {
+    return ReadPortFile(userDataDir / "DevToolsActivePort");
 }
 
 bool BrowserProfileHasLiveSingleton(const std::filesystem::path& userDataDir) {
@@ -858,6 +865,35 @@ json CdpEvaluate(
 
 } // namespace
 
+std::optional<int> ReadManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir
+) {
+    return ReadPortFile(userDataDir / kCompatibilityActivePortFile);
+}
+
+bool WriteManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir,
+    int port
+) {
+    if (port <= 0 || port > 65535) return false;
+    std::ofstream output(
+        userDataDir / kCompatibilityActivePortFile,
+        std::ios::trunc);
+    if (!output) return false;
+    output << port << '\n';
+    output.flush();
+    return output.good();
+}
+
+void RemoveManagedBrowserCompatibilityPort(
+    const std::filesystem::path& userDataDir
+) {
+    std::error_code ec;
+    std::filesystem::remove(
+        userDataDir / kCompatibilityActivePortFile,
+        ec);
+}
+
 AppConfig LoadDaemonAppConfig(std::string* error) {
     struct Cache {
         std::mutex mutex;
@@ -954,6 +990,22 @@ ManagedBrowserSession ResolveManagedBrowserSession(
     const std::string proxyServer = config.browser.proxyServer;
     session.proxyConfigured = !proxyServer.empty();
 
+    const auto resolveManagedActivePort = [&]() -> std::optional<int> {
+        if (auto activePort = ReadActivePort(userDataDir);
+            activePort && ProbeCdp("127.0.0.1", *activePort)) {
+            return activePort;
+        }
+        if (!BrowserProfileHasLiveSingleton(userDataDir)) {
+            return std::nullopt;
+        }
+        if (auto compatibilityPort =
+                ReadManagedBrowserCompatibilityPort(userDataDir);
+            compatibilityPort && ProbeCdp("127.0.0.1", *compatibilityPort)) {
+            return compatibilityPort;
+        }
+        return std::nullopt;
+    };
+
     if (explicitEndpoint) {
         session.managed = false;
         session.host = params.contains("host")
@@ -1011,13 +1063,17 @@ ManagedBrowserSession ResolveManagedBrowserSession(
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
+                if (session.ok) {
+                    WriteManagedBrowserCompatibilityPort(
+                        userDataDir,
+                        session.port);
+                }
             }
         }
     } else {
         session.managed = true;
         session.host = "127.0.0.1";
-        if (auto activePort = ReadActivePort(userDataDir);
-            activePort && ProbeCdp(session.host, *activePort)) {
+        if (auto activePort = resolveManagedActivePort()) {
             session.port = *activePort;
             session.ok = true;
         } else if (!launch) {
@@ -1038,8 +1094,7 @@ ManagedBrowserSession ResolveManagedBrowserSession(
                 session.error = "could not lock managed browser profile '" + session.profile + "'";
                 return session;
             }
-            if (auto activePort = ReadActivePort(userDataDir);
-                activePort && ProbeCdp(session.host, *activePort)) {
+            if (auto activePort = resolveManagedActivePort()) {
                 session.port = *activePort;
                 session.ok = true;
             } else {
@@ -1051,6 +1106,7 @@ ManagedBrowserSession ResolveManagedBrowserSession(
                 }
                 std::error_code ec;
                 std::filesystem::remove(userDataDir / "DevToolsActivePort", ec);
+                RemoveManagedBrowserCompatibilityPort(userDataDir);
                 if (!LaunchBrowserForCdp(descriptor, userDataDir, proxyServer, 0)) {
                     session.code = "browser_launch_failed";
                     session.error = "could not launch " + descriptor.displayName;

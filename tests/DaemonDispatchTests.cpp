@@ -1,6 +1,7 @@
 #include "computer_cpp/Daemon.h"
 #include "computer_cpp/Timeline.h"
 
+#include "DaemonBrowser.h"
 #include "DaemonDesktop.h"
 #include "TestSupport.h"
 
@@ -41,6 +42,24 @@ void TestDesktopSessionReadiness() {
     state.screenLocked = false;
     state.displayAsleep = true;
     assert(ComputerCpp::CanAttemptDesktopWake(state));
+}
+
+void TestManagedBrowserCompatibilityPortMarker() {
+    const auto root = ComputerCpp::Tests::MakeTempHome() /
+        "managed-browser-compatibility-port";
+    std::filesystem::create_directories(root);
+
+    assert(!ComputerCpp::ReadManagedBrowserCompatibilityPort(root));
+    assert(!ComputerCpp::WriteManagedBrowserCompatibilityPort(root, 0));
+    assert(!ComputerCpp::WriteManagedBrowserCompatibilityPort(root, 65536));
+    assert(ComputerCpp::WriteManagedBrowserCompatibilityPort(root, 9222));
+    const auto saved =
+        ComputerCpp::ReadManagedBrowserCompatibilityPort(root);
+    assert(saved && *saved == 9222);
+
+    ComputerCpp::RemoveManagedBrowserCompatibilityPort(root);
+    assert(!ComputerCpp::ReadManagedBrowserCompatibilityPort(root));
+    std::filesystem::remove_all(root);
 }
 
 void TestDaemonDispatch() {
@@ -3157,6 +3176,7 @@ namespace ComputerCpp::Tests {
 
 void RunDaemonDispatchTests() {
     TestDesktopSessionReadiness();
+    TestManagedBrowserCompatibilityPortMarker();
     TestDaemonDispatch();
     TestDaemonGateCoverageForProtectedMethods();
     TestBatchDoesNotBypassControlSessionGate();
