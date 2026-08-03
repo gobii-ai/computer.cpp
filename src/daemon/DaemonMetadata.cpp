@@ -273,7 +273,8 @@ json SchemaJson() {
             "invalid_wait", "invalid_window", "invalid_browser_profile", "browser_config_invalid",
             "browser_automation_unavailable", "browser_debug_invalid_response", "browser_debug_unavailable",
             "browser_eval_failed", "browser_eval_timeout", "browser_focus_failed", "browser_launch_failed",
-            "browser_navigation_failed", "browser_pid_unavailable", "browser_target_not_found", "browser_window_create_failed",
+            "browser_navigation_failed", "browser_pid_unavailable", "browser_profile_in_use", "browser_target_not_found",
+            "browser_window_create_failed", "browser_window_unavailable",
             "missing_api_key", "open_url_failed",
             "permission_or_capture_failed", "target_not_found", "unknown_method", "unsupported_visual_target",
             "wait_timeout", "window_close_failed"

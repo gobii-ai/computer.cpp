@@ -574,7 +574,9 @@ bool IsContentRole(const std::string& role) {
     return role == "AXStaticText" ||
            role == "AXHeading" ||
            role == "AXCell" ||
-           role == "AXRow";
+           role == "AXRow" ||
+           role == "AXDialog" ||
+           role == "AXSheet";
 }
 
 std::string RoleLabel(const std::string& role) {

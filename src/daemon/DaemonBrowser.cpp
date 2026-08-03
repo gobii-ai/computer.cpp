@@ -1,6 +1,7 @@
 #include "DaemonBrowser.h"
 
 #include "computer_cpp/AppConfig.h"
+#include "computer_cpp/AppPaths.h"
 #include "computer_cpp/Browser.h"
 #include "computer_cpp/StringUtils.h"
 
@@ -20,6 +21,7 @@
 #include <fstream>
 #include <optional>
 #include <random>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -43,6 +45,7 @@
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/file.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
@@ -199,8 +202,25 @@ bool LaunchBrowserForCdp(
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) return false;
+    const int stdoutRc = posix_spawn_file_actions_addopen(
+        &actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    const int stderrRc = posix_spawn_file_actions_addopen(
+        &actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
     pid_t pid = 0;
-    return posix_spawn(&pid, browser.executable.c_str(), nullptr, nullptr, argv.data(), environ) == 0;
+    const int rc = stdoutRc == 0 && stderrRc == 0
+        ? posix_spawn(&pid, browser.executable.c_str(), &actions, nullptr,
+            argv.data(), environ)
+        : stdoutRc != 0 ? stdoutRc : stderrRc;
+    posix_spawn_file_actions_destroy(&actions);
+    if (rc != 0) return false;
+    std::thread([pid]() {
+        int status = 0;
+        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+    }).detach();
+    return true;
 #endif
 }
 
@@ -209,6 +229,33 @@ std::optional<int> ReadActivePort(const std::filesystem::path& userDataDir) {
     int port = 0;
     if (input >> port && port > 0 && port <= 65535) return port;
     return std::nullopt;
+}
+
+bool BrowserProfileHasLiveSingleton(const std::filesystem::path& userDataDir) {
+    for (const char* name : {"SingletonLock", "lockfile"}) {
+        const std::filesystem::path lockPath = userDataDir / name;
+        std::error_code ec;
+        const auto status = std::filesystem::symlink_status(lockPath, ec);
+        if (ec || !std::filesystem::exists(status)) continue;
+#if defined(_WIN32)
+        return true;
+#else
+        if (!std::filesystem::is_symlink(status)) return true;
+        const std::string target = std::filesystem::read_symlink(lockPath, ec).string();
+        if (ec) return true;
+        const size_t dash = target.rfind('-');
+        if (dash == std::string::npos || dash + 1 >= target.size()) return true;
+        try {
+            const long pid = std::stol(target.substr(dash + 1));
+            if (pid > 0 && (::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM)) {
+                return true;
+            }
+        } catch (...) {
+            return true;
+        }
+#endif
+    }
+    return false;
 }
 
 std::optional<int> EnvPort() {
@@ -811,6 +858,42 @@ json CdpEvaluate(
 
 } // namespace
 
+AppConfig LoadDaemonAppConfig(std::string* error) {
+    struct Cache {
+        std::mutex mutex;
+        bool initialized = false;
+        bool exists = false;
+        std::filesystem::path path;
+        std::filesystem::file_time_type modified {};
+        uintmax_t size = 0;
+        AppConfig config;
+        std::string error;
+    };
+    static Cache cache;
+
+    const std::filesystem::path path = ConfigPath();
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec) && !ec;
+    const auto modified = exists
+        ? std::filesystem::last_write_time(path, ec)
+        : std::filesystem::file_time_type{};
+    ec.clear();
+    const uintmax_t size = exists ? std::filesystem::file_size(path, ec) : 0;
+
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (!cache.initialized || cache.path != path || cache.exists != exists ||
+        cache.modified != modified || cache.size != size) {
+        cache.config = LoadAppConfig(&cache.error);
+        cache.initialized = true;
+        cache.path = path;
+        cache.exists = exists;
+        cache.modified = modified;
+        cache.size = size;
+    }
+    if (error) *error = cache.error;
+    return cache.config;
+}
+
 ManagedBrowserSession ResolveManagedBrowserSession(
     const json& params,
     bool launch,
@@ -818,7 +901,7 @@ ManagedBrowserSession ResolveManagedBrowserSession(
 ) {
     ManagedBrowserSession session;
     std::string configError;
-    const AppConfig config = LoadAppConfig(&configError);
+    const AppConfig config = LoadDaemonAppConfig(&configError);
     if (!configError.empty()) {
         session.code = "browser_config_invalid";
         session.error = configError;
@@ -848,6 +931,7 @@ ManagedBrowserSession ResolveManagedBrowserSession(
 
     const BrowserDescriptor descriptor = DescribeBrowser(session.browser);
     session.applicationName = descriptor.applicationName;
+    session.windowQuery = descriptor.windowQuery;
     const char* envHost = std::getenv("COMPUTER_CPP_CHROME_CDP_HOST");
     const auto envPort = EnvPort();
     const bool explicitEndpoint = params.contains("host") || params.contains("port") ||
@@ -865,11 +949,10 @@ ManagedBrowserSession ResolveManagedBrowserSession(
         !config.browser.userDataDir.empty()) {
         userDataDir = config.browser.userDataDir;
     }
-    const std::string proxyServer =
-        session.browser == config.browser.defaultBrowser &&
-            session.profile == config.browser.profile
-        ? config.browser.proxyServer
-        : "";
+    // A custom data directory names one configured browser/profile identity.
+    // Proxy routing is an egress policy and applies to every managed identity.
+    const std::string proxyServer = config.browser.proxyServer;
+    session.proxyConfigured = !proxyServer.empty();
 
     if (explicitEndpoint) {
         session.managed = false;
@@ -908,12 +991,19 @@ ManagedBrowserSession ResolveManagedBrowserSession(
             if (ProbeCdp(session.host, session.port)) {
                 session.ok = true;
             } else {
+                if (BrowserProfileHasLiveSingleton(userDataDir)) {
+                    session.code = "browser_profile_in_use";
+                    session.error = descriptor.displayName + " profile '" +
+                        session.profile + "' is already open without the requested debugging endpoint; close it or choose a separate managed profile";
+                    return session;
+                }
                 if (!LaunchBrowserForCdp(
                         descriptor, userDataDir, proxyServer, session.port)) {
                     session.code = "browser_launch_failed";
                     session.error = "could not launch " + descriptor.displayName;
                     return session;
                 }
+                session.launched = true;
                 for (int attempt = 0; attempt < 100; ++attempt) {
                     if (ProbeCdp(session.host, session.port)) {
                         session.ok = true;
@@ -953,6 +1043,12 @@ ManagedBrowserSession ResolveManagedBrowserSession(
                 session.port = *activePort;
                 session.ok = true;
             } else {
+                if (BrowserProfileHasLiveSingleton(userDataDir)) {
+                    session.code = "browser_profile_in_use";
+                    session.error = descriptor.displayName + " profile '" +
+                        session.profile + "' is already open without local inspection; close it or choose a separate managed profile";
+                    return session;
+                }
                 std::error_code ec;
                 std::filesystem::remove(userDataDir / "DevToolsActivePort", ec);
                 if (!LaunchBrowserForCdp(descriptor, userDataDir, proxyServer, 0)) {
@@ -960,6 +1056,7 @@ ManagedBrowserSession ResolveManagedBrowserSession(
                     session.error = "could not launch " + descriptor.displayName;
                     return session;
                 }
+                session.launched = true;
                 for (int attempt = 0; attempt < 100; ++attempt) {
                     auto activePort = ReadActivePort(userDataDir);
                     if (activePort && ProbeCdp(session.host, *activePort)) {
@@ -1059,6 +1156,8 @@ json RunBrowserEvalCommand(const json& params) {
         response["data"]["browser"] = session.browser;
         response["data"]["profile"] = session.profile;
         response["data"]["managed"] = session.managed;
+        response["data"]["launched"] = session.launched;
+        response["data"]["proxyConfigured"] = session.proxyConfigured;
         if (session.pid > 0) response["data"]["browserPid"] = session.pid;
     }
     return response;

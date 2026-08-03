@@ -1742,8 +1742,9 @@ function ac.browser.eval(script, opts)
   return ac.request("browser_eval", merge({ script = script, readOnly = true }, opts or {}), { allow_error = true })
 end
 
--- Browser-backed semantic apps share one native managed-browser window containing one
--- managed tab. The target id is persisted between Lua processes, while every
+-- Browser-backed semantic apps share one native managed-browser surface. A cold
+-- launch uses Chromium's initial window; reuse creates a dedicated window when
+-- no saved surface remains. The target id is persisted between Lua processes, while every
 -- reuse is verified against both the native window and document.hasFocus().
 -- Navigation and window creation remain native keyboard actions; CDP is used
 -- only to inspect and bind the exact page that received those actions.
@@ -1807,7 +1808,21 @@ local function managed_wait(predicate, timeout_ms, interval_ms)
   return nil
 end
 
-local function managed_submit_filled_proxy_auth(browser_pid)
+local function managed_bounds_contains(outer, inner)
+  if type(outer) ~= "table" or type(inner) ~= "table" or
+      outer.available ~= true or inner.available ~= true then return false end
+  local ox, oy = tonumber(outer.x), tonumber(outer.y)
+  local ow, oh = tonumber(outer.width), tonumber(outer.height)
+  local ix, iy = tonumber(inner.x), tonumber(inner.y)
+  local iw, ih = tonumber(inner.width), tonumber(inner.height)
+  if not ox or not oy or not ow or not oh or not ix or not iy or not iw or not ih then return false end
+  return ix >= ox and iy >= oy and ix + iw <= ox + ow and iy + ih <= oy + oh
+end
+
+local function managed_submit_filled_proxy_auth(browser_pid, proxy_configured)
+  -- Proxy configuration is the user's consent to this narrow browser-chrome
+  -- helper. Never infer a credential prompt from arbitrary page content alone.
+  if proxy_configured ~= true then return false end
   local snapshot = ac.request("snapshot", {
     interactive = false,
     bounds = true,
@@ -1819,11 +1834,30 @@ local function managed_submit_filled_proxy_auth(browser_pid)
   local frontmost = snapshot.data.frontmostApp or {}
   if tonumber(frontmost.pid) ~= tonumber(browser_pid) then return false end
 
+  local dialog_bounds = {}
+  for _, ref in ipairs(snapshot.data.refs or {}) do
+    local role = tostring(ref.role or ""):lower()
+    if role:find("dialog", 1, true) or role:find("sheet", 1, true) then
+      if ref.bounds and ref.bounds.available == true then
+        table.insert(dialog_bounds, ref.bounds)
+      end
+    end
+  end
+  if #dialog_bounds == 0 then return false end
+
   local proxy_prompt = false
   local cancel_button = false
   local sign_in_target = ""
   local filled_fields = 0
   for _, ref in ipairs(snapshot.data.refs or {}) do
+    local inside_dialog = false
+    for _, bounds in ipairs(dialog_bounds) do
+      if managed_bounds_contains(bounds, ref.bounds) then
+        inside_dialog = true
+        break
+      end
+    end
+    if inside_dialog then
     local role = tostring(ref.role or ""):lower()
     local name = tostring(ref.name or "")
     local value = tostring(ref.value or "")
@@ -1831,12 +1865,13 @@ local function managed_submit_filled_proxy_auth(browser_pid)
     if text:find("the proxy ", 1, true) and
         text:find("requires a username and password", 1, true) then
       proxy_prompt = true
-    elseif role:find("textfield", 1, true) and (name ~= "" or value ~= "") then
+    elseif role:find("textfield", 1, true) and value ~= "" then
       filled_fields = filled_fields + 1
     elseif role:find("button", 1, true) and name:lower() == "cancel" then
       cancel_button = true
     elseif role:find("button", 1, true) and name:lower() == "sign in" then
       sign_in_target = tostring(ref.displayRef or ref.ref or "")
+    end
     end
   end
   if not proxy_prompt or not cancel_button or filled_fields < 2 or sign_in_target == "" then
@@ -1956,8 +1991,27 @@ function ac.browser.managed.ensure(opts)
     return { ok = false, code = "browser_window_unavailable", error = "the managed browser did not expose an active window" }
   end
 
-  if managed_submit_filled_proxy_auth(browser_pid) then
+  local auto_proxy_auth = opts.autoSubmitProxyAuth == true or
+    (opts.autoSubmitProxyAuth ~= false and bootstrap.data.proxyConfigured == true)
+  local proxy_auth_submitted = managed_submit_filled_proxy_auth(browser_pid, auto_proxy_auth)
+  if proxy_auth_submitted then
     managed_delay(200)
+  end
+
+  if bootstrap.data.launched ~= true then
+    local before_id = tostring(window.id or "")
+    local created = ac.request("press", { keys = { "primary", "n" }, holdMs = 40 }, { allow_error = true })
+    if not created or not created.ok then
+      return { ok = false, code = "browser_window_create_failed", error = "could not create a managed browser window" }
+    end
+    window = managed_wait(function()
+      local candidate = managed_window_active()
+      return candidate and tonumber(candidate.pid) == browser_pid and
+        tostring(candidate.id or "") ~= "" and tostring(candidate.id) ~= before_id and candidate or false
+    end, opts.createTimeoutMs or 7000, 150)
+    if not window then
+      return { ok = false, code = "browser_window_create_failed", error = "the managed browser did not create a new window" }
+    end
   end
 
   ac.request("press", { keys = { "primary", "l" }, holdMs = 40 }, { allow_error = true })
@@ -1970,7 +2024,6 @@ function ac.browser.managed.ensure(opts)
   ac.request("press", { keys = "enter", holdMs = 40 }, { allow_error = true })
 
   local expected_prefix = tostring(opts.startUrlPrefix or start_url)
-  local proxy_auth_checks = 0
   local selected = managed_wait(function()
     local result = ac.browser.eval("location.href", managed_browser_options(opts, {
       targetId = "",
@@ -1980,9 +2033,8 @@ function ac.browser.managed.ensure(opts)
       launch = false,
     }))
     if not result or not result.ok or not result.data then
-      if proxy_auth_checks < 15 then
-        proxy_auth_checks = proxy_auth_checks + 1
-        managed_submit_filled_proxy_auth(browser_pid)
+      if auto_proxy_auth and not proxy_auth_submitted then
+        proxy_auth_submitted = managed_submit_filled_proxy_auth(browser_pid, true)
       end
       return false
     end

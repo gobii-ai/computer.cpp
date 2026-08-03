@@ -2233,7 +2233,7 @@ private:
         const BrowserDescriptor browser =
             DescribeBrowser(browserIds_[static_cast<size_t>(selection)]);
         if (browser.installed) {
-            const auto windows = Platform::ListWindows(browser.applicationName);
+            const auto windows = Platform::ListWindows(browser.windowQuery);
             const bool running = std::any_of(
                 windows.begin(), windows.end(),
                 [](const Platform::WindowInfo& window) {

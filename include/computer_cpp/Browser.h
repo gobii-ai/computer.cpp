@@ -10,6 +10,7 @@ struct BrowserDescriptor {
     std::string id;
     std::string displayName;
     std::string applicationName;
+    std::string windowQuery;
     std::string executable;
     bool installed = false;
     bool recommended = false;

@@ -70,12 +70,34 @@ void TestBrowserRegistry() {
     assert(ComputerCpp::NormalizeBrowserId("Google Chrome") == "chrome");
     assert(ComputerCpp::NormalizeBrowserId("msedge.exe") == "edge");
     assert(ComputerCpp::NormalizeBrowserId("Brave Browser") == "brave");
+    assert(ComputerCpp::NormalizeBrowserId("../../not-a-browser").empty());
     const auto catalog = ComputerCpp::BrowserCatalog();
     assert(catalog.size() == 4);
     assert(catalog.front().id == "chrome");
     assert(catalog.front().displayName == "Google Chrome");
     assert(catalog.front().recommended);
     assert(!catalog[1].recommended);
+#if defined(__linux__)
+    assert(catalog.front().windowQuery == "google-chrome");
+#else
+    assert(!catalog.front().windowQuery.empty());
+#endif
+
+    assert(ComputerCpp::ManagedBrowserDataDir("chrome", "default") ==
+        ComputerCpp::AppDataDir() / "chrome-cdp");
+    assert(ComputerCpp::ManagedBrowserDataDir("brave", "work") ==
+        ComputerCpp::AppDataDir() / "browser-profiles" / "brave" / "work");
+    assert(ComputerCpp::ManagedBrowserDataDir("../../bad", "work").empty());
+    assert(ComputerCpp::ManagedBrowserDataDir("chrome", "../bad").empty());
+
+    const fs::path privateDir = ComputerCpp::AppDataDir() / "browser-mode-test";
+    ComputerCpp::PrepareManagedBrowserDataDir(privateDir);
+    assert(fs::is_directory(privateDir));
+#if !defined(_WIN32)
+    const auto permissions = fs::status(privateDir).permissions();
+    assert((permissions & fs::perms::owner_all) == fs::perms::owner_all);
+    assert((permissions & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+#endif
 }
 
 void TestAppConfigServerRoundTrip() {

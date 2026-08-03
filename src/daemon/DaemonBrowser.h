@@ -1,5 +1,7 @@
 #pragma once
 
+#include "computer_cpp/AppConfig.h"
+
 #include <nlohmann/json_fwd.hpp>
 
 #include <string>
@@ -9,15 +11,20 @@ namespace ComputerCpp {
 struct ManagedBrowserSession {
     bool ok = false;
     bool managed = true;
+    bool launched = false;
+    bool proxyConfigured = false;
     std::string browser;
     std::string profile;
     std::string applicationName;
+    std::string windowQuery;
     std::string host = "127.0.0.1";
     int port = 0;
     int pid = -1;
     std::string code;
     std::string error;
 };
+
+AppConfig LoadDaemonAppConfig(std::string* error);
 
 ManagedBrowserSession ResolveManagedBrowserSession(
     const nlohmann::json& params,

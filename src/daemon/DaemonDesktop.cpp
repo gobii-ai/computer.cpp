@@ -13,6 +13,8 @@
 #include "DaemonParsing.h"
 #include "DaemonProtocol.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <set>
 #include <thread>
@@ -63,6 +65,35 @@ Platform::WindowInfo WaitForOpenedWindow(const std::string& appQuery, const std:
         return {};
     }
     return Platform::GetActiveWindow();
+}
+
+std::vector<Platform::WindowInfo> BrowserWindowsForPid(int pid) {
+    std::vector<Platform::WindowInfo> matches;
+    for (auto& window : Platform::ListWindows("")) {
+        if (window.pid == pid) matches.push_back(std::move(window));
+    }
+    return matches;
+}
+
+Platform::WindowInfo WaitForBrowserWindow(
+    int pid,
+    const std::set<std::string>& beforeIds,
+    bool requireNew
+) {
+    Platform::WindowInfo fallback;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        for (const auto& window : BrowserWindowsForPid(pid)) {
+            if (!window.available || window.id.empty()) continue;
+            if (beforeIds.count(window.id) == 0) {
+                if (window.active) return window;
+                if (fallback.id.empty()) fallback = window;
+            } else if (!requireNew && window.active) {
+                return window;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(125));
+    }
+    return requireNew ? Platform::WindowInfo{} : fallback;
 }
 
 bool WaitForActivePid(int pid) {
@@ -458,6 +489,11 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
     if (!IsHttpUrl(url)) {
         return Error("open_url requires http or https URL", "invalid_url");
     }
+    if (std::any_of(url.begin(), url.end(), [](unsigned char ch) {
+            return std::iscntrl(ch) != 0;
+        })) {
+        return Error("open_url url must not contain control characters", "invalid_url");
+    }
     std::string browser = *browserParam;
     if (params.contains("browser") && IsBlank(browser)) {
         return Error("open_url browser must be non-empty when provided", "invalid_url");
@@ -469,31 +505,42 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
     const std::string normalizedBrowser = NormalizeBrowserId(browser);
     const bool explicitUnsupported = params.contains("browser") &&
         !IsSupportedBrowserId(normalizedBrowser);
+    std::string fallbackWarning;
     if (!*newInstance && !explicitUnsupported) {
         const ManagedBrowserSession session = ResolveManagedBrowserSession(params, true, true);
         if (session.ok) {
             if (session.pid <= 0) {
                 return Error("managed browser did not report its process id", "browser_pid_unavailable");
             }
-            auto beforeIds = VisibleWindowIds(
-                Platform::ListWindows(session.applicationName));
+            auto beforeIds = VisibleWindowIds(BrowserWindowsForPid(session.pid));
             if (!Platform::ActivateAppByPid(session.pid) ||
                 !WaitForActivePid(session.pid)) {
                 return Error("could not activate managed browser", "browser_focus_failed");
             }
-            if (*newWindow && !Platform::SendHotkey({"primary", "n"}, 40)) {
-                return Error("could not create managed browser window", "browser_window_create_failed");
+            Platform::WindowInfo activeWindow;
+            const bool createWindow = *newWindow && !session.launched;
+            if (createWindow) {
+                if (!Platform::SendHotkey({"primary", "n"}, 40)) {
+                    return Error("could not create managed browser window", "browser_window_create_failed");
+                }
+                activeWindow = WaitForBrowserWindow(session.pid, beforeIds, true);
+                if (!activeWindow.available) {
+                    return Error("managed browser did not create a new window", "browser_window_create_failed");
+                }
+            } else {
+                activeWindow = WaitForBrowserWindow(session.pid, {}, false);
+                if (!activeWindow.available) {
+                    return Error("managed browser did not expose a window", "browser_window_unavailable");
+                }
             }
             if (!Platform::SendHotkey({"primary", "l"}, 40) ||
-                !Platform::TypeText(url, 20) ||
+                !Platform::TypeText(url, 1) ||
                 !Platform::SendHotkey({"enter"}, 40)) {
                 return Error("could not navigate managed browser", "browser_navigation_failed");
             }
-            auto activeWindow = WaitForOpenedWindow(
-                session.applicationName, beforeIds);
             if (activeWindow.available && !activeWindow.id.empty()) {
                 RegisterControlSessionResource(activeControlToken, "window",
-                    activeWindow.id, session.applicationName,
+                    activeWindow.id, session.windowQuery,
                     WindowToJson(activeWindow));
             }
             return Ok({
@@ -506,28 +553,33 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
                 {"window", WindowToJson(activeWindow)}
             });
         }
-        if (session.code != "browser_automation_unavailable") {
+        if (session.code == "invalid_browser_profile") {
             return Error(session.error, session.code);
         }
+        fallbackWarning = session.error;
         browser.clear();
     }
 
     if (!explicitUnsupported) {
         std::string configError;
-        const AppConfig config = LoadAppConfig(&configError);
-        if (!configError.empty()) return Error(configError, "browser_config_invalid");
-        const std::string browserId = browser.empty()
-            ? config.browser.defaultBrowser
-            : normalizedBrowser;
-        const BrowserDescriptor descriptor = DescribeBrowser(browserId);
-        if (descriptor.installed) {
-#if defined(__APPLE__)
-            browser = descriptor.applicationName;
-#else
-            browser = descriptor.executable;
-#endif
-        } else {
+        const AppConfig config = LoadDaemonAppConfig(&configError);
+        if (!configError.empty()) {
+            if (fallbackWarning.empty()) fallbackWarning = configError;
             browser.clear();
+        } else {
+            const std::string browserId = params.contains("browser")
+                ? normalizedBrowser
+                : config.browser.defaultBrowser;
+            const BrowserDescriptor descriptor = DescribeBrowser(browserId);
+            if (descriptor.installed) {
+#if defined(__APPLE__)
+                browser = descriptor.applicationName;
+#else
+                browser = descriptor.executable;
+#endif
+            } else {
+                browser.clear();
+            }
         }
     }
     auto beforeIds = VisibleWindowIds(Platform::ListWindows(browser));
@@ -539,7 +591,7 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
     if (activeWindow.available && !activeWindow.id.empty()) {
         RegisterControlSessionResource(activeControlToken, "window", activeWindow.id, browser, WindowToJson(activeWindow));
     }
-    return Ok({
+    json response = Ok({
         {"url", url},
         {"browser", browser},
         {"profile", ""},
@@ -548,6 +600,8 @@ json RunOpenUrlCommand(const json& params, const std::string& activeControlToken
         {"newInstance", *newInstance},
         {"window", WindowToJson(activeWindow)}
     });
+    if (!fallbackWarning.empty()) response["data"]["warning"] = fallbackWarning;
+    return response;
 }
 
 } // namespace ComputerCpp

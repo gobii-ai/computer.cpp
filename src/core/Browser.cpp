@@ -1,5 +1,6 @@
 #include "computer_cpp/Browser.h"
 
+#include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/StringUtils.h"
 
@@ -8,6 +9,10 @@
 #include <filesystem>
 #include <system_error>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -23,7 +28,12 @@ fs::path HomeDir() {
 
 bool IsExecutableFile(const fs::path& path) {
     std::error_code ec;
-    return fs::is_regular_file(path, ec) && !ec;
+    if (!fs::is_regular_file(path, ec) || ec) return false;
+#if defined(_WIN32)
+    return true;
+#else
+    return ::access(path.c_str(), X_OK) == 0;
+#endif
 }
 
 [[maybe_unused]] std::string FindOnPath(const std::vector<std::string>& names) {
@@ -58,6 +68,7 @@ fs::path BrowserStorageRoot() {
     if (const char* local = std::getenv("LOCALAPPDATA")) {
         return fs::path(local) / "computer.cpp";
     }
+    return AppDataDir();
 #elif defined(__APPLE__)
     return HomeDir() / "Library" / "Application Support" / "computer.cpp";
 #else
@@ -66,7 +77,6 @@ fs::path BrowserStorageRoot() {
     }
     return HomeDir() / ".local" / "state" / "computer.cpp";
 #endif
-    return AppDataDir();
 }
 
 void MakePrivate(const fs::path& path) {
@@ -85,15 +95,19 @@ BrowserDescriptor BuildDescriptor(const std::string& id) {
     if (id == "chrome") {
         out.displayName = "Google Chrome";
         out.applicationName = "Google Chrome";
+        out.windowQuery = "Google Chrome";
     } else if (id == "edge") {
         out.displayName = "Microsoft Edge";
         out.applicationName = "Microsoft Edge";
+        out.windowQuery = "Microsoft Edge";
     } else if (id == "brave") {
         out.displayName = "Brave Browser";
         out.applicationName = "Brave Browser";
+        out.windowQuery = "Brave Browser";
     } else if (id == "chromium") {
         out.displayName = "Chromium";
         out.applicationName = "Chromium";
+        out.windowQuery = "Chromium";
     }
     for (const auto& root : {fs::path("/Applications"), HomeDir() / "Applications"}) {
         fs::path bundle = root / (out.applicationName + ".app");
@@ -108,17 +122,17 @@ BrowserDescriptor BuildDescriptor(const std::string& id) {
     std::vector<fs::path> relative;
     std::vector<std::string> names;
     if (id == "chrome") {
-        out.displayName = "Google Chrome"; out.applicationName = "Google Chrome";
+        out.displayName = "Google Chrome"; out.applicationName = "Google Chrome"; out.windowQuery = "Google Chrome";
         relative = {"Google/Chrome/Application/chrome.exe"}; names = {"chrome.exe"};
     } else if (id == "edge") {
-        out.displayName = "Microsoft Edge"; out.applicationName = "Microsoft Edge";
+        out.displayName = "Microsoft Edge"; out.applicationName = "Microsoft Edge"; out.windowQuery = "Microsoft Edge";
         relative = {"Microsoft/Edge/Application/msedge.exe"}; names = {"msedge.exe"};
     } else if (id == "brave") {
-        out.displayName = "Brave Browser"; out.applicationName = "Brave Browser";
+        out.displayName = "Brave Browser"; out.applicationName = "Brave Browser"; out.windowQuery = "Brave Browser";
         relative = {"BraveSoftware/Brave-Browser/Application/brave.exe"}; names = {"brave.exe"};
     } else if (id == "chromium") {
-        out.displayName = "Chromium"; out.applicationName = "Chromium";
-        relative = {"Chromium/Application/chrome.exe"}; names = {"chromium.exe"};
+        out.displayName = "Chromium"; out.applicationName = "Chromium"; out.windowQuery = "Chromium";
+        relative = {"Chromium/Application/chrome.exe"}; names = {"chrome.exe"};
     }
     for (const char* variable : {"PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"}) {
         if (const char* root = std::getenv(variable)) {
@@ -134,16 +148,16 @@ BrowserDescriptor BuildDescriptor(const std::string& id) {
 #else
     std::vector<std::string> names;
     if (id == "chrome") {
-        out.displayName = "Google Chrome"; out.applicationName = "Google Chrome";
+        out.displayName = "Google Chrome"; out.applicationName = "Google Chrome"; out.windowQuery = "google-chrome";
         names = {"google-chrome", "google-chrome-stable"};
     } else if (id == "edge") {
-        out.displayName = "Microsoft Edge"; out.applicationName = "Microsoft Edge";
+        out.displayName = "Microsoft Edge"; out.applicationName = "Microsoft Edge"; out.windowQuery = "microsoft-edge";
         names = {"microsoft-edge", "microsoft-edge-stable"};
     } else if (id == "brave") {
-        out.displayName = "Brave Browser"; out.applicationName = "Brave Browser";
+        out.displayName = "Brave Browser"; out.applicationName = "Brave Browser"; out.windowQuery = "brave";
         names = {"brave-browser", "brave"};
     } else if (id == "chromium") {
-        out.displayName = "Chromium"; out.applicationName = "Chromium";
+        out.displayName = "Chromium"; out.applicationName = "Chromium"; out.windowQuery = "chromium";
         names = {"chromium", "chromium-browser"};
     }
     out.executable = FindOnPath(names);
@@ -160,7 +174,7 @@ std::string NormalizeBrowserId(const std::string& value) {
     if (lower == "edge" || lower.find("microsoft edge") != std::string::npos || lower.find("msedge") != std::string::npos) return "edge";
     if (lower == "brave" || lower.find("brave browser") != std::string::npos) return "brave";
     if (lower == "chromium" || lower.find("chromium") != std::string::npos) return "chromium";
-    return lower;
+    return {};
 }
 
 BrowserDescriptor DescribeBrowser(const std::string& browserId) {
@@ -177,6 +191,9 @@ std::vector<BrowserDescriptor> BrowserCatalog() {
 
 fs::path ManagedBrowserDataDir(const std::string& browserId, const std::string& profile) {
     const std::string id = NormalizeBrowserId(browserId);
+    if (!IsSupportedBrowserId(id) || !IsValidBrowserProfileName(profile)) {
+        return {};
+    }
     if (id == "chrome" && profile == "default") {
         if (const char* configured = std::getenv("COMPUTER_CPP_CHROME_USER_DATA_DIR")) {
             if (*configured) {
