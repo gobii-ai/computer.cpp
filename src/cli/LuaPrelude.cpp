@@ -1910,7 +1910,7 @@ local function managed_target_is_focused(record, opts)
   }))
   return result and result.ok and result.data and result.data.value == true and result or false
 end
-
+)LUA" R"LUA(
 local function reuse_managed_browser_surface(record, opts)
   if type(record) ~= "table" or tostring(record.windowId or "") == "" then return nil end
   local exists = ac.browser.eval("location.href", managed_browser_options(opts, {

@@ -8,7 +8,7 @@
             "args": [
                 "-NoProfile",
                 "-Command",
-                "$ErrorActionPreference = 'Stop'; $processes = @(Get-Process -Name ComputerCpp -ErrorAction SilentlyContinue); if ($processes.Count -gt 0) { $processes | Stop-Process -ErrorAction Stop; Wait-Process -Id $processes.Id -Timeout 10 -ErrorAction SilentlyContinue }; exit 0"
+                "$ErrorActionPreference = 'Stop'; $buildDir = [IO.Path]::GetFullPath('${workspaceFolder}/build/windows-gui'); $processes = @(Get-Process -Name ComputerCpp,computer.cpp -ErrorAction SilentlyContinue | Where-Object { $_.Path -and [IO.Path]::GetDirectoryName($_.Path) -eq $buildDir }); if ($processes.Count -gt 0) { $processes | Stop-Process -ErrorAction Stop; Wait-Process -Id $processes.Id -Timeout 10 -ErrorAction SilentlyContinue }; exit 0"
             ],
             "problemMatcher": [],
             "presentation": {
