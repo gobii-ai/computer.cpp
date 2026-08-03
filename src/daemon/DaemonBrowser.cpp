@@ -179,16 +179,36 @@ bool LaunchBrowserForCdp(
     const std::string userDataFlag = "--user-data-dir=" + userDataDir.string();
     const std::string proxyFlag = "--proxy-server=" + proxyServer;
 #if defined(__APPLE__)
+    if (openWindowOnly) {
+        const std::filesystem::path executable =
+            std::filesystem::path(browser.executable) / "Contents" / "MacOS" /
+            browser.applicationName;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(executable, ec) || ec) return false;
+        std::vector<std::string> args = {
+            executable.string(), userDataFlag, flag,
+            "--no-first-run", "--no-default-browser-check"};
+        if (!proxyServer.empty()) args.push_back(proxyFlag);
+        args.insert(args.end(), {"--new-window", "about:blank"});
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        pid_t pid = 0;
+        const int rc = posix_spawn(
+            &pid, executable.c_str(), nullptr, nullptr, argv.data(), environ);
+        if (rc != 0) return false;
+        std::thread([pid]() {
+            int status = 0;
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+        }).detach();
+        return true;
+    }
     pid_t pid = 0;
     std::vector<std::string> args = {
         "/usr/bin/open", "-n", "-a", browser.applicationName, "--args",
-        userDataFlag};
-    if (openWindowOnly) {
-        args.insert(args.end(), {"--new-window", "about:blank"});
-    } else {
-        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
-        if (!proxyServer.empty()) args.push_back(proxyFlag);
-    }
+        userDataFlag, flag, "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
@@ -200,22 +220,22 @@ bool LaunchBrowserForCdp(
     return waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #elif defined(_WIN32)
     if (browser.executable.empty()) return false;
-    std::vector<std::string> args = {browser.executable, userDataFlag};
+    std::vector<std::string> args = {
+        browser.executable, userDataFlag, flag,
+        "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
     if (openWindowOnly) {
         args.insert(args.end(), {"--new-window", "about:blank"});
-    } else {
-        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
-        if (!proxyServer.empty()) args.push_back(proxyFlag);
     }
     return Windows::LaunchDetached(args);
 #else
     if (browser.executable.empty()) return false;
-    std::vector<std::string> args = {browser.executable, userDataFlag};
+    std::vector<std::string> args = {
+        browser.executable, userDataFlag, flag,
+        "--no-first-run", "--no-default-browser-check"};
+    if (!proxyServer.empty()) args.push_back(proxyFlag);
     if (openWindowOnly) {
         args.insert(args.end(), {"--new-window", "about:blank"});
-    } else {
-        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
-        if (!proxyServer.empty()) args.push_back(proxyFlag);
     }
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
@@ -246,14 +266,6 @@ bool ManagedBrowserHasNativeWindow(int pid) {
     if (pid <= 0) return false;
     for (const auto& window : Platform::ListWindows("")) {
         if (window.available && window.pid == pid) return true;
-    }
-    return false;
-}
-
-bool WaitForManagedBrowserWindow(int pid, int attempts) {
-    for (int attempt = 0; attempt < attempts; ++attempt) {
-        if (ManagedBrowserHasNativeWindow(pid)) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return false;
 }
@@ -1163,27 +1175,60 @@ ManagedBrowserSession ResolveManagedBrowserSession(
             descriptor.displayName + " profile '" + session.profile + "'";
         return session;
     }
-    if (includePid) {
-        if (auto pid = CdpBrowserProcessId(session.host, session.port, 2000)) {
-            session.pid = static_cast<int>(*pid);
+    const auto refreshManagedIdentity = [&]() {
+        if (session.managed) {
+            if (auto activePort = resolveManagedActivePort()) {
+                session.port = *activePort;
+            }
         }
-    }
-    if (launch && includePid && session.managed && session.pid > 0) {
+        if (session.port > 0) {
+            if (auto pid = CdpBrowserProcessId(session.host, session.port, 500)) {
+                session.pid = static_cast<int>(*pid);
+            }
+        }
+    };
+    if (includePid) refreshManagedIdentity();
+    if (launch && includePid && session.managed) {
+        const auto waitForNativeWindow = [&](int attempts) {
+            for (int attempt = 0; attempt < attempts; ++attempt) {
+                refreshManagedIdentity();
+                if (session.pid > 0 && ManagedBrowserHasNativeWindow(session.pid) &&
+                    Platform::ActivateAppByPid(session.pid)) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return false;
+        };
+
         const int initialWindowAttempts = session.launched ? 50 : 5;
-        bool nativeReady = WaitForManagedBrowserWindow(
-            session.pid, initialWindowAttempts) &&
-            Platform::ActivateAppByPid(session.pid);
+        bool nativeReady = waitForNativeWindow(initialWindowAttempts);
         if (!nativeReady && !session.launched) {
-            if (!LaunchBrowserForCdp(descriptor, userDataDir, proxyServer, 0, true)) {
+            BrowserLaunchLock lock(userDataDir / ".computer-cpp-launch.lock");
+            if (!lock.valid()) {
+                session.ok = false;
+                session.code = "browser_launch_failed";
+                session.error = "could not lock managed browser profile '" +
+                    session.profile + "'";
+                return session;
+            }
+            // Another daemon may have restored the window while this process
+            // waited for the profile launch lock.
+            nativeReady = waitForNativeWindow(10);
+            if (!nativeReady && !LaunchBrowserForCdp(
+                    descriptor, userDataDir, proxyServer, 0, true)) {
                 session.ok = false;
                 session.code = "browser_window_create_failed";
                 session.error = "could not reopen a window for " + descriptor.displayName +
                     " profile '" + session.profile + "'";
                 return session;
             }
-            session.launched = true;
-            nativeReady = WaitForManagedBrowserWindow(session.pid, 50) &&
-                Platform::ActivateAppByPid(session.pid);
+            if (!nativeReady) {
+                session.launched = true;
+                // A restored browser can have a new dynamic CDP port and PID.
+                // Refresh both before binding native input to its window.
+                nativeReady = waitForNativeWindow(50);
+            }
         }
         if (!nativeReady) {
             session.ok = false;
