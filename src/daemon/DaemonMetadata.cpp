@@ -194,6 +194,7 @@ json SchemaJson() {
             {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},
             {"port", "optional explicit Chrome DevTools port; managed sessions otherwise use an ephemeral port"},
             {"launch", "boolean default true; starts the configured managed browser when unavailable"},
+            {"nativeWindow", "boolean default false; with launch=true, ensures the managed browser has an activatable native window"},
             {"readOnly", "must be true; obvious DOM/input mutation snippets are rejected"},
             {"response", "backend cdp, value, JavaScript result type, host, port, exact targetId/targetUrl/browserContextId, targetUrlPrefix, and browserPid when querying without a prefix"},
             {"inputBoundary", "browser_eval is for inspection only; user-like input must use native click/type/press/mouse commands"}

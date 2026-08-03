@@ -3468,6 +3468,7 @@ void TestManagedBrowserSurfacePersistsAndFocusReuses() {
     assert(data["focus_reused"] == true);
     assert(data["bootstrap_calls"] == 1);
     assert(data["new_window_presses"] == 0);
+    assert(data["native_window_requests"] == 1);
     assert(data["state_exists"] == true);
 }
 

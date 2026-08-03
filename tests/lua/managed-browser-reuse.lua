@@ -4,6 +4,7 @@ local current_url = "about:blank"
 local typed_url = ""
 local bootstrap_calls = 0
 local new_window_presses = 0
+local native_window_requests = 0
 
 local function browser_data(extra)
   local data = {
@@ -23,6 +24,9 @@ end
 ac.request = function(method, params)
   params = params or {}
   if method == "browser_eval" then
+    if params.nativeWindow == true then
+      native_window_requests = native_window_requests + 1
+    end
     if params.script == "document.hasFocus()" then
       return browser_data({ value = true })
     end
@@ -86,5 +90,6 @@ return {
   focus_reused = focused and focused.data and focused.data.reused == true,
   bootstrap_calls = bootstrap_calls,
   new_window_presses = new_window_presses,
+  native_window_requests = native_window_requests,
   state_exists = state_exists,
 }

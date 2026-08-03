@@ -3,6 +3,7 @@
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
 #include "computer_cpp/Browser.h"
+#include "computer_cpp/Platform.h"
 #include "computer_cpp/StringUtils.h"
 
 #include "DaemonParsing.h"
@@ -171,7 +172,8 @@ bool LaunchBrowserForCdp(
     const BrowserDescriptor& browser,
     const std::filesystem::path& userDataDir,
     const std::string& proxyServer,
-    int port
+    int port,
+    bool openWindowOnly = false
 ) {
     const std::string flag = "--remote-debugging-port=" + std::to_string(port);
     const std::string userDataFlag = "--user-data-dir=" + userDataDir.string();
@@ -179,9 +181,14 @@ bool LaunchBrowserForCdp(
 #if defined(__APPLE__)
     pid_t pid = 0;
     std::vector<std::string> args = {
-        "/usr/bin/open", "-n", "-a", browser.applicationName,
-        "--args", flag, userDataFlag, "--no-first-run", "--no-default-browser-check"};
-    if (!proxyServer.empty()) args.push_back(proxyFlag);
+        "/usr/bin/open", "-n", "-a", browser.applicationName, "--args",
+        userDataFlag};
+    if (openWindowOnly) {
+        args.insert(args.end(), {"--new-window", "about:blank"});
+    } else {
+        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
+        if (!proxyServer.empty()) args.push_back(proxyFlag);
+    }
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
@@ -193,15 +200,23 @@ bool LaunchBrowserForCdp(
     return waitpid(pid, &status, 0) >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #elif defined(_WIN32)
     if (browser.executable.empty()) return false;
-    std::vector<std::string> args = {browser.executable, flag, userDataFlag,
-        "--no-first-run", "--no-default-browser-check"};
-    if (!proxyServer.empty()) args.push_back(proxyFlag);
+    std::vector<std::string> args = {browser.executable, userDataFlag};
+    if (openWindowOnly) {
+        args.insert(args.end(), {"--new-window", "about:blank"});
+    } else {
+        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
+        if (!proxyServer.empty()) args.push_back(proxyFlag);
+    }
     return Windows::LaunchDetached(args);
 #else
     if (browser.executable.empty()) return false;
-    std::vector<std::string> args = {browser.executable, flag, userDataFlag,
-        "--no-first-run", "--no-default-browser-check"};
-    if (!proxyServer.empty()) args.push_back(proxyFlag);
+    std::vector<std::string> args = {browser.executable, userDataFlag};
+    if (openWindowOnly) {
+        args.insert(args.end(), {"--new-window", "about:blank"});
+    } else {
+        args.insert(args.end(), {flag, "--no-first-run", "--no-default-browser-check"});
+        if (!proxyServer.empty()) args.push_back(proxyFlag);
+    }
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
@@ -225,6 +240,22 @@ bool LaunchBrowserForCdp(
     }).detach();
     return true;
 #endif
+}
+
+bool ManagedBrowserHasNativeWindow(int pid) {
+    if (pid <= 0) return false;
+    for (const auto& window : Platform::ListWindows("")) {
+        if (window.available && window.pid == pid) return true;
+    }
+    return false;
+}
+
+bool WaitForManagedBrowserWindow(int pid, int attempts) {
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        if (ManagedBrowserHasNativeWindow(pid)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
 }
 
 std::optional<int> ReadPortFile(const std::filesystem::path& path) {
@@ -1137,6 +1168,31 @@ ManagedBrowserSession ResolveManagedBrowserSession(
             session.pid = static_cast<int>(*pid);
         }
     }
+    if (launch && includePid && session.managed && session.pid > 0) {
+        const int initialWindowAttempts = session.launched ? 50 : 5;
+        bool nativeReady = WaitForManagedBrowserWindow(
+            session.pid, initialWindowAttempts) &&
+            Platform::ActivateAppByPid(session.pid);
+        if (!nativeReady && !session.launched) {
+            if (!LaunchBrowserForCdp(descriptor, userDataDir, proxyServer, 0, true)) {
+                session.ok = false;
+                session.code = "browser_window_create_failed";
+                session.error = "could not reopen a window for " + descriptor.displayName +
+                    " profile '" + session.profile + "'";
+                return session;
+            }
+            session.launched = true;
+            nativeReady = WaitForManagedBrowserWindow(session.pid, 50) &&
+                Platform::ActivateAppByPid(session.pid);
+        }
+        if (!nativeReady) {
+            session.ok = false;
+            session.code = "browser_focus_failed";
+            session.error = descriptor.displayName + " profile '" + session.profile +
+                "' is running for inspection but did not expose an activatable native window";
+            return session;
+        }
+    }
     return session;
 }
 
@@ -1153,6 +1209,7 @@ json RunBrowserEvalCommand(const json& params) {
             "host",
             "port",
             "launch",
+            "nativeWindow",
             "timeoutMs",
             "readOnly",
             "controlScope",
@@ -1172,10 +1229,11 @@ json RunBrowserEvalCommand(const json& params) {
     auto host = StringParam(params, "host", "");
     auto port = IntParam(params, "port", 0);
     auto launch = BoolParam(params, "launch", true);
+    auto nativeWindow = BoolParam(params, "nativeWindow", false);
     auto timeoutMs = IntParam(params, "timeoutMs", 5000);
     auto readOnly = BoolParam(params, "readOnly", true);
-    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !targetFocused || !browserContextId || !browser || !profile || !host || !port || !launch || !timeoutMs || !readOnly) {
-        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/profile/host, integer port/timeoutMs, and boolean targetFocused/launch/readOnly", "invalid_browser_eval");
+    if (!script || !targetId || !targetUrlPrefix || !targetTitle || !targetFocused || !browserContextId || !browser || !profile || !host || !port || !launch || !nativeWindow || !timeoutMs || !readOnly) {
+        return Error("browser_eval requires string script/targetId/targetUrlPrefix/targetTitle/browserContextId/browser/profile/host, integer port/timeoutMs, and boolean targetFocused/launch/nativeWindow/readOnly", "invalid_browser_eval");
     }
     if (IsBlank(*script)) {
         return Error("browser_eval script must be non-empty", "invalid_browser_eval");
@@ -1201,7 +1259,8 @@ json RunBrowserEvalCommand(const json& params) {
     if (LooksMutatingScript(*script)) {
         return Error("browser_eval rejected a script that appears to mutate browser/UI state", "invalid_browser_eval");
     }
-    const ManagedBrowserSession session = ResolveManagedBrowserSession(params, *launch);
+    const ManagedBrowserSession session = ResolveManagedBrowserSession(
+        params, *launch, *launch && *nativeWindow);
     if (!session.ok) {
         return Error(session.error, session.code);
     }

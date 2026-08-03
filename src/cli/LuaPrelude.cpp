@@ -1986,6 +1986,7 @@ function ac.browser.managed.ensure(opts)
     targetUrlPrefix = "",
     targetTitle = "",
     launch = opts.launch ~= false,
+    nativeWindow = true,
   }))
   if not bootstrap or not bootstrap.ok or not bootstrap.data then
     return bootstrap or { ok = false, code = "browser_debug_unavailable", error = "managed browser inspection is unavailable" }
