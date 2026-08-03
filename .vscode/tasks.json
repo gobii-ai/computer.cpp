@@ -1,0 +1,52 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Stop running ComputerCpp (Windows)",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "$ErrorActionPreference = 'Stop'; $processes = @(Get-Process -Name ComputerCpp -ErrorAction SilentlyContinue); if ($processes.Count -gt 0) { $processes | Stop-Process -ErrorAction Stop; Wait-Process -Id $processes.Id -Timeout 10 -ErrorAction SilentlyContinue }; exit 0"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Build ComputerCpp (Windows)",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/build-windows.ps1",
+                "-Target",
+                "ComputerCpp"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$msCompile",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Prepare ComputerCpp launch (Windows)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Stop running ComputerCpp (Windows)",
+                "Build ComputerCpp (Windows)"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

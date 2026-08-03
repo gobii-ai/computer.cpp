@@ -597,6 +597,17 @@ For release-style local builds on macOS:
 ./scripts/build-mac.sh --release --reconfigure
 ```
 
+### VS Code on Windows
+
+Open **Run and Debug**, select **ComputerCpp: Build and Run**, and press the
+play button (or `F5`). VS Code will stop any running copy, build, and launch
+the tray app. Use `Ctrl+Shift+B` to build it without launching or stopping it.
+
+The checked-in task uses `scripts/build-windows.ps1` to initialize the MSVC
+developer environment before invoking CMake. It expects the Visual Studio
+Desktop development with C++ workload and either `VCPKG_ROOT` or a vcpkg
+checkout at `build/tools/vcpkg`.
+
 The macOS build script also creates a reusable local signing identity before
 the first signed build if you do not already have an Apple Development or
 Developer ID Application certificate. You can create or refresh that identity

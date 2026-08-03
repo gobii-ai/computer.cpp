@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "ComputerCpp: Build and Run",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/windows-gui/ComputerCpp.exe",
+            "cwd": "${workspaceFolder}/build/windows-gui",
+            "preLaunchTask": "Prepare ComputerCpp launch (Windows)",
+            "stopAtEntry": false,
+            "externalConsole": false
+        }
+    ]
+}
