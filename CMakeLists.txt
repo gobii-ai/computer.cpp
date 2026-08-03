@@ -266,6 +266,7 @@ if(APPLE)
 elseif(WIN32)
     target_sources(computer_cpp_core PRIVATE
         src/platform/windows/PlatformWindows.cpp
+        src/platform/windows/WindowsAppResolver.cpp
         src/platform/windows/ScreenRecordingWindows.cpp
         src/platform/windows/GobiiCredentialStoreWindows.cpp
         src/platform/windows/GobiiStartupRegistrationWindows.cpp
@@ -285,6 +286,7 @@ elseif(WIN32)
             shell32
             user32
             uuid
+            wtsapi32
             ws2_32
     )
 elseif(UNIX)
@@ -588,6 +590,10 @@ if(BUILD_TESTING)
             src/daemon
             src/platform/linux
     )
+
+    if(WIN32)
+        target_include_directories(computer_cpp_tests PRIVATE src/platform/windows)
+    endif()
 
     target_link_libraries(computer_cpp_tests
         PRIVATE

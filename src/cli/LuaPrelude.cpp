@@ -2166,6 +2166,39 @@ function ac.desktop.focus_app(app, opts)
   if type(name) ~= "string" or name == "" then
     return { ok = true, data = { focused = false } }
   end
+  local allow_error = option_value(opts, "allowError", "allow_error", false) == true
+  if not context.dry_run and option_value(opts, "wakeDesktop", "wake_desktop", true) ~= false then
+    local inspected = ac.request("desktop_session_state", {}, { allow_error = true })
+    local session = inspected.data and inspected.data.session or {}
+    local wake = nil
+    if inspected.ok == true and session.detectionSupported == true then
+      wake = ac.request("desktop_wake", { force = true }, { allow_error = true })
+    elseif inspected.ok ~= true then
+      wake = inspected
+    end
+    if wake and (wake.ok ~= true or not wake.data or wake.data.ready ~= true) then
+      local code = wake.code or "desktop_session_unavailable"
+      local message = wake.error or "desktop did not become ready after wake"
+      if not allow_error then
+        error("computer.cpp step focus-wake failed: " .. tostring(message), 2)
+      end
+      return {
+        ok = true,
+        data = {
+          results = {{
+            ok = false,
+            id = "focus-wake",
+            code = code,
+            error = message,
+          }},
+          requested = 1,
+          executed = 1,
+          failed = 1,
+          stoppedOnError = true,
+        },
+      }
+    end
+  end
   return ac.batch({
     { id = "focus-launch", method = "app_launch", params = { query = name } },
     {
@@ -2178,7 +2211,7 @@ function ac.desktop.focus_app(app, opts)
       },
     },
   }, {
-    allow_error = option_value(opts, "allowError", "allow_error", false) == true,
+    allow_error = allow_error,
     allow_start = option_value(opts, "allowStart", "allow_start", nil),
   })
 end

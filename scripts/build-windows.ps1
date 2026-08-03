@@ -3,7 +3,11 @@ param(
     [ValidateSet("ComputerCpp", "computer.cpp", "all")]
     [string]$Target = "ComputerCpp",
 
-    [string]$BuildDir = "build/windows-gui"
+    [string]$BuildDir = "build/windows-gui",
+
+    [string]$CodeSigningSubject = "CN=Gobii AI computer.cpp",
+
+    [switch]$NoCodeSign
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +62,91 @@ function Find-VcpkgToolchain {
     throw "vcpkg was not found. Set VCPKG_ROOT or install it at build/tools/vcpkg."
 }
 
+function Test-SmartAppControlEnforced {
+    try {
+        $policy = Get-ItemProperty `
+            "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" `
+            -ErrorAction Stop
+        return $policy.VerifiedAndReputablePolicyState -eq 1
+    } catch {
+        return $false
+    }
+}
+
+function Find-CodeSigningCertificate {
+    $now = Get-Date
+    return Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert `
+        -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Subject -eq $CodeSigningSubject -and
+            $_.HasPrivateKey -and
+            $_.NotBefore -le $now -and
+            $_.NotAfter -gt $now
+        } |
+        Sort-Object NotAfter -Descending |
+        Select-Object -First 1
+}
+
+function Find-SignTool {
+    $fromPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($fromPath) {
+        return $fromPath.Source
+    }
+
+    $kitsBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits/10/bin"
+    if (Test-Path $kitsBin) {
+        $candidate = Get-ChildItem $kitsBin -Recurse -Filter signtool.exe `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($candidate) {
+            return $candidate.FullName
+        }
+    }
+
+    throw "signtool.exe was not found. Install a Windows SDK with the Visual Studio C++ workload."
+}
+
+function Invoke-LocalCodeSigning {
+    if ($NoCodeSign) {
+        return
+    }
+
+    $certificate = Find-CodeSigningCertificate
+    if (-not $certificate) {
+        if (Test-SmartAppControlEnforced) {
+            throw "Smart App Control is enforcing, but no usable '$CodeSigningSubject' certificate exists in Cert:\CurrentUser\My. Install the development signing identity or pass -NoCodeSign only on a machine where unsigned development binaries are allowed."
+        }
+        Write-Verbose "Skipping local code signing because '$CodeSigningSubject' was not found."
+        return
+    }
+
+    $signTool = Find-SignTool
+    $artifacts = Get-ChildItem $BuildDir -File |
+        Where-Object { $_.Extension -in ".exe", ".dll" }
+    foreach ($artifact in $artifacts) {
+        $signature = Get-AuthenticodeSignature $artifact.FullName
+        if ($signature.Status -eq "Valid") {
+            continue
+        }
+
+        & $signTool sign `
+            /fd SHA256 `
+            /sha1 $certificate.Thumbprint `
+            /s My `
+            $artifact.FullName
+        if ($LASTEXITCODE -ne 0) {
+            throw "Code signing failed for $($artifact.FullName) with exit code $LASTEXITCODE."
+        }
+
+        $signature = Get-AuthenticodeSignature $artifact.FullName
+        if ($signature.Status -ne "Valid") {
+            throw "The signature on $($artifact.FullName) did not validate: $($signature.StatusMessage)"
+        }
+    }
+}
+
 Enter-ComputerCppDeveloperShell
 
 $cmakeCache = Join-Path $BuildDir "CMakeCache.txt"
@@ -79,3 +168,5 @@ if (-not (Test-Path $cmakeCache)) {
 if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE."
 }
+
+Invoke-LocalCodeSigning

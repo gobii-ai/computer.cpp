@@ -14,6 +14,10 @@
 
 #include "LinuxPng.h"
 #include "TestSupport.h"
+
+#if defined(_WIN32)
+#include "WindowsAppResolver.h"
+#endif
 #include "UpdaterInternal.h"
 
 #include <cassert>
@@ -65,6 +69,59 @@ void TestStringUtils() {
     assert(keys[0] == "Cmd");
     assert(ComputerCpp::Join(keys, ",") == "Cmd,Shift,G");
 }
+
+#if defined(_WIN32)
+void TestWindowsAppCatalogMatching() {
+    using ComputerCpp::Platform::WindowsApps::CatalogEntry;
+    using ComputerCpp::Platform::WindowsApps::MatchCatalog;
+    using ComputerCpp::Platform::WindowsApps::NormalizeLookupName;
+
+    const std::vector<CatalogEntry> entries = {
+        {
+            "Calculator",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "",
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        },
+        {
+            "Visual Studio Code",
+            "Microsoft.VisualStudioCode",
+            "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+            "",
+        },
+        {"Calculator Preview", "Example.CalculatorPreview!App", "", ""},
+    };
+
+    assert(NormalizeLookupName(" Visual-Studio Code.exe ") ==
+        "visualstudiocode");
+
+    auto calculator = MatchCatalog(entries, "Calculator");
+    assert(calculator.entry.has_value());
+    assert(calculator.entry->appUserModelId ==
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
+    assert(!calculator.ambiguous);
+
+    auto calculatorId = MatchCatalog(
+        entries,
+        "microsoft.windowscalculator_8wekyb3d8bbwe!app");
+    assert(calculatorId.entry.has_value());
+    assert(calculatorId.entry->displayName == "Calculator");
+
+    auto code = MatchCatalog(entries, "code.exe");
+    assert(code.entry.has_value());
+    assert(code.entry->displayName == "Visual Studio Code");
+
+    auto ambiguous = MatchCatalog(entries, "calc");
+    assert(!ambiguous.entry.has_value());
+    assert(ambiguous.ambiguous);
+    assert(ambiguous.candidates.size() == 2);
+
+    auto missing = MatchCatalog(entries, "Definitely Missing");
+    assert(!missing.entry.has_value());
+    assert(!missing.ambiguous);
+    assert(missing.candidates.empty());
+}
+#endif
 
 void TestBrowserRegistry() {
     assert(ComputerCpp::NormalizeBrowserId("Google Chrome") == "chrome");
@@ -1189,6 +1246,9 @@ int main() {
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
     RunTest("StringUtils", TestStringUtils);
+#if defined(_WIN32)
+    RunTest("WindowsAppCatalogMatching", TestWindowsAppCatalogMatching);
+#endif
     RunTest("BrowserRegistry", TestBrowserRegistry);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
     RunTest("ServerAppNameValidation", TestServerAppNameValidation);
