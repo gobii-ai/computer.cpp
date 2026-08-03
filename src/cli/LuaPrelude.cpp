@@ -1750,7 +1750,22 @@ end
 -- only to inspect and bind the exact page that received those actions.
 ac.browser.managed = {}
 
+local function managed_browser_state_root()
+  local separator = package.config:sub(1, 1)
+  local configured = os.getenv("COMPUTER_CPP_HOME")
+  if configured ~= nil and configured ~= "" then return configured, separator end
+  local home = os.getenv("HOME") or os.getenv("USERPROFILE")
+  if home ~= nil and home ~= "" then return home .. separator .. ".computer.cpp", separator end
+  return os.getenv("TEMP") or os.getenv("TMPDIR") or os.getenv("TMP") or "/tmp", separator
+end
+
 local function managed_browser_state_path()
+  local root, separator = managed_browser_state_root()
+  -- The daemon creates its private app-data root before Lua apps run.
+  return root .. separator .. "managed-browser-surfaces.json"
+end
+
+local function legacy_managed_browser_state_path()
   local root = os.getenv("TEMP") or os.getenv("TMPDIR") or os.getenv("TMP") or "/tmp"
   local separator = package.config:sub(1, 1)
   return root .. separator .. ".computer.cpp" .. separator .. "managed-browser-surfaces.json"
@@ -1758,6 +1773,7 @@ end
 
 local function read_managed_browser_state()
   local file = io.open(managed_browser_state_path(), "r")
+  if not file then file = io.open(legacy_managed_browser_state_path(), "r") end
   if not file then return {} end
   local text = file:read("*a") or ""
   file:close()
@@ -1998,7 +2014,40 @@ function ac.browser.managed.ensure(opts)
     managed_delay(200)
   end
 
-  if bootstrap.data.launched ~= true then
+  local expected_prefix = tostring(opts.startUrlPrefix or start_url)
+  local focused_existing = ac.browser.eval("location.href", managed_browser_options(opts, {
+    targetId = "",
+    targetUrlPrefix = expected_prefix,
+    targetTitle = "",
+    targetFocused = true,
+    launch = false,
+  }))
+  if focused_existing and focused_existing.ok and focused_existing.data then
+    local current_url = tostring(focused_existing.data.value or focused_existing.data.targetUrl or "")
+    local record = {
+      targetId = tostring(focused_existing.data.targetId or ""),
+      windowId = tostring(window.id or ""),
+      browserPid = browser_pid,
+      browser = tostring(focused_existing.data.browser or bootstrap.data.browser or ""),
+      profile = tostring(focused_existing.data.profile or bootstrap.data.profile or ""),
+    }
+    if record.targetId ~= "" and record.windowId ~= "" then
+      state[name] = record
+      write_managed_browser_state(state)
+      return { ok = true, data = {
+        name = name,
+        targetId = record.targetId,
+        windowId = record.windowId,
+        browserPid = record.browserPid,
+        browser = record.browser,
+        profile = record.profile,
+        currentUrl = current_url,
+        reused = true,
+      } }
+    end
+  end
+
+  if bootstrap.data.launched ~= true and opts.newWindow ~= false then
     local before_id = tostring(window.id or "")
     local created = ac.request("press", { keys = { "primary", "n" }, holdMs = 40 }, { allow_error = true })
     if not created or not created.ok then
@@ -2023,7 +2072,6 @@ function ac.browser.managed.ensure(opts)
   managed_delay(80)
   ac.request("press", { keys = "enter", holdMs = 40 }, { allow_error = true })
 
-  local expected_prefix = tostring(opts.startUrlPrefix or start_url)
   local selected = managed_wait(function()
     local result = ac.browser.eval("location.href", managed_browser_options(opts, {
       targetId = "",
@@ -2071,7 +2119,7 @@ function ac.browser.managed.ensure(opts)
 end
 
 function ac.browser.managed.focus(opts)
-  return ac.browser.managed.ensure(opts or {})
+  return ac.browser.managed.ensure(merge(opts or {}, { newWindow = false }))
 end
 
 )LUA" R"LUA(function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end

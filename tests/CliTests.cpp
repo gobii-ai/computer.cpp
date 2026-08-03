@@ -3443,6 +3443,34 @@ void TestBrowserOpenLuaDryRun() {
     assert(data["default_new_window"] == true);
 }
 
+void TestManagedBrowserSurfacePersistsAndFocusReuses() {
+    if (SkipLuaTestIfUnavailable("TestManagedBrowserSurfacePersistsAndFocusReuses")) return;
+    const auto root = ComputerCpp::Tests::MakeTempHome() / "managed-browser-state";
+    std::filesystem::create_directories(root);
+    ScopedEnvVar temp("TEMP");
+    ScopedEnvVar tmpdir("TMPDIR");
+    ScopedEnvVar tmp("TMP");
+    ScopedEnvVar computerCppHome("COMPUTER_CPP_HOME");
+    temp.Set(root.string());
+    tmpdir.Set(root.string());
+    tmp.Set(root.string());
+    computerCppHome.Set(root.string());
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/managed-browser-reuse.lua";
+    options.jsonOutput = true;
+    const auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    const auto payload = nlohmann::json::parse(result.stdoutText);
+    const auto& data = payload["data"]["result"];
+    assert(data["first_ok"] == true);
+    assert(data["focus_ok"] == true);
+    assert(data["focus_reused"] == true);
+    assert(data["bootstrap_calls"] == 1);
+    assert(data["new_window_presses"] == 0);
+    assert(data["state_exists"] == true);
+}
+
 void TestMicroAgentStrictToolCallsLuaDryRun() {
     if (SkipLuaTestIfUnavailable("TestMicroAgentStrictToolCallsLuaDryRun")) {
         return;
@@ -4103,6 +4131,7 @@ void RunCliTests() {
     TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
     TestBrowserOpenLuaDryRun();
+    TestManagedBrowserSurfacePersistsAndFocusReuses();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();
