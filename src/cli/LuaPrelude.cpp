@@ -1736,14 +1736,15 @@ end
 
 ac.browser = {}
 function ac.browser.open(url, opts)
-  return ac.request("open_url", merge({ url = url, browser = "firefox", newWindow = true }, opts or {}))
+  return ac.request("open_url", merge({ url = url, newWindow = true }, opts or {}))
 end
 function ac.browser.eval(script, opts)
   return ac.request("browser_eval", merge({ script = script, readOnly = true }, opts or {}), { allow_error = true })
 end
 
--- Browser-backed semantic apps share one native Chrome window containing one
--- managed tab. The target id is persisted between Lua processes, while every
+-- Browser-backed semantic apps share one native managed-browser surface. A cold
+-- launch uses Chromium's initial window; reuse creates a dedicated window when
+-- no saved surface remains. The target id is persisted between Lua processes, while every
 -- reuse is verified against both the native window and document.hasFocus().
 -- Navigation and window creation remain native keyboard actions; CDP is used
 -- only to inspect and bind the exact page that received those actions.
@@ -1775,13 +1776,17 @@ end
 
 local function managed_browser_options(opts, extra)
   opts = opts or {}
-  return merge({
-    browser = opts.browser or "Google Chrome",
-    host = opts.host or os.getenv("COMPUTER_CPP_CHROME_CDP_HOST") or "127.0.0.1",
-    port = tonumber(opts.port or os.getenv("COMPUTER_CPP_CHROME_CDP_PORT") or "9222") or 9222,
+  local options = {
     launch = false,
     readOnly = true,
-  }, extra or {})
+  }
+  if opts.browser ~= nil then options.browser = opts.browser end
+  if opts.profile ~= nil then options.profile = opts.profile end
+  local host = opts.host or os.getenv("COMPUTER_CPP_CHROME_CDP_HOST")
+  local port = opts.port or os.getenv("COMPUTER_CPP_CHROME_CDP_PORT")
+  if host ~= nil and tostring(host) ~= "" then options.host = tostring(host) end
+  if port ~= nil and tostring(port) ~= "" then options.port = tonumber(port) end
+  return merge(options, extra or {})
 end
 
 local function managed_window_active()
@@ -1803,6 +1808,84 @@ local function managed_wait(predicate, timeout_ms, interval_ms)
   return nil
 end
 
+local function managed_bounds_contains(outer, inner)
+  if type(outer) ~= "table" or type(inner) ~= "table" or
+      outer.available ~= true or inner.available ~= true then return false end
+  local ox, oy = tonumber(outer.x), tonumber(outer.y)
+  local ow, oh = tonumber(outer.width), tonumber(outer.height)
+  local ix, iy = tonumber(inner.x), tonumber(inner.y)
+  local iw, ih = tonumber(inner.width), tonumber(inner.height)
+  if not ox or not oy or not ow or not oh or not ix or not iy or not iw or not ih then return false end
+  return ix >= ox and iy >= oy and ix + iw <= ox + ow and iy + ih <= oy + oh
+end
+
+local function managed_submit_filled_proxy_auth(browser_pid, proxy_configured)
+  -- Proxy configuration is the user's consent to this narrow browser-chrome
+  -- helper. Never infer a credential prompt from arbitrary page content alone.
+  if proxy_configured ~= true then return false end
+  local snapshot = ac.request("snapshot", {
+    interactive = false,
+    bounds = true,
+    actions = true,
+    maxDepth = 10,
+    maxNodes = 200,
+  }, { allow_error = true })
+  if not snapshot or not snapshot.ok or not snapshot.data then return false end
+  local frontmost = snapshot.data.frontmostApp or {}
+  if tonumber(frontmost.pid) ~= tonumber(browser_pid) then return false end
+
+  local dialog_bounds = {}
+  for _, ref in ipairs(snapshot.data.refs or {}) do
+    local role = tostring(ref.role or ""):lower()
+    if role:find("dialog", 1, true) or role:find("sheet", 1, true) then
+      if ref.bounds and ref.bounds.available == true then
+        table.insert(dialog_bounds, ref.bounds)
+      end
+    end
+  end
+  if #dialog_bounds == 0 then return false end
+
+  local proxy_prompt = false
+  local cancel_button = false
+  local sign_in_target = ""
+  local filled_fields = 0
+  for _, ref in ipairs(snapshot.data.refs or {}) do
+    local inside_dialog = false
+    for _, bounds in ipairs(dialog_bounds) do
+      if managed_bounds_contains(bounds, ref.bounds) then
+        inside_dialog = true
+        break
+      end
+    end
+    if inside_dialog then
+    local role = tostring(ref.role or ""):lower()
+    local name = tostring(ref.name or "")
+    local value = tostring(ref.value or "")
+    local text = (name .. " " .. value):lower()
+    if text:find("the proxy ", 1, true) and
+        text:find("requires a username and password", 1, true) then
+      proxy_prompt = true
+    elseif role:find("textfield", 1, true) and value ~= "" then
+      filled_fields = filled_fields + 1
+    elseif role:find("button", 1, true) and name:lower() == "cancel" then
+      cancel_button = true
+    elseif role:find("button", 1, true) and name:lower() == "sign in" then
+      sign_in_target = tostring(ref.displayRef or ref.ref or "")
+    end
+    end
+  end
+  if not proxy_prompt or not cancel_button or filled_fields < 2 or sign_in_target == "" then
+    return false
+  end
+  if sign_in_target:sub(1, 1) ~= "@" then sign_in_target = "@" .. sign_in_target end
+  local clicked = ac.request("click", {
+    target = sign_in_target,
+    button = "left",
+    clickCount = 1,
+  }, { allow_error = true })
+  return clicked and clicked.ok == true
+end
+
 local function managed_target_is_focused(record, opts)
   if type(record) ~= "table" or tostring(record.targetId or "") == "" then return false end
   local result = ac.browser.eval("document.hasFocus()", managed_browser_options(opts, {
@@ -1819,6 +1902,10 @@ local function reuse_managed_browser_surface(record, opts)
     launch = false,
   }))
   if not exists or not exists.ok then return nil end
+  local resolved_browser = tostring(exists.data and exists.data.browser or "")
+  local resolved_profile = tostring(exists.data and exists.data.profile or "")
+  if tostring(record.browser or "") ~= "" and tostring(record.browser) ~= resolved_browser then return nil end
+  if tostring(record.profile or "") ~= "" and tostring(record.profile) ~= resolved_profile then return nil end
 
   local activated = ac.request("window_activate", { id = tostring(record.windowId) }, { allow_error = true })
   if not activated or not activated.ok then return nil end
@@ -1841,6 +1928,8 @@ local function reuse_managed_browser_surface(record, opts)
     targetId = tostring(record.targetId),
     windowId = tostring(record.windowId),
     browserPid = tonumber(record.browserPid),
+    browser = resolved_browser,
+    profile = resolved_profile,
     currentUrl = tostring(focused.data and focused.data.targetUrl or exists.data and exists.data.value or ""),
     reused = true,
   }
@@ -1865,6 +1954,14 @@ function ac.browser.managed.ensure(opts)
   local reused = reuse_managed_browser_surface(state[name], opts)
   if reused then
     reused.name = name
+    state[name] = {
+      targetId = reused.targetId,
+      windowId = reused.windowId,
+      browserPid = reused.browserPid,
+      browser = reused.browser,
+      profile = reused.profile,
+    }
+    write_managed_browser_state(state)
     return { ok = true, data = reused }
   end
 
@@ -1875,35 +1972,46 @@ function ac.browser.managed.ensure(opts)
     launch = opts.launch ~= false,
   }))
   if not bootstrap or not bootstrap.ok or not bootstrap.data then
-    return bootstrap or { ok = false, code = "browser_debug_unavailable", error = "Chrome DevTools is unavailable" }
+    return bootstrap or { ok = false, code = "browser_debug_unavailable", error = "managed browser inspection is unavailable" }
   end
   local browser_pid = tonumber(bootstrap.data.browserPid)
   if not browser_pid or browser_pid <= 0 then
-    return { ok = false, code = "browser_pid_unavailable", error = "Chrome DevTools did not report its browser process id" }
+    return { ok = false, code = "browser_pid_unavailable", error = "the managed browser did not report its process id" }
   end
 
   local activated = ac.request("app_activate_pid", { pid = browser_pid }, { allow_error = true })
   if not activated or not activated.ok then
-    return { ok = false, code = "browser_focus_failed", error = "could not activate the debuggable Chrome process" }
+    return { ok = false, code = "browser_focus_failed", error = "could not activate the managed browser process" }
   end
-  managed_wait(function()
+  local window = managed_wait(function()
     local window = managed_window_active()
     return window and tonumber(window.pid) == browser_pid and window or false
   end, opts.focusTimeoutMs or 7000, 150)
-  local before = managed_window_active()
-  local before_id = before and tostring(before.id or "") or ""
-
-  local opened = ac.request("press", { keys = { "primary", "n" }, holdMs = 40 }, { allow_error = true })
-  if not opened or not opened.ok then
-    return { ok = false, code = "browser_window_create_failed", error = "could not create the managed Chrome window" }
+  if not window or tostring(window.id or "") == "" then
+    return { ok = false, code = "browser_window_unavailable", error = "the managed browser did not expose an active window" }
   end
-  local window = managed_wait(function()
-    local current = managed_window_active()
-    local current_id = current and tostring(current.id or "") or ""
-    return current and tonumber(current.pid) == browser_pid and current_id ~= "" and current_id ~= before_id and current or false
-  end, opts.createTimeoutMs or 7000, 150)
-  if not window then
-    return { ok = false, code = "browser_window_create_failed", error = "Chrome did not expose the new managed window" }
+
+  local auto_proxy_auth = opts.autoSubmitProxyAuth == true or
+    (opts.autoSubmitProxyAuth ~= false and bootstrap.data.proxyConfigured == true)
+  local proxy_auth_submitted = managed_submit_filled_proxy_auth(browser_pid, auto_proxy_auth)
+  if proxy_auth_submitted then
+    managed_delay(200)
+  end
+
+  if bootstrap.data.launched ~= true then
+    local before_id = tostring(window.id or "")
+    local created = ac.request("press", { keys = { "primary", "n" }, holdMs = 40 }, { allow_error = true })
+    if not created or not created.ok then
+      return { ok = false, code = "browser_window_create_failed", error = "could not create a managed browser window" }
+    end
+    window = managed_wait(function()
+      local candidate = managed_window_active()
+      return candidate and tonumber(candidate.pid) == browser_pid and
+        tostring(candidate.id or "") ~= "" and tostring(candidate.id) ~= before_id and candidate or false
+    end, opts.createTimeoutMs or 7000, 150)
+    if not window then
+      return { ok = false, code = "browser_window_create_failed", error = "the managed browser did not create a new window" }
+    end
   end
 
   ac.request("press", { keys = { "primary", "l" }, holdMs = 40 }, { allow_error = true })
@@ -1924,22 +2032,29 @@ function ac.browser.managed.ensure(opts)
       targetFocused = true,
       launch = false,
     }))
-    if not result or not result.ok or not result.data then return false end
+    if not result or not result.ok or not result.data then
+      if auto_proxy_auth and not proxy_auth_submitted then
+        proxy_auth_submitted = managed_submit_filled_proxy_auth(browser_pid, true)
+      end
+      return false
+    end
     local current_url = tostring(result.data.value or result.data.targetUrl or "")
     if expected_prefix ~= "" and current_url:sub(1, #expected_prefix) ~= expected_prefix then return false end
     return result
   end, opts.navigationTimeoutMs or 15000, 200)
   if not selected then
-    return { ok = false, code = "browser_target_not_found", error = "could not bind the focused tab in the new managed Chrome window" }
+    return { ok = false, code = "browser_target_not_found", error = "could not bind the focused tab in the managed browser window" }
   end
 
   local record = {
     targetId = tostring(selected.data.targetId or ""),
     windowId = tostring(window.id or ""),
     browserPid = browser_pid,
+    browser = tostring(selected.data.browser or bootstrap.data.browser or ""),
+    profile = tostring(selected.data.profile or bootstrap.data.profile or ""),
   }
   if record.targetId == "" or record.windowId == "" then
-    return { ok = false, code = "browser_target_not_found", error = "managed Chrome surface did not expose stable target and window ids" }
+    return { ok = false, code = "browser_target_not_found", error = "managed browser surface did not expose stable target and window ids" }
   end
   state[name] = record
   write_managed_browser_state(state)
@@ -1948,6 +2063,8 @@ function ac.browser.managed.ensure(opts)
     targetId = record.targetId,
     windowId = record.windowId,
     browserPid = record.browserPid,
+    browser = record.browser,
+    profile = record.profile,
     currentUrl = tostring(selected.data.value or selected.data.targetUrl or ""),
     reused = false,
   } }

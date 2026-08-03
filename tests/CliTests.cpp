@@ -442,6 +442,8 @@ void TestCliCommandBuilders() {
         "https://example.com",
         "--browser",
         "Safari",
+        "--profile",
+        "work",
         "--no-new-window",
         "--new-instance"
     });
@@ -449,6 +451,7 @@ void TestCliCommandBuilders() {
     assert(openUrl.method == "open_url");
     assert(openUrl.params["url"] == "https://example.com");
     assert(openUrl.params["browser"] == "Safari");
+    assert(openUrl.params["profile"] == "work");
     assert(openUrl.params["newWindow"] == false);
     assert(openUrl.params["newInstance"] == true);
     auto routedOpenUrl = ComputerCpp::Cli::BuildDaemonCommand({"open", "url", "https://example.com"});
@@ -2992,10 +2995,30 @@ void TestConfigCliCanonicalFile() {
     });
     assert(profile.exitCode == 0);
 
+    const std::string browserUserDataDir =
+        (ComputerCpp::AppDataDir() / "cli-browser-data").string();
+    auto browser = RunConfigCommand({
+        "config",
+        "set-browser",
+        "--browser",
+        "brave",
+        "--profile",
+        "recruiting-1",
+        "--user-data-dir",
+        browserUserDataDir,
+        "--proxy",
+        "https://proxy.example:8001"
+    });
+    assert(browser.exitCode == 0);
+
     std::string error;
     auto config = ComputerCpp::LoadAppConfig(&error);
     assert(error.empty());
     assert(config.defaultProfile == "vision");
+    assert(config.browser.defaultBrowser == "brave");
+    assert(config.browser.profile == "recruiting-1");
+    assert(config.browser.userDataDir == browserUserDataDir);
+    assert(config.browser.proxyServer == "https://proxy.example:8001");
     assert(config.providers["router"].type == "openrouter");
     assert(config.providers["router"].baseUrl == "https://openrouter.ai/api/v1");
     assert(config.profiles["vision"].provider == "router");
@@ -3006,6 +3029,31 @@ void TestConfigCliCanonicalFile() {
     assert(config.profiles["vision"].params["presence_penalty"] == 0.1);
     assert(config.profiles["vision"].params["parallel_tool_calls"] == true);
     assert(config.profiles["vision"].openRouterProvider["allow_fallbacks"] == false);
+
+    auto invalidBrowser = RunConfigCommand({
+        "config", "set-browser", "--browser", "firefox"});
+    assert(invalidBrowser.exitCode == 2);
+    auto invalidBrowserProfile = RunConfigCommand({
+        "config", "set-browser", "--profile", "../personal"});
+    assert(invalidBrowserProfile.exitCode == 2);
+    auto invalidBrowserUserDataDir = RunConfigCommand({
+        "config", "set-browser", "--user-data-dir", "relative/path"});
+    assert(invalidBrowserUserDataDir.exitCode == 2);
+    auto invalidBrowserProxy = RunConfigCommand({
+        "config", "set-browser", "--proxy", "https://proxy invalid"});
+    assert(invalidBrowserProxy.exitCode == 2);
+    auto clearBrowserUserDataDir = RunConfigCommand({
+        "config", "set-browser", "--no-user-data-dir"});
+    assert(clearBrowserUserDataDir.exitCode == 0);
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(config.browser.userDataDir.empty());
+    auto clearBrowserProxy = RunConfigCommand({
+        "config", "set-browser", "--no-proxy"});
+    assert(clearBrowserProxy.exitCode == 0);
+    config = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(config.browser.proxyServer.empty());
 
     auto gobii = RunConfigCommand({
         "config",
@@ -3375,6 +3423,24 @@ void TestMicroAgentLuaDryRun() {
     assert(data["first_message_image_type"] == "image_path");
     assert(data["first_message_image_path"] == "/tmp/rows.png");
     assert(data["trace_count"] >= 3);
+}
+
+void TestBrowserOpenLuaDryRun() {
+    if (SkipLuaTestIfUnavailable("TestBrowserOpenLuaDryRun")) return;
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/browser-open-dry-run.lua";
+    options.dryRun = true;
+    options.jsonOutput = true;
+    const auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    const auto payload = nlohmann::json::parse(result.stdoutText);
+    const auto& data = payload["data"]["result"];
+    assert(data["browser"] == "Safari");
+    assert(data["new_instance"] == true);
+    assert(data["default_url"] == "https://example.net");
+    assert(!data.contains("default_browser"));
+    assert(!data.contains("default_profile"));
+    assert(data["default_new_window"] == true);
 }
 
 void TestMicroAgentStrictToolCallsLuaDryRun() {
@@ -4036,6 +4102,7 @@ void RunCliTests() {
     TestRecordingSurfaceMetadata();
     TestCliCommandRecordingMetadata();
     TestMicroAgentLuaDryRun();
+    TestBrowserOpenLuaDryRun();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();

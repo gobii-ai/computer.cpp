@@ -228,6 +228,13 @@ void TestDaemonDesktopVisibleWindowIds() {
     assert(ids.count("window-1") == 1);
 }
 
+void TestOpenUrlRejectsControlCharacters() {
+    const auto response = ComputerCpp::RunOpenUrlCommand(
+        {{"url", "https://example.test/path\nsecond-command"}}, "");
+    assert(response["ok"] == false);
+    assert(response["code"] == "invalid_url");
+}
+
 void TestDaemonTargetTextScoring() {
     assert(ComputerCpp::HasRemovedVisualTargetPrefix("text:\"Open Settings\""));
     assert(ComputerCpp::HasRemovedVisualTargetPrefix("field: Search "));
@@ -312,6 +319,7 @@ void RunDaemonTests() {
     TestDaemonTargetResolveCoordinates();
     TestDaemonInputKeyChordParsing();
     TestDaemonDesktopVisibleWindowIds();
+    TestOpenUrlRejectsControlCharacters();
     TestDaemonTargetTextScoring();
     TestDaemonTargetRefCandidates();
     TestDaemonRemovedVisualTargets();

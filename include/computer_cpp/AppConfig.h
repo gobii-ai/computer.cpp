@@ -50,6 +50,17 @@ struct RecordingConfig {
     int retentionDays = 14;
 };
 
+struct BrowserConfig {
+    std::string defaultBrowser = "chrome";
+    std::string profile = "default";
+    std::string userDataDir;
+    std::string proxyServer;
+};
+
+bool IsSupportedBrowserId(const std::string& browser);
+bool IsValidBrowserProfileName(const std::string& profile);
+bool IsValidBrowserProxyServer(const std::string& proxyServer);
+
 struct GobiiConfig {
     std::string baseUrl = "https://gobii.ai";
     std::string machineId;
@@ -69,6 +80,7 @@ struct AppConfig {
     std::string defaultProfile = "main";
     std::map<std::string, LlmProviderConfig> providers;
     std::map<std::string, LlmProfileConfig> profiles;
+    BrowserConfig browser;
     ServerConfig server;
     RecordingConfig recording;
     GobiiConfig gobii;

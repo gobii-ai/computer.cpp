@@ -1227,7 +1227,10 @@ bool OpenUrl(const std::string& url, const std::string& browser, bool newWindow,
     if (url.empty()) {
         return false;
     }
-    std::string chosen = browser.empty() ? "firefox" : browser;
+    if (browser.empty()) {
+        return SpawnDetached({"xdg-open", url});
+    }
+    std::string chosen = browser;
     if (chosen == "firefox") {
         chosen = "firefox-esr";
     }

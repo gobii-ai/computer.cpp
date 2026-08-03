@@ -175,10 +175,11 @@ json SchemaJson() {
         }},
         {"openUrl", {
             {"url", "required non-empty http or https URL"},
-            {"browser", "optional non-empty app name or bundle id; default firefox"},
+            {"browser", "optional browser id or app name; defaults to config.toml browser.default"},
+            {"profile", "optional managed browser profile; defaults to config.toml browser.profile"},
             {"newWindow", "boolean; default true"},
             {"newInstance", "boolean; default false"},
-            {"response", "url, browser, newWindow, newInstance, and opened window metadata when available"}
+            {"response", "url, resolved browser/profile, managed, newWindow, newInstance, and opened window metadata when available"}
         }},
         {"browserEval", {
             {"method", "browser_eval"},
@@ -188,10 +189,11 @@ json SchemaJson() {
             {"targetTitle", "optional exact Chrome DevTools page title that the target must match"},
             {"targetFocused", "optional boolean requiring the selected page target to report document.hasFocus(); useful for binding native input to the same tab"},
             {"browserContextId", "optional Chrome DevTools browser context id filter"},
-            {"browser", "optional browser app name for launch attempt; default Google Chrome"},
+            {"browser", "optional Chromium browser id; defaults to config.toml browser.default"},
+            {"profile", "optional managed browser profile; defaults to config.toml browser.profile"},
             {"host", "optional loopback Chrome DevTools host; default 127.0.0.1"},
-            {"port", "optional Chrome DevTools port; default 9222"},
-            {"launch", "boolean default true; attempts to start Chrome with --remote-debugging-port when endpoint is unavailable"},
+            {"port", "optional explicit Chrome DevTools port; managed sessions otherwise use an ephemeral port"},
+            {"launch", "boolean default true; starts the configured managed browser when unavailable"},
             {"readOnly", "must be true; obvious DOM/input mutation snippets are rejected"},
             {"response", "backend cdp, value, JavaScript result type, host, port, exact targetId/targetUrl/browserContextId, targetUrlPrefix, and browserPid when querying without a prefix"},
             {"inputBoundary", "browser_eval is for inspection only; user-like input must use native click/type/press/mouse commands"}
@@ -268,8 +270,12 @@ json SchemaJson() {
             "invalid_llm_request", "invalid_mouse_down", "invalid_mouse_drag", "invalid_mouse_move",
             "invalid_mouse_up", "invalid_permissions", "invalid_screenshot", "invalid_screenshot_region",
             "invalid_scroll", "invalid_snapshot", "invalid_target", "invalid_type", "invalid_url",
-            "invalid_wait", "invalid_window", "browser_debug_invalid_response", "browser_debug_unavailable",
-            "browser_eval_failed", "browser_eval_timeout", "browser_target_not_found", "missing_api_key", "open_url_failed",
+            "invalid_wait", "invalid_window", "invalid_browser_profile", "browser_config_invalid",
+            "browser_automation_unavailable", "browser_debug_invalid_response", "browser_debug_unavailable",
+            "browser_eval_failed", "browser_eval_timeout", "browser_focus_failed", "browser_launch_failed",
+            "browser_navigation_failed", "browser_pid_unavailable", "browser_profile_in_use", "browser_target_not_found",
+            "browser_window_create_failed", "browser_window_unavailable",
+            "missing_api_key", "open_url_failed",
             "permission_or_capture_failed", "target_not_found", "unknown_method", "unsupported_visual_target",
             "wait_timeout", "window_close_failed"
         }}

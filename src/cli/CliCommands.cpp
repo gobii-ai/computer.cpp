@@ -81,6 +81,14 @@ CommandRequest BuildOpenCommand(const std::vector<std::string>& args) {
                 return Error("open url --browser requires a non-empty value");
             }
             params["browser"] = args[++i];
+        } else if (args[i] == "--profile") {
+            if (i + 1 >= args.size()) {
+                return Error("open url --profile requires a value");
+            }
+            if (IsBlank(args[i + 1])) {
+                return Error("open url --profile requires a non-empty value");
+            }
+            params["profile"] = args[++i];
         } else if (args[i] == "--new-window") {
             params["newWindow"] = true;
         } else if (args[i] == "--no-new-window") {

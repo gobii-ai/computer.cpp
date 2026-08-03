@@ -1,5 +1,6 @@
 #include "computer_cpp/AppConfig.h"
 #include "computer_cpp/AppPaths.h"
+#include "computer_cpp/Browser.h"
 #include "computer_cpp/CommandRecording.h"
 #include "computer_cpp/HumanInput.h"
 #include "computer_cpp/Image.h"
@@ -65,6 +66,40 @@ void TestStringUtils() {
     assert(ComputerCpp::Join(keys, ",") == "Cmd,Shift,G");
 }
 
+void TestBrowserRegistry() {
+    assert(ComputerCpp::NormalizeBrowserId("Google Chrome") == "chrome");
+    assert(ComputerCpp::NormalizeBrowserId("msedge.exe") == "edge");
+    assert(ComputerCpp::NormalizeBrowserId("Brave Browser") == "brave");
+    assert(ComputerCpp::NormalizeBrowserId("../../not-a-browser").empty());
+    const auto catalog = ComputerCpp::BrowserCatalog();
+    assert(catalog.size() == 4);
+    assert(catalog.front().id == "chrome");
+    assert(catalog.front().displayName == "Google Chrome");
+    assert(catalog.front().recommended);
+    assert(!catalog[1].recommended);
+#if defined(__linux__)
+    assert(catalog.front().windowQuery == "google-chrome");
+#else
+    assert(!catalog.front().windowQuery.empty());
+#endif
+
+    assert(ComputerCpp::ManagedBrowserDataDir("chrome", "default") ==
+        ComputerCpp::AppDataDir() / "chrome-cdp");
+    assert(ComputerCpp::ManagedBrowserDataDir("brave", "work") ==
+        ComputerCpp::AppDataDir() / "browser-profiles" / "brave" / "work");
+    assert(ComputerCpp::ManagedBrowserDataDir("../../bad", "work").empty());
+    assert(ComputerCpp::ManagedBrowserDataDir("chrome", "../bad").empty());
+
+    const fs::path privateDir = ComputerCpp::AppDataDir() / "browser-mode-test";
+    ComputerCpp::PrepareManagedBrowserDataDir(privateDir);
+    assert(fs::is_directory(privateDir));
+#if !defined(_WIN32)
+    const auto permissions = fs::status(privateDir).permissions();
+    assert((permissions & fs::perms::owner_all) == fs::perms::owner_all);
+    assert((permissions & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+#endif
+}
+
 void TestAppConfigServerRoundTrip() {
     std::string missingError;
     ComputerCpp::AppConfig missing = ComputerCpp::LoadAppConfig(&missingError);
@@ -74,6 +109,10 @@ void TestAppConfigServerRoundTrip() {
     assert(missing.server.apps.empty());
     assert(!missing.recording.enabled);
     assert(missing.recording.retentionDays == 14);
+    assert(missing.browser.defaultBrowser == "chrome");
+    assert(missing.browser.profile == "default");
+    assert(missing.browser.userDataDir.empty());
+    assert(missing.browser.proxyServer.empty());
 
     ComputerCpp::AppConfig defaults = ComputerCpp::DefaultAppConfig();
     assert(defaults.server.host == "127.0.0.1");
@@ -86,6 +125,11 @@ void TestAppConfigServerRoundTrip() {
     config.server.authToken = "test-token";
     config.server.allowedOrigins = {"https://mcp.example.com", "http://127.0.0.1:3000"};
     config.recording.enabled = true;
+    config.browser.defaultBrowser = "edge";
+    config.browser.profile = "work_1";
+    config.browser.userDataDir =
+        (ComputerCpp::AppDataDir() / "custom-browser-data").string();
+    config.browser.proxyServer = "https://proxy.example:8001";
 
     ComputerCpp::ServerAppConfig linkedin;
     linkedin.name = "linkedin";
@@ -102,6 +146,12 @@ void TestAppConfigServerRoundTrip() {
     assert(toml.find("[recording]") != std::string::npos);
     assert(toml.find("enabled = true") != std::string::npos);
     assert(toml.find("retention_days = 14") != std::string::npos);
+    assert(toml.find("[browser]") != std::string::npos);
+    assert(toml.find("default = \"edge\"") != std::string::npos);
+    assert(toml.find("profile = \"work_1\"") != std::string::npos);
+    assert(toml.find("user_data_dir = ") != std::string::npos);
+    assert(toml.find("proxy = \"https://proxy.example:8001\"") !=
+        std::string::npos);
 
     std::string error;
     assert(ComputerCpp::SaveAppConfig(config, &error));
@@ -116,6 +166,10 @@ void TestAppConfigServerRoundTrip() {
     assert(loaded.server.apps["linkedin"].path == "/tmp/linkedin-recruiter.lua");
     assert(loaded.recording.enabled);
     assert(loaded.recording.retentionDays == 14);
+    assert(loaded.browser.defaultBrowser == "edge");
+    assert(loaded.browser.profile == "work_1");
+    assert(loaded.browser.userDataDir == config.browser.userDataDir);
+    assert(loaded.browser.proxyServer == config.browser.proxyServer);
 
     auto redacted = ComputerCpp::AppConfigToJson(loaded);
     assert(redacted["server"]["authToken"] == "<redacted>");
@@ -123,6 +177,15 @@ void TestAppConfigServerRoundTrip() {
     assert(visible["server"]["authToken"] == "test-token");
     assert(visible["server"]["port"] == 8790);
     assert(!visible["server"].contains("basePort"));
+    assert(visible["browser"]["default"] == "edge");
+    assert(visible["browser"]["profile"] == "work_1");
+    assert(visible["browser"]["userDataDir"] == config.browser.userDataDir);
+    assert(visible["browser"]["proxy"] == config.browser.proxyServer);
+    assert(ComputerCpp::IsSupportedBrowserId("chrome"));
+    assert(ComputerCpp::IsSupportedBrowserId("brave"));
+    assert(!ComputerCpp::IsSupportedBrowserId("firefox"));
+    assert(ComputerCpp::IsValidBrowserProfileName("qa.profile-1"));
+    assert(!ComputerCpp::IsValidBrowserProfileName("../profile"));
     assert(!visible["server"]["apps"]["linkedin"].contains("port"));
     assert(visible["recording"]["enabled"] == true);
     assert(visible["recording"]["retentionDays"] == 14);
@@ -196,6 +259,61 @@ void TestServerPortConfigMigration() {
     assert(error.empty());
     assert(preferred.server.port == 8892);
     assert(warnings.empty());
+    assert(ComputerCpp::SaveAppConfig(original, &error));
+}
+
+void TestBrowserConfigValidation() {
+    std::string error;
+    const ComputerCpp::AppConfig original = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[browser]\n"
+               << "default = \"firefox\"\n"
+               << "profile = \"default\"\n";
+    }
+    ComputerCpp::LoadAppConfig(&error);
+    assert(error.find("browser.default") != std::string::npos);
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[browser]\n"
+               << "default = \"chrome\"\n"
+               << "profile = \"../personal\"\n";
+    }
+    ComputerCpp::LoadAppConfig(&error);
+    assert(error.find("browser.profile") != std::string::npos);
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[browser]\n"
+               << "default = \"chrome\"\n"
+               << "profile = \"default\"\n"
+               << "user_data_dir = \"relative/path\"\n";
+    }
+    ComputerCpp::LoadAppConfig(&error);
+    assert(error.find("browser.user_data_dir") != std::string::npos);
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n\n"
+               << "[browser]\n"
+               << "default = \"chrome\"\n"
+               << "profile = \"default\"\n"
+               << "proxy = \"https://proxy.example:80 invalid\"\n";
+    }
+    ComputerCpp::LoadAppConfig(&error);
+    assert(error.find("browser.proxy") != std::string::npos);
+    {
+        std::ofstream config(ComputerCpp::ConfigPath(), std::ios::trunc);
+        config << "version = 1\n";
+    }
+    const auto legacy = ComputerCpp::LoadAppConfig(&error);
+    assert(error.empty());
+    assert(legacy.browser.defaultBrowser == "chrome");
+    assert(legacy.browser.profile == "default");
+    assert(legacy.browser.userDataDir.empty());
+    assert(legacy.browser.proxyServer.empty());
     assert(ComputerCpp::SaveAppConfig(original, &error));
 }
 
@@ -1071,9 +1189,11 @@ int main() {
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
     RunTest("StringUtils", TestStringUtils);
+    RunTest("BrowserRegistry", TestBrowserRegistry);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
     RunTest("ServerAppNameValidation", TestServerAppNameValidation);
     RunTest("ServerPortConfigMigration", TestServerPortConfigMigration);
+    RunTest("BrowserConfigValidation", TestBrowserConfigValidation);
     RunTest("CommandRecordingLifecycle", TestCommandRecordingLifecycle);
     RunTest("NativeCommandRecordingSmoke", TestNativeCommandRecordingSmoke);
     RunTest("TrayServerState", TestTrayServerState);

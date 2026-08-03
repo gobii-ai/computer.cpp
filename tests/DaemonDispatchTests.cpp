@@ -222,6 +222,7 @@ void TestDaemonDispatch() {
     assert(browserEvalSchema.find("exact Chrome DevTools page target id") != std::string::npos);
     assert(browserEvalSchema.find("document.hasFocus") != std::string::npos);
     assert(browserEvalSchema.find("native click/type/press/mouse") != std::string::npos);
+    assert(browserEvalSchema.find("ephemeral port") != std::string::npos);
     auto batchSchema = schema["data"]["batch"].dump();
     assert(batchSchema.find("CLI reads the array from stdin") != std::string::npos);
     assert(batchSchema.find("--continue-on-error") != std::string::npos);
@@ -267,6 +268,26 @@ void TestDaemonDispatch() {
     });
     assert(invalidFocusedBrowserEval["ok"] == false);
     assert(invalidFocusedBrowserEval["code"] == "invalid_browser_eval");
+    auto unsupportedBrowserEval = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "browser_eval"},
+        {"params", {
+            {"script", "document.title"},
+            {"browser", "Safari"},
+            {"launch", false}
+        }}
+    });
+    assert(unsupportedBrowserEval["ok"] == false);
+    assert(unsupportedBrowserEval["code"] == "browser_automation_unavailable");
+    auto invalidBrowserProfile = ComputerCpp::HandleDaemonRequest("unit", {
+        {"method", "browser_eval"},
+        {"params", {
+            {"script", "document.title"},
+            {"profile", "../personal"},
+            {"launch", false}
+        }}
+    });
+    assert(invalidBrowserProfile["ok"] == false);
+    assert(invalidBrowserProfile["code"] == "invalid_browser_eval");
     assert(batchSchema.find("requested, executed, failed") != std::string::npos);
     auto targetSchema = schema["data"]["target"].dump();
     assert(targetSchema.find("rect:left,top,right,bottom") != std::string::npos);
@@ -340,7 +361,9 @@ void TestDaemonDispatch() {
     assert(llmSchema.find("raw provider JSON") != std::string::npos);
     auto openUrlSchema = schema["data"]["openUrl"].dump();
     assert(openUrlSchema.find("http or https URL") != std::string::npos);
-    assert(openUrlSchema.find("default firefox") != std::string::npos);
+    assert(openUrlSchema.find("browser.default") != std::string::npos);
+    assert(openUrlSchema.find("managed") != std::string::npos);
+    assert(openUrlSchema.find("profile") != std::string::npos);
     assert(openUrlSchema.find("newWindow") != std::string::npos);
     assert(openUrlSchema.find("newInstance") != std::string::npos);
     assert(openUrlSchema.find("opened window metadata") != std::string::npos);
