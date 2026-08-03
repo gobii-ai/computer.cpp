@@ -8,6 +8,7 @@
 
 #include "DaemonParsing.h"
 #include "DaemonProtocol.h"
+#include "DaemonDesktop.h"
 #include "../core/CurlHandle.h"
 
 #include <algorithm>
@@ -1189,6 +1190,14 @@ ManagedBrowserSession ResolveManagedBrowserSession(
     };
     if (includePid) refreshManagedIdentity();
     if (launch && includePid && session.managed) {
+        const json desktopReady = EnsureDesktopSessionReadyForNativeControl();
+        if (!desktopReady.value("ok", false)) {
+            session.ok = false;
+            session.code = desktopReady.value("code", "desktop_wake_failed");
+            session.error = desktopReady.value(
+                "error", "could not wake the desktop session");
+            return session;
+        }
         const auto waitForNativeWindow = [&](int attempts) {
             for (int attempt = 0; attempt < attempts; ++attempt) {
                 refreshManagedIdentity();

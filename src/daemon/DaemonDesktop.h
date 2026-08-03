@@ -18,6 +18,7 @@ nlohmann::json RunOpenPermissionsCommand(const nlohmann::json& params);
 nlohmann::json RunStateCommand(const std::string& session);
 nlohmann::json RunDesktopSessionStateCommand();
 nlohmann::json RunDesktopWakeCommand(const nlohmann::json& params);
+nlohmann::json EnsureDesktopSessionReadyForNativeControl();
 nlohmann::json RunWindowBoundsCommand(const nlohmann::json& params);
 nlohmann::json RunWindowActiveCommand();
 nlohmann::json RunWindowListCommand(const nlohmann::json& params);

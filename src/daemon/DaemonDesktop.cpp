@@ -286,6 +286,34 @@ json RunDesktopWakeCommand(const json& params) {
     });
 }
 
+json EnsureDesktopSessionReadyForNativeControl() {
+    const Platform::DesktopSessionState state =
+        Platform::GetDesktopSessionState();
+    if (!state.detectionSupported) {
+        return Ok({
+            {"ready", true},
+            {"wakeRequested", false},
+            {"session", DesktopSessionToJson(state)}
+        });
+    }
+    if (IsDesktopSessionReady(state)) {
+        return Ok({
+            {"ready", true},
+            {"wakeRequested", false},
+            {"session", DesktopSessionToJson(state)}
+        });
+    }
+
+    json wake = RunDesktopWakeCommand(json::object());
+    if (!wake.value("ok", false)) return wake;
+    if (!wake.value("data", json::object()).value("ready", false)) {
+        return Error(
+            "native user activity did not make the desktop session ready",
+            "desktop_wake_failed");
+    }
+    return wake;
+}
+
 json RunWindowBoundsCommand(const json& params) {
     if (auto unknown = UnknownParam(params, {
         "x", "y", "width", "height", "pid", "controlSession", "controlSessionToken", "controlScope"
@@ -370,6 +398,8 @@ json RunWindowActivateCommand(const json& params) {
     if (!target.available) {
         return Ok({{"found", false}, {"activated", false}, {"id", id}});
     }
+    json desktopReady = EnsureDesktopSessionReadyForNativeControl();
+    if (!desktopReady.value("ok", false)) return desktopReady;
     if (!Platform::ActivateWindow(id)) {
         return Error("could not activate window", "window_activate_failed");
     }
@@ -457,6 +487,8 @@ json RunAppActivatePidCommand(const json& params) {
     if (pid <= 0) {
         return Error("app_activate_pid requires positive pid", "invalid_app");
     }
+    json desktopReady = EnsureDesktopSessionReadyForNativeControl();
+    if (!desktopReady.value("ok", false)) return desktopReady;
     bool activated = Platform::ActivateAppByPid(pid);
     if (!activated) {
         return Error("could not activate app by pid", "app_activate_pid_failed");

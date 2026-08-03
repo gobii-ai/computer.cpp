@@ -217,6 +217,7 @@ json SchemaJson() {
         {"desktop", {
             {"sessionState", "method desktop_session_state; reports status ready, screensaver, display_asleep, locked, unavailable, or unsupported"},
             {"wake", "method desktop_wake; optional force boolean sends native user activity despite a false-ready state, then conditionally polls for readiness"},
+            {"automaticWake", "managed-browser, window, and PID-based app activation wake an unlocked screensaver or sleeping display before native control"},
             {"safety", "desktop_wake never attempts to authenticate or bypass a lock screen; desktop_locked requires manual unlock"},
             {"sessionResponse", "detectionSupported, available, onConsole, loginDone, screenLocked, screenSaverActive, displayAsleep, ready, and status"},
             {"wakeResponse", "wakeRequested, forced, wakeSignalSent, ready, before/after session state, and frontmostApp"}
@@ -264,7 +265,7 @@ json SchemaJson() {
             "control_session_busy", "control_session_expired", "control_session_not_active",
             "control_session_not_found", "control_session_not_holder", "control_session_owner_mismatch", "control_session_purpose_mismatch",
             "control_session_required", "control_session_scope_mismatch", "curl_failed", "curl_init_failed",
-            "desktop_locked", "desktop_session_unavailable", "desktop_session_unsupported", "exception", "focus_guard_failed", "image_crop_failed", "image_read_failed", "invalid_desktop",
+            "desktop_locked", "desktop_session_unavailable", "desktop_session_unsupported", "desktop_wake_failed", "exception", "focus_guard_failed", "image_crop_failed", "image_read_failed", "invalid_desktop",
             "inference_bad_json", "inference_http_error", "input_failed", "invalid_app", "invalid_batch", "invalid_control_scope",
             "invalid_batch_step", "invalid_click", "invalid_control_session", "invalid_event_ref",
             "invalid_browser_eval", "invalid_image_info", "invalid_image_split", "invalid_key", "invalid_limit",
