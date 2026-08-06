@@ -1859,35 +1859,43 @@ local function managed_submit_filled_proxy_auth(browser_pid, proxy_configured)
       end
     end
   end
-  if #dialog_bounds == 0 then return false end
 
-  local proxy_prompt = false
+  -- Chromium does not consistently expose its native HTTP Basic Auth prompt
+  -- as AXDialog/AXSheet. Some versions flatten it into the focused window's
+  -- accessibility tree. Retain dialog containment when available, but allow
+  -- the exact proxy-auth signature below to identify the flattened variant.
+  local function in_auth_scope(ref)
+    if #dialog_bounds == 0 then return true end
+    for _, bounds in ipairs(dialog_bounds) do
+      if managed_bounds_contains(bounds, ref.bounds) then return true end
+    end
+    return false
+  end
+
+  local snapshot_text = tostring(snapshot.data.text or ""):lower()
+  local proxy_prompt = snapshot_text:find("the proxy ", 1, true) ~= nil and
+    snapshot_text:find("requires a username and password", 1, true) ~= nil
   local cancel_button = false
   local sign_in_target = ""
   local filled_fields = 0
   for _, ref in ipairs(snapshot.data.refs or {}) do
-    local inside_dialog = false
-    for _, bounds in ipairs(dialog_bounds) do
-      if managed_bounds_contains(bounds, ref.bounds) then
-        inside_dialog = true
-        break
+    if in_auth_scope(ref) then
+      local role = tostring(ref.role or ""):lower()
+      local name = tostring(ref.name or "")
+      local value = tostring(ref.value or "")
+      local text = (name .. " " .. value):lower()
+      if text:find("the proxy ", 1, true) and
+          text:find("requires a username and password", 1, true) then
+        proxy_prompt = true
+      elseif (role:find("textfield", 1, true) or
+              role:find("textarea", 1, true) or
+              role:find("secure", 1, true)) and value ~= "" then
+        filled_fields = filled_fields + 1
+      elseif role:find("button", 1, true) and name:lower() == "cancel" then
+        cancel_button = true
+      elseif role:find("button", 1, true) and name:lower() == "sign in" then
+        sign_in_target = tostring(ref.displayRef or ref.ref or "")
       end
-    end
-    if inside_dialog then
-    local role = tostring(ref.role or ""):lower()
-    local name = tostring(ref.name or "")
-    local value = tostring(ref.value or "")
-    local text = (name .. " " .. value):lower()
-    if text:find("the proxy ", 1, true) and
-        text:find("requires a username and password", 1, true) then
-      proxy_prompt = true
-    elseif role:find("textfield", 1, true) and value ~= "" then
-      filled_fields = filled_fields + 1
-    elseif role:find("button", 1, true) and name:lower() == "cancel" then
-      cancel_button = true
-    elseif role:find("button", 1, true) and name:lower() == "sign in" then
-      sign_in_target = tostring(ref.displayRef or ref.ref or "")
-    end
     end
   end
   if not proxy_prompt or not cancel_button or filled_fields < 2 or sign_in_target == "" then

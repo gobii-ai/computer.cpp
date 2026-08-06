@@ -3472,6 +3472,33 @@ void TestManagedBrowserSurfacePersistsAndFocusReuses() {
     assert(data["state_exists"] == true);
 }
 
+void TestManagedBrowserSubmitsFilledFlattenedProxyAuthPrompt() {
+    if (SkipLuaTestIfUnavailable("TestManagedBrowserSubmitsFilledFlattenedProxyAuthPrompt")) return;
+    const auto root = ComputerCpp::Tests::MakeTempHome() / "managed-browser-proxy-auth";
+    std::filesystem::create_directories(root);
+    ScopedEnvVar temp("TEMP");
+    ScopedEnvVar tmpdir("TMPDIR");
+    ScopedEnvVar tmp("TMP");
+    ScopedEnvVar computerCppHome("COMPUTER_CPP_HOME");
+    temp.Set(root.string());
+    tmpdir.Set(root.string());
+    tmp.Set(root.string());
+    computerCppHome.Set(root.string());
+
+    ComputerCpp::LuaRunOptions options;
+    options.scriptPath = RepoRoot() / "tests/lua/managed-browser-proxy-auth.lua";
+    options.jsonOutput = true;
+    const auto result = ComputerCpp::RunLuaScriptCapture(options);
+    AssertLuaRunSucceeded(result);
+    const auto payload = nlohmann::json::parse(result.stdoutText);
+    const auto& data = payload["data"]["result"];
+    assert(data["ok"] == true);
+    assert(data["proxy_authenticated"] == true);
+    assert(data["proxy_sign_in_clicks"] == 1);
+    assert(data["current_url"] == "https://example.test/start");
+    assert(data["target_id"] == "target-1");
+}
+
 void TestMicroAgentStrictToolCallsLuaDryRun() {
     if (SkipLuaTestIfUnavailable("TestMicroAgentStrictToolCallsLuaDryRun")) {
         return;
@@ -4133,6 +4160,7 @@ void RunCliTests() {
     TestMicroAgentLuaDryRun();
     TestBrowserOpenLuaDryRun();
     TestManagedBrowserSurfacePersistsAndFocusReuses();
+    TestManagedBrowserSubmitsFilledFlattenedProxyAuthPrompt();
     TestMicroAgentStrictToolCallsLuaDryRun();
     TestMicroAgentRuntimeLuaDryRun();
     TestLuaApprovalContextDryRun();
