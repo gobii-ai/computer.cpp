@@ -94,7 +94,8 @@ json RunWaitCommand(const json& params) {
             auto app = Platform::GetFrontmostApp();
             auto window = Platform::GetActiveWindow();
             matched = matched && ContainsCaseInsensitive(
-                app.name + " " + app.bundleId + " " + window.appClass + " " + window.title,
+                app.name + " " + app.bundleId + " " + app.executable + " " +
+                    window.appClass + " " + window.title,
                 frontmost);
             evidence["frontmostApp"] = AppToJson(app);
             evidence["frontmostWindow"] = WindowToJson(window);
@@ -156,9 +157,14 @@ json RunPressCommand(const json& params) {
     if (*holdMs < 1 || *holdMs > 5000) {
         return Error("press holdMs must be between 1 and 5000", "invalid_key");
     }
+    for (const auto& key : keys) {
+        if (Platform::ResolveKeycode(key) < 0) {
+            return Error("could not resolve key chord", "invalid_key");
+        }
+    }
     bool ok = Platform::SendHotkey(keys, *holdMs);
     if (!ok) {
-        return Error("could not resolve key chord", "invalid_key");
+        return Error("native key input failed", "input_failed");
     }
     return Ok({{"keys", keys}});
 }

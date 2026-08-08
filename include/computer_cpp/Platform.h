@@ -24,6 +24,7 @@ struct DesktopSessionState {
     bool detectionSupported = false;
     bool available = false;
     bool onConsole = false;
+    bool interactive = false;
     bool loginDone = false;
     bool screenLocked = false;
     bool screenSaverActive = false;
@@ -35,6 +36,7 @@ struct AppInfo {
     int pid = -1;
     std::string name;
     std::string bundleId;
+    std::string executable;
 };
 
 struct WindowInfo {

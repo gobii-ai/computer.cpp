@@ -5,12 +5,20 @@
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/WindowsUtil.h"
 
+#include "WindowsAppResolver.h"
+#include "WindowsNativeInput.h"
+
 #define NOMINMAX
 #include <windows.h>
 #include <oleacc.h>
+#include <propkey.h>
+#include <propsys.h>
 #include <psapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <uiautomation.h>
+#include <wtsapi32.h>
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -313,22 +322,30 @@ std::optional<WORD> KeyNameToVirtualKey(const std::string& keyName) {
     return std::nullopt;
 }
 
-void SendVirtualKey(WORD vk, bool down) {
+WindowsInput::SendInputFunction& NativeInputSender() {
+    static WindowsInput::SendInputFunction sender =
+        [](UINT count, LPINPUT inputs, int inputSize) {
+            return ::SendInput(count, inputs, inputSize);
+        };
+    return sender;
+}
+
+bool SendVirtualKey(WORD vk, bool down) {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk;
     if (!down) {
         input.ki.dwFlags = KEYEVENTF_KEYUP;
     }
-    SendInput(1, &input, sizeof(INPUT));
+    return NativeInputSender()(1, &input, sizeof(INPUT)) == 1;
 }
 
-void SendUnicodeChar(wchar_t ch, bool down) {
+bool SendUnicodeChar(wchar_t ch, bool down) {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wScan = ch;
     input.ki.dwFlags = KEYEVENTF_UNICODE | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &input, sizeof(INPUT));
+    return NativeInputSender()(1, &input, sizeof(INPUT)) == 1;
 }
 
 Image::RgbImage CaptureRegion(int left, int top, int width, int height) {
@@ -504,23 +521,230 @@ void AppendElementLines(IUIAutomation* automation, IUIAutomationElement* element
 
 }
 
+void WindowsInput::SetSendInputFunctionForTesting(SendInputFunction sender) {
+    NativeInputSender() = sender
+        ? std::move(sender)
+        : SendInputFunction([](UINT count, LPINPUT inputs, int inputSize) {
+            return ::SendInput(count, inputs, inputSize);
+        });
+}
+
+void WindowsInput::ResetSendInputFunctionForTesting() {
+    SetSendInputFunctionForTesting({});
+}
+
 PermissionStatus CheckPermissions(bool) { return {true, true}; }
 DesktopSessionState GetDesktopSessionState() {
     DesktopSessionState state;
-    state.available = true;
-    state.onConsole = true;
-    state.loginDone = true;
+    state.detectionSupported = true;
+
+    DWORD processSessionId = 0;
+    const bool hasProcessSession =
+        ProcessIdToSessionId(GetCurrentProcessId(), &processSessionId) != FALSE;
+    const DWORD consoleSessionId = WTSGetActiveConsoleSessionId();
+    // Session zero is non-interactive. Any other session attached to this
+    // process may be usable, including RDP even though it is not the console.
+    state.available = hasProcessSession && processSessionId != 0;
+    state.onConsole = state.available && consoleSessionId != 0xFFFFFFFF &&
+        processSessionId == consoleSessionId;
+    state.interactive = state.available;
+    // A WTS query failure is unknown rather than proof that login is absent.
+    state.loginDone = state.available;
+
+    if (state.available) {
+        LPWSTR buffer = nullptr;
+        DWORD bytes = 0;
+        if (WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                processSessionId,
+                WTSSessionInfoEx,
+                &buffer,
+                &bytes) != FALSE &&
+            buffer != nullptr &&
+            bytes >= sizeof(WTSINFOEXW)) {
+            const auto* info = reinterpret_cast<const WTSINFOEXW*>(buffer);
+            if (info->Level == 1) {
+                const auto& level = info->Data.WTSInfoExLevel1;
+                state.loginDone = level.SessionState == WTSActive;
+                state.interactive = state.loginDone;
+                state.screenLocked =
+                    level.SessionFlags == WTS_SESSIONSTATE_LOCK;
+            }
+        }
+        if (buffer != nullptr) {
+            WTSFreeMemory(buffer);
+        }
+    }
+
+    BOOL screenSaverRunning = FALSE;
+    if (SystemParametersInfoW(
+            SPI_GETSCREENSAVERRUNNING,
+            0,
+            &screenSaverRunning,
+            0) != FALSE) {
+        state.screenSaverActive = screenSaverRunning != FALSE;
+    }
     return state;
 }
-bool WakeDesktopSession(bool) { return false; }
-bool OpenPermissionsSettings() { return OpenSettingsUri(L"ms-settings:easeofaccess"); }
-bool OpenAccessibilitySettings() { return OpenPermissionsSettings(); }
-bool OpenScreenCaptureSettings() { return true; }
-bool RequestAccessibilityPermission() { return true; }
-bool RequestScreenCapturePermission() { return true; }
 
-AppInfo GetFrontmostApp() {
-    HWND hwnd = GetForegroundWindow();
+bool ComUsable(const ComScope& com) {
+    return SUCCEEDED(com.hr) || com.hr == RPC_E_CHANGED_MODE;
+}
+
+std::string ShellItemDisplayName(IShellItem* item, SIGDN kind) {
+    if (!item) {
+        return {};
+    }
+    PWSTR raw = nullptr;
+    std::string result;
+    if (SUCCEEDED(item->GetDisplayName(kind, &raw)) && raw) {
+        result = Windows::WideToUtf8(raw);
+    }
+    CoTaskMemFree(raw);
+    return result;
+}
+
+std::string ShellItemProperty(IShellItem2* item, REFPROPERTYKEY key) {
+    if (!item) {
+        return {};
+    }
+    PWSTR raw = nullptr;
+    std::string result;
+    if (SUCCEEDED(item->GetString(key, &raw)) && raw) {
+        result = Windows::WideToUtf8(raw);
+    }
+    CoTaskMemFree(raw);
+    return result;
+}
+
+std::vector<WindowsApps::CatalogEntry> EnumerateInstalledApps() {
+    std::vector<WindowsApps::CatalogEntry> entries;
+    ComScope com;
+    if (!ComUsable(com)) {
+        return entries;
+    }
+
+    ComPtr<IShellItem> appsFolderItem;
+    if (FAILED(SHGetKnownFolderItem(
+            FOLDERID_AppsFolder,
+            KF_FLAG_DEFAULT,
+            nullptr,
+            __uuidof(IShellItem),
+            reinterpret_cast<void**>(appsFolderItem.put()))) ||
+        !appsFolderItem) {
+        return entries;
+    }
+
+    ComPtr<IShellFolder> appsFolder;
+    if (FAILED(appsFolderItem->BindToHandler(
+            nullptr,
+            BHID_SFObject,
+            __uuidof(IShellFolder),
+            reinterpret_cast<void**>(appsFolder.put()))) ||
+        !appsFolder) {
+        return entries;
+    }
+
+    ComPtr<IEnumIDList> children;
+    if (FAILED(appsFolder->EnumObjects(
+            nullptr,
+            SHCONTF_NONFOLDERS,
+            children.put())) ||
+        !children) {
+        return entries;
+    }
+
+    PITEMID_CHILD child = nullptr;
+    ULONG fetched = 0;
+    while (children->Next(1, &child, &fetched) == S_OK) {
+        ComPtr<IShellItem2> item;
+        if (SUCCEEDED(SHCreateItemWithParent(
+                nullptr,
+                appsFolder.get(),
+                child,
+                __uuidof(IShellItem2),
+                reinterpret_cast<void**>(item.put()))) &&
+            item) {
+            WindowsApps::CatalogEntry entry;
+            entry.displayName = ShellItemDisplayName(
+                item.get(), SIGDN_NORMALDISPLAY);
+            entry.appUserModelId = ShellItemProperty(
+                item.get(), PKEY_AppUserModel_ID);
+            entry.executablePath = ShellItemProperty(
+                item.get(), PKEY_Link_TargetParsingPath);
+            entry.parsingName = ShellItemDisplayName(
+                item.get(), SIGDN_DESKTOPABSOLUTEPARSING);
+            if (!entry.displayName.empty()) {
+                entries.push_back(std::move(entry));
+            }
+        }
+        CoTaskMemFree(child);
+        child = nullptr;
+        fetched = 0;
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+        return Lowercase(left.displayName) < Lowercase(right.displayName);
+    });
+    return entries;
+}
+
+std::vector<WindowsApps::CatalogEntry> InstalledApps(bool forceRefresh = false) {
+    struct Cache {
+        std::mutex mutex;
+        std::vector<WindowsApps::CatalogEntry> entries;
+        std::chrono::steady_clock::time_point refreshedAt{};
+        bool loaded = false;
+    };
+    static Cache cache;
+    std::lock_guard lock(cache.mutex);
+    const bool expired = !cache.loaded ||
+        std::chrono::steady_clock::now() - cache.refreshedAt >
+            std::chrono::minutes(5);
+    if (forceRefresh || expired) {
+        cache.entries = EnumerateInstalledApps();
+        cache.refreshedAt = std::chrono::steady_clock::now();
+        cache.loaded = true;
+    }
+    return cache.entries;
+}
+
+WindowsApps::CatalogMatch ResolveInstalledApp(const std::string& query) {
+    auto match = WindowsApps::MatchCatalog(InstalledApps(), query);
+    if (!match.entry && !match.ambiguous) {
+        match = WindowsApps::MatchCatalog(InstalledApps(true), query);
+    }
+    return match;
+}
+
+std::string AppUserModelIdForWindow(HWND hwnd) {
+    if (!hwnd) {
+        return {};
+    }
+    ComPtr<IPropertyStore> properties;
+    if (FAILED(SHGetPropertyStoreForWindow(
+            hwnd,
+            __uuidof(IPropertyStore),
+            reinterpret_cast<void**>(properties.put()))) ||
+        !properties) {
+        return {};
+    }
+
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    std::string appUserModelId;
+    if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value))) {
+        if (value.vt == VT_LPWSTR && value.pwszVal) {
+            appUserModelId = Windows::WideToUtf8(value.pwszVal);
+        } else if (value.vt == VT_BSTR && value.bstrVal) {
+            appUserModelId = Windows::WideToUtf8(value.bstrVal);
+        }
+    }
+    PropVariantClear(&value);
+    return appUserModelId;
+}
+
+AppInfo AppInfoForWindow(HWND hwnd) {
     if (!hwnd) {
         return {};
     }
@@ -529,9 +753,150 @@ AppInfo GetFrontmostApp() {
     AppInfo info;
     info.available = true;
     info.pid = static_cast<int>(pid);
-    info.name = ProcessName(pid);
+    info.executable = ProcessName(pid);
+
+    ComScope com;
+    std::string appUserModelId;
+    if (ComUsable(com)) {
+        appUserModelId = AppUserModelIdForWindow(hwnd);
+    }
+    if (!appUserModelId.empty()) {
+        info.bundleId = appUserModelId;
+        auto match = WindowsApps::MatchCatalog(
+            InstalledApps(), appUserModelId);
+        info.name = match.entry
+            ? match.entry->displayName
+            : appUserModelId;
+        return info;
+    }
+
+    info.name = info.executable;
     info.bundleId = info.name;
     return info;
+}
+
+bool ShellExecuteTarget(const std::string& target, int* launchedPid = nullptr) {
+    if (launchedPid) {
+        *launchedPid = -1;
+    }
+    if (target.empty()) {
+        return false;
+    }
+    const std::wstring wide = Utf8ToWide(target);
+    SHELLEXECUTEINFOW execute{};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    execute.lpVerb = L"open";
+    execute.lpFile = wide.c_str();
+    execute.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&execute) == FALSE) {
+        return false;
+    }
+    if (execute.hProcess) {
+        if (launchedPid) {
+            const DWORD processId = GetProcessId(execute.hProcess);
+            if (processId > 0) {
+                *launchedPid = static_cast<int>(processId);
+            }
+        }
+        CloseHandle(execute.hProcess);
+    }
+    return true;
+}
+
+bool ActivateCatalogEntry(
+    const WindowsApps::CatalogEntry& entry,
+    AppInfo& appInfo) {
+    if (!entry.appUserModelId.empty() &&
+        entry.appUserModelId.find('!') != std::string::npos) {
+        ComScope com;
+        if (!ComUsable(com)) {
+            return false;
+        }
+        ComPtr<IApplicationActivationManager> manager;
+        if (FAILED(CoCreateInstance(
+                CLSID_ApplicationActivationManager,
+                nullptr,
+                CLSCTX_LOCAL_SERVER,
+                __uuidof(IApplicationActivationManager),
+                reinterpret_cast<void**>(manager.put()))) ||
+            !manager) {
+            return false;
+        }
+        DWORD pid = 0;
+        const std::wstring appUserModelId =
+            Utf8ToWide(entry.appUserModelId);
+        if (FAILED(manager->ActivateApplication(
+                appUserModelId.c_str(),
+                nullptr,
+                AO_NONE,
+                &pid))) {
+            return false;
+        }
+        appInfo.available = true;
+        appInfo.pid = static_cast<int>(pid);
+        appInfo.name = entry.displayName;
+        appInfo.bundleId = entry.appUserModelId;
+        appInfo.executable = !entry.executablePath.empty()
+            ? std::filesystem::path(entry.executablePath).filename().string()
+            : std::string{};
+        return true;
+    }
+
+    const std::string target = !entry.executablePath.empty()
+        ? entry.executablePath
+        : entry.parsingName;
+    int launchedPid = -1;
+    if (!ShellExecuteTarget(target, &launchedPid)) {
+        return false;
+    }
+    appInfo.available = true;
+    appInfo.pid = launchedPid;
+    appInfo.name = entry.displayName;
+    appInfo.bundleId = !entry.appUserModelId.empty()
+        ? entry.appUserModelId
+        : target;
+    appInfo.executable = !entry.executablePath.empty()
+        ? std::filesystem::path(entry.executablePath).filename().string()
+        : std::string{};
+    return true;
+}
+
+bool WakeDesktopSession(bool force) {
+    const DesktopSessionState state = GetDesktopSessionState();
+    if (!state.available || (!state.onConsole && !state.interactive) || !state.loginDone ||
+        (state.screenLocked && !state.screenSaverActive && !force)) {
+        return false;
+    }
+
+    // ES_DISPLAY_REQUIRED resets the display idle timer and brings a powered-
+    // down monitor back without changing authentication state.
+    const bool displayRequested = SetThreadExecutionState(
+        ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) != 0;
+
+    bool activitySent = false;
+    if (state.screenSaverActive) {
+        // Native user activity dismisses a screen saver. A paired modifier
+        // press has no text effect and cannot authenticate a locked desktop.
+        INPUT activity[2]{};
+        activity[0].type = INPUT_KEYBOARD;
+        activity[0].ki.wVk = VK_SHIFT;
+        activity[1].type = INPUT_KEYBOARD;
+        activity[1].ki.wVk = VK_SHIFT;
+        activity[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        activitySent = SendInput(2, activity, sizeof(INPUT)) == 2;
+    }
+    return displayRequested || activitySent;
+}
+bool OpenPermissionsSettings() { return OpenSettingsUri(L"ms-settings:easeofaccess"); }
+bool OpenAccessibilitySettings() { return OpenPermissionsSettings(); }
+bool OpenScreenCaptureSettings() { return true; }
+bool RequestAccessibilityPermission() { return true; }
+bool RequestScreenCapturePermission() { return true; }
+
+AppInfo GetFrontmostApp() {
+    HWND hwnd = GetForegroundWindow();
+    return AppInfoForWindow(hwnd);
 }
 
 std::string GetFrontmostAppSummary() {
@@ -638,25 +1003,49 @@ bool ActivateAppByPid(int pid) {
 }
 
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
-    for (const auto& window : ListWindows(query)) {
+    const auto directWindows = ListWindows(query);
+    for (const auto& window : directWindows) {
         if (auto hwnd = HwndFromId(window.id)) {
             if (!ActivateWindow(*hwnd)) {
-                return false;
+                continue;
             }
-            appInfo.available = true;
-            appInfo.pid = window.pid;
-            appInfo.name = window.appClass;
-            appInfo.bundleId = window.appClass;
+            appInfo = AppInfoForWindow(*hwnd);
             return true;
         }
     }
-    std::wstring wide = Utf8ToWide(query);
-    if (reinterpret_cast<intptr_t>(ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) <= 32) {
+    if (!directWindows.empty()) {
         return false;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    appInfo = GetFrontmostApp();
-    return true;
+
+    int launchedPid = -1;
+    if (ShellExecuteTarget(query, &launchedPid)) {
+        appInfo.available = true;
+        appInfo.pid = launchedPid;
+        appInfo.name = query;
+        appInfo.bundleId = query;
+        appInfo.executable = std::filesystem::path(query).filename().string();
+        return true;
+    }
+
+    const auto resolved = ResolveInstalledApp(query);
+    if (!resolved.entry) {
+        return false;
+    }
+
+    const auto catalogWindows = ListWindows(resolved.entry->displayName);
+    for (const auto& window : catalogWindows) {
+        if (auto hwnd = HwndFromId(window.id)) {
+            if (!ActivateWindow(*hwnd)) {
+                continue;
+            }
+            appInfo = AppInfoForWindow(*hwnd);
+            return true;
+        }
+    }
+    if (!catalogWindows.empty()) {
+        return false;
+    }
+    return ActivateCatalogEntry(*resolved.entry, appInfo);
 }
 
 bool OpenUrl(const std::string& url, const std::string&, bool, bool) {
@@ -760,18 +1149,31 @@ bool SendHotkey(const std::vector<std::string>& keys, int holdMs) {
         if (!vk) return false;
         vks.push_back(*vk);
     }
-    for (WORD vk : vks) SendVirtualKey(vk, true);
+    if (vks.empty()) return false;
+    std::vector<WORD> pressed;
+    for (WORD vk : vks) {
+        if (!SendVirtualKey(vk, true)) {
+            for (auto it = pressed.rbegin(); it != pressed.rend(); ++it) {
+                SendVirtualKey(*it, false);
+            }
+            return false;
+        }
+        pressed.push_back(vk);
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-    for (auto it = vks.rbegin(); it != vks.rend(); ++it) SendVirtualKey(*it, false);
-    return true;
+    bool released = true;
+    for (auto it = pressed.rbegin(); it != pressed.rend(); ++it) {
+        released = SendVirtualKey(*it, false) && released;
+    }
+    return released;
 }
 
 bool TypeCharacter(const std::string& character, int holdMs) {
     std::wstring wide = Utf8ToWide(character);
     for (wchar_t ch : wide) {
-        SendUnicodeChar(ch, true);
+        if (!SendUnicodeChar(ch, true)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-        SendUnicodeChar(ch, false);
+        if (!SendUnicodeChar(ch, false)) return false;
     }
     return !wide.empty();
 }
@@ -779,9 +1181,9 @@ bool TypeCharacter(const std::string& character, int holdMs) {
 bool TypeText(const std::string& text, int holdMs) {
     std::wstring wide = Utf8ToWide(text);
     for (wchar_t ch : wide) {
-        SendUnicodeChar(ch, true);
+        if (!SendUnicodeChar(ch, true)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-        SendUnicodeChar(ch, false);
+        if (!SendUnicodeChar(ch, false)) return false;
     }
     return true;
 }

@@ -6,6 +6,7 @@
 #include "computer_cpp/Image.h"
 #include "computer_cpp/LuaRunner.h"
 #include "computer_cpp/NativeDeps.h"
+#include "computer_cpp/Platform.h"
 #include "computer_cpp/RefStore.h"
 #include "computer_cpp/StringUtils.h"
 #include "computer_cpp/Timeline.h"
@@ -14,6 +15,12 @@
 
 #include "LinuxPng.h"
 #include "TestSupport.h"
+
+#if defined(_WIN32)
+#include "WindowsAppResolver.h"
+#include "WindowsNativeInput.h"
+#include "DaemonTextInput.h"
+#endif
 #include "UpdaterInternal.h"
 
 #include <cassert>
@@ -65,6 +72,148 @@ void TestStringUtils() {
     assert(keys[0] == "Cmd");
     assert(ComputerCpp::Join(keys, ",") == "Cmd,Shift,G");
 }
+
+void TestPlatformKeyResolution() {
+    assert(ComputerCpp::Platform::ResolveKeycode("primary") >= 0);
+    assert(ComputerCpp::Platform::ResolveKeycode("enter") >= 0);
+    assert(ComputerCpp::Platform::ResolveKeycode("not-a-real-key") < 0);
+}
+
+#if defined(_WIN32)
+class ScopedWindowsInputSender {
+public:
+    explicit ScopedWindowsInputSender(
+        ComputerCpp::Platform::WindowsInput::SendInputFunction sender) {
+        ComputerCpp::Platform::WindowsInput::SetSendInputFunctionForTesting(
+            std::move(sender));
+    }
+    ~ScopedWindowsInputSender() {
+        ComputerCpp::Platform::WindowsInput::ResetSendInputFunctionForTesting();
+    }
+};
+
+void TestWindowsNativeInputDelivery() {
+    using ComputerCpp::Platform::SendHotkey;
+    using ComputerCpp::Platform::TypeText;
+
+    {
+        int calls = 0;
+        ScopedWindowsInputSender sender([&](UINT, LPINPUT, int) {
+            ++calls;
+            return static_cast<UINT>(0);
+        });
+        assert(!SendHotkey({"primary", "l"}, 1));
+        assert(calls == 1);
+
+        const auto invalid = ComputerCpp::RunPressCommand({
+            {"keys", nlohmann::json::array({"not-a-real-key"})},
+            {"holdMs", 1},
+        });
+        assert(invalid["ok"] == false);
+        assert(invalid["code"] == "invalid_key");
+
+        const auto failed = ComputerCpp::RunPressCommand({
+            {"keys", nlohmann::json::array({"primary", "l"})},
+            {"holdMs", 1},
+        });
+        assert(failed["ok"] == false);
+        assert(failed["code"] == "input_failed");
+    }
+
+    {
+        std::vector<INPUT> events;
+        int calls = 0;
+        ScopedWindowsInputSender sender([&](UINT count, LPINPUT inputs, int) {
+            events.insert(events.end(), inputs, inputs + count);
+            ++calls;
+            return calls == 2 ? static_cast<UINT>(0) : count;
+        });
+        assert(!SendHotkey({"primary", "l"}, 1));
+        assert(events.size() == 3);
+        assert(events[0].ki.wVk == VK_CONTROL);
+        assert((events[0].ki.dwFlags & KEYEVENTF_KEYUP) == 0);
+        assert(events[1].ki.wVk == 'L');
+        assert((events[1].ki.dwFlags & KEYEVENTF_KEYUP) == 0);
+        assert(events[2].ki.wVk == VK_CONTROL);
+        assert((events[2].ki.dwFlags & KEYEVENTF_KEYUP) != 0);
+    }
+
+    {
+        int calls = 0;
+        ScopedWindowsInputSender sender([&](UINT count, LPINPUT, int) {
+            ++calls;
+            return calls == 2 ? static_cast<UINT>(0) : count;
+        });
+        assert(!TypeText("x", 1));
+        assert(calls == 2);
+    }
+
+    {
+        std::vector<INPUT> events;
+        ScopedWindowsInputSender sender([&](UINT count, LPINPUT inputs, int) {
+            events.insert(events.end(), inputs, inputs + count);
+            return count;
+        });
+        assert(SendHotkey({"primary", "l"}, 1));
+        assert(TypeText("x", 1));
+        assert(events.size() == 6);
+        assert((events[4].ki.dwFlags & KEYEVENTF_UNICODE) != 0);
+        assert((events[4].ki.dwFlags & KEYEVENTF_KEYUP) == 0);
+        assert((events[5].ki.dwFlags & KEYEVENTF_KEYUP) != 0);
+    }
+}
+
+void TestWindowsAppCatalogMatching() {
+    using ComputerCpp::Platform::WindowsApps::CatalogEntry;
+    using ComputerCpp::Platform::WindowsApps::MatchCatalog;
+    using ComputerCpp::Platform::WindowsApps::NormalizeLookupName;
+
+    const std::vector<CatalogEntry> entries = {
+        {
+            "Calculator",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            "",
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        },
+        {
+            "Visual Studio Code",
+            "Microsoft.VisualStudioCode",
+            "C:\\Program Files\\Microsoft VS Code\\Code.exe",
+            "",
+        },
+        {"Calculator Preview", "Example.CalculatorPreview!App", "", ""},
+    };
+
+    assert(NormalizeLookupName(" Visual-Studio Code.exe ") ==
+        "visualstudiocode");
+
+    auto calculator = MatchCatalog(entries, "Calculator");
+    assert(calculator.entry.has_value());
+    assert(calculator.entry->appUserModelId ==
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App");
+    assert(!calculator.ambiguous);
+
+    auto calculatorId = MatchCatalog(
+        entries,
+        "microsoft.windowscalculator_8wekyb3d8bbwe!app");
+    assert(calculatorId.entry.has_value());
+    assert(calculatorId.entry->displayName == "Calculator");
+
+    auto code = MatchCatalog(entries, "code.exe");
+    assert(code.entry.has_value());
+    assert(code.entry->displayName == "Visual Studio Code");
+
+    auto ambiguous = MatchCatalog(entries, "calc");
+    assert(!ambiguous.entry.has_value());
+    assert(ambiguous.ambiguous);
+    assert(ambiguous.candidates.size() == 2);
+
+    auto missing = MatchCatalog(entries, "Definitely Missing");
+    assert(!missing.entry.has_value());
+    assert(!missing.ambiguous);
+    assert(missing.candidates.empty());
+}
+#endif
 
 void TestBrowserRegistry() {
     assert(ComputerCpp::NormalizeBrowserId("Google Chrome") == "chrome");
@@ -1189,6 +1338,11 @@ int main() {
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
     RunTest("StringUtils", TestStringUtils);
+    RunTest("PlatformKeyResolution", TestPlatformKeyResolution);
+#if defined(_WIN32)
+    RunTest("WindowsNativeInputDelivery", TestWindowsNativeInputDelivery);
+    RunTest("WindowsAppCatalogMatching", TestWindowsAppCatalogMatching);
+#endif
     RunTest("BrowserRegistry", TestBrowserRegistry);
     RunTest("AppConfigServerRoundTrip", TestAppConfigServerRoundTrip);
     RunTest("ServerAppNameValidation", TestServerAppNameValidation);

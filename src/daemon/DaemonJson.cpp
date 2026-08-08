@@ -21,7 +21,8 @@ json AppToJson(const Platform::AppInfo& app) {
         {"available", app.available},
         {"pid", app.pid},
         {"name", app.name},
-        {"bundleId", app.bundleId}
+        {"bundleId", app.bundleId},
+        {"executable", app.executable}
     };
 }
 

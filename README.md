@@ -608,6 +608,13 @@ developer environment before invoking CMake. It expects the Visual Studio
 Desktop development with C++ workload and either `VCPKG_ROOT` or a vcpkg
 checkout at `build/tools/vcpkg`.
 
+After building, the script signs runtime executables and DLLs when a usable
+`CN=Gobii AI computer.cpp` code-signing certificate is available in the current
+user's certificate store. This keeps local rebuilds runnable on Windows systems
+where Smart App Control is enforcing. If that policy is enabled but the signing
+identity is missing or expired, the build stops with an actionable error rather
+than launching a tray app whose CLI helper Windows will block.
+
 The macOS build script also creates a reusable local signing identity before
 the first signed build if you do not already have an Apple Development or
 Developer ID Application certificate. You can create or refresh that identity
