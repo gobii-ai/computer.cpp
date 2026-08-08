@@ -6,6 +6,7 @@
 #include "computer_cpp/WindowsUtil.h"
 
 #include "WindowsAppResolver.h"
+#include "WindowsNativeInput.h"
 
 #define NOMINMAX
 #include <windows.h>
@@ -321,22 +322,30 @@ std::optional<WORD> KeyNameToVirtualKey(const std::string& keyName) {
     return std::nullopt;
 }
 
-void SendVirtualKey(WORD vk, bool down) {
+WindowsInput::SendInputFunction& NativeInputSender() {
+    static WindowsInput::SendInputFunction sender =
+        [](UINT count, LPINPUT inputs, int inputSize) {
+            return ::SendInput(count, inputs, inputSize);
+        };
+    return sender;
+}
+
+bool SendVirtualKey(WORD vk, bool down) {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk;
     if (!down) {
         input.ki.dwFlags = KEYEVENTF_KEYUP;
     }
-    SendInput(1, &input, sizeof(INPUT));
+    return NativeInputSender()(1, &input, sizeof(INPUT)) == 1;
 }
 
-void SendUnicodeChar(wchar_t ch, bool down) {
+bool SendUnicodeChar(wchar_t ch, bool down) {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     input.ki.wScan = ch;
     input.ki.dwFlags = KEYEVENTF_UNICODE | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &input, sizeof(INPUT));
+    return NativeInputSender()(1, &input, sizeof(INPUT)) == 1;
 }
 
 Image::RgbImage CaptureRegion(int left, int top, int width, int height) {
@@ -510,6 +519,18 @@ void AppendElementLines(IUIAutomation* automation, IUIAutomationElement* element
     }
 }
 
+}
+
+void WindowsInput::SetSendInputFunctionForTesting(SendInputFunction sender) {
+    NativeInputSender() = sender
+        ? std::move(sender)
+        : SendInputFunction([](UINT count, LPINPUT inputs, int inputSize) {
+            return ::SendInput(count, inputs, inputSize);
+        });
+}
+
+void WindowsInput::ResetSendInputFunctionForTesting() {
+    SetSendInputFunctionForTesting({});
 }
 
 PermissionStatus CheckPermissions(bool) { return {true, true}; }
@@ -1084,18 +1105,31 @@ bool SendHotkey(const std::vector<std::string>& keys, int holdMs) {
         if (!vk) return false;
         vks.push_back(*vk);
     }
-    for (WORD vk : vks) SendVirtualKey(vk, true);
+    if (vks.empty()) return false;
+    std::vector<WORD> pressed;
+    for (WORD vk : vks) {
+        if (!SendVirtualKey(vk, true)) {
+            for (auto it = pressed.rbegin(); it != pressed.rend(); ++it) {
+                SendVirtualKey(*it, false);
+            }
+            return false;
+        }
+        pressed.push_back(vk);
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-    for (auto it = vks.rbegin(); it != vks.rend(); ++it) SendVirtualKey(*it, false);
-    return true;
+    bool released = true;
+    for (auto it = pressed.rbegin(); it != pressed.rend(); ++it) {
+        released = SendVirtualKey(*it, false) && released;
+    }
+    return released;
 }
 
 bool TypeCharacter(const std::string& character, int holdMs) {
     std::wstring wide = Utf8ToWide(character);
     for (wchar_t ch : wide) {
-        SendUnicodeChar(ch, true);
+        if (!SendUnicodeChar(ch, true)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-        SendUnicodeChar(ch, false);
+        if (!SendUnicodeChar(ch, false)) return false;
     }
     return !wide.empty();
 }
@@ -1103,9 +1137,9 @@ bool TypeCharacter(const std::string& character, int holdMs) {
 bool TypeText(const std::string& text, int holdMs) {
     std::wstring wide = Utf8ToWide(text);
     for (wchar_t ch : wide) {
-        SendUnicodeChar(ch, true);
+        if (!SendUnicodeChar(ch, true)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, holdMs)));
-        SendUnicodeChar(ch, false);
+        if (!SendUnicodeChar(ch, false)) return false;
     }
     return true;
 }

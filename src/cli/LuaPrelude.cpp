@@ -2131,6 +2131,133 @@ function ac.browser.managed.focus(opts)
   return ac.browser.managed.ensure(merge(opts or {}, { newWindow = false }))
 end
 
+local function managed_navigation_current_url(target_id, opts)
+  local result = ac.browser.eval("location.href", managed_browser_options(opts, {
+    targetId = tostring(target_id or ""),
+    targetUrlPrefix = "",
+    targetTitle = "",
+    launch = false,
+  }))
+  if not result or not result.ok or not result.data then return nil, result end
+  return tostring(result.data.value or result.data.targetUrl or ""), result
+end
+
+local function managed_navigation_changed(target_id, previous_url, opts)
+  local timeout_ms = tonumber(opts.navigationAttemptTimeoutMs) or 2500
+  local function inspect()
+    local current_url = managed_navigation_current_url(target_id, opts)
+    if current_url ~= nil and current_url ~= previous_url then return current_url end
+    return false
+  end
+  if timeout_ms <= 0 then return inspect() or nil end
+  return managed_wait(inspect, timeout_ms, opts.navigationPollMs or 100)
+end
+
+local function managed_navigation_input(url, paste)
+  local selected = ac.request("press", {
+    keys = { "primary", "l" },
+    holdMs = 40,
+  }, { allow_error = true })
+  if not selected or not selected.ok then return false, selected end
+  managed_delay(80)
+  local typed = ac.request("type", {
+    text = url,
+    paste = paste == true,
+    holdMs = paste == true and 20 or 1,
+  }, { allow_error = true })
+  if not typed or not typed.ok then return false, typed end
+  managed_delay(80)
+  local submitted = ac.request("press", {
+    keys = "enter",
+    holdMs = 40,
+  }, { allow_error = true })
+  if not submitted or not submitted.ok then return false, submitted end
+  return true, submitted
+end
+
+local function managed_navigation_success(surface, previous_url, current_url, attempts)
+  local data = merge(surface or {}, {
+    previousUrl = previous_url,
+    currentUrl = current_url,
+    attempts = attempts,
+    retried = attempts > 1,
+    navigated = current_url ~= previous_url,
+  })
+  return { ok = true, data = data }
+end
+
+function ac.browser.managed.navigate(url, opts)
+  opts = opts or {}
+  url = tostring(url or "")
+  if url == "" or not url:match("^https?://") then
+    return {
+      ok = false,
+      code = "invalid_managed_browser",
+      error = "managed browser navigation URL must be an absolute HTTP(S) URL",
+    }
+  end
+
+  local focused = ac.browser.managed.focus(opts)
+  if not focused or not focused.ok or not focused.data then return focused end
+  local surface = focused.data
+  local target_id = tostring(surface.targetId or "")
+  local previous_url = managed_navigation_current_url(target_id, opts)
+  if target_id == "" or previous_url == nil then
+    return {
+      ok = false,
+      code = "browser_navigation_failed",
+      error = "could not inspect the exact managed browser target before navigation",
+      data = merge(surface, { currentUrl = tostring(surface.currentUrl or ""), attempts = 0 }),
+    }
+  end
+  if previous_url == url then
+    return managed_navigation_success(surface, previous_url, previous_url, 0)
+  end
+
+  local first_dispatched = managed_navigation_input(url, true)
+  if first_dispatched then
+    local current_url = managed_navigation_changed(target_id, previous_url, opts)
+    if current_url then
+      return managed_navigation_success(surface, previous_url, current_url, 1)
+    end
+  end
+
+  -- A successful SendInput call does not prove Chrome consumed it. Rebind and
+  -- refocus the persisted target before retrying without the clipboard path.
+  local refocused = ac.browser.managed.focus(opts)
+  if refocused and refocused.ok and refocused.data then
+    surface = refocused.data
+    target_id = tostring(surface.targetId or target_id)
+  end
+  local observed_url = managed_navigation_current_url(target_id, opts) or previous_url
+  if observed_url ~= previous_url then
+    return managed_navigation_success(surface, previous_url, observed_url, 1)
+  end
+
+  local second_dispatched = managed_navigation_input(url, false)
+  if second_dispatched then
+    local current_url = managed_navigation_changed(target_id, previous_url, opts)
+    if current_url then
+      return managed_navigation_success(surface, previous_url, current_url, 2)
+    end
+  end
+
+  observed_url = managed_navigation_current_url(target_id, opts) or observed_url
+  return {
+    ok = false,
+    code = "browser_navigation_failed",
+    error = "managed browser stayed at " .. tostring(observed_url) ..
+      "; expected navigation to " .. url,
+    data = merge(surface, {
+      previousUrl = previous_url,
+      currentUrl = observed_url,
+      expectedUrl = url,
+      attempts = 2,
+      retried = true,
+    }),
+  }
+end
+
 )LUA" R"LUA(function ac.wait(opts, request_opts) return ac.request("wait", opts or {}, request_opts or {}) end
 function ac.wait_frontmost(app, opts) return ac.wait(merge({ frontmost = app }, opts)) end
 function ac.wait_stable_screen(ms, opts) return ac.wait(merge({ stable_screen_ms = ms }, opts)) end

@@ -156,9 +156,14 @@ json RunPressCommand(const json& params) {
     if (*holdMs < 1 || *holdMs > 5000) {
         return Error("press holdMs must be between 1 and 5000", "invalid_key");
     }
+    for (const auto& key : keys) {
+        if (Platform::ResolveKeycode(key) < 0) {
+            return Error("could not resolve key chord", "invalid_key");
+        }
+    }
     bool ok = Platform::SendHotkey(keys, *holdMs);
     if (!ok) {
-        return Error("could not resolve key chord", "invalid_key");
+        return Error("native key input failed", "input_failed");
     }
     return Ok({{"keys", keys}});
 }
