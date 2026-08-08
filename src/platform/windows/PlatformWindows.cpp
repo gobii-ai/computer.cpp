@@ -542,10 +542,16 @@ DesktopSessionState GetDesktopSessionState() {
     const bool hasProcessSession =
         ProcessIdToSessionId(GetCurrentProcessId(), &processSessionId) != FALSE;
     const DWORD consoleSessionId = WTSGetActiveConsoleSessionId();
-    state.available = hasProcessSession && consoleSessionId != 0xFFFFFFFF;
-    state.onConsole = state.available && processSessionId == consoleSessionId;
+    // Session zero is non-interactive. Any other session attached to this
+    // process may be usable, including RDP even though it is not the console.
+    state.available = hasProcessSession && processSessionId != 0;
+    state.onConsole = state.available && consoleSessionId != 0xFFFFFFFF &&
+        processSessionId == consoleSessionId;
+    state.interactive = state.available;
+    // A WTS query failure is unknown rather than proof that login is absent.
+    state.loginDone = state.available;
 
-    if (state.onConsole) {
+    if (state.available) {
         LPWSTR buffer = nullptr;
         DWORD bytes = 0;
         if (WTSQuerySessionInformationW(
@@ -560,6 +566,7 @@ DesktopSessionState GetDesktopSessionState() {
             if (info->Level == 1) {
                 const auto& level = info->Data.WTSInfoExLevel1;
                 state.loginDone = level.SessionState == WTSActive;
+                state.interactive = state.loginDone;
                 state.screenLocked =
                     level.SessionFlags == WTS_SESSIONSTATE_LOCK;
             }
@@ -687,15 +694,17 @@ std::vector<WindowsApps::CatalogEntry> InstalledApps(bool forceRefresh = false) 
         std::mutex mutex;
         std::vector<WindowsApps::CatalogEntry> entries;
         std::chrono::steady_clock::time_point refreshedAt{};
+        bool loaded = false;
     };
     static Cache cache;
     std::lock_guard lock(cache.mutex);
-    const bool expired = cache.entries.empty() ||
+    const bool expired = !cache.loaded ||
         std::chrono::steady_clock::now() - cache.refreshedAt >
             std::chrono::minutes(5);
     if (forceRefresh || expired) {
         cache.entries = EnumerateInstalledApps();
         cache.refreshedAt = std::chrono::steady_clock::now();
+        cache.loaded = true;
     }
     return cache.entries;
 }
@@ -744,6 +753,7 @@ AppInfo AppInfoForWindow(HWND hwnd) {
     AppInfo info;
     info.available = true;
     info.pid = static_cast<int>(pid);
+    info.executable = ProcessName(pid);
 
     ComScope com;
     std::string appUserModelId;
@@ -760,23 +770,38 @@ AppInfo AppInfoForWindow(HWND hwnd) {
         return info;
     }
 
-    info.name = ProcessName(pid);
+    info.name = info.executable;
     info.bundleId = info.name;
     return info;
 }
 
-bool ShellExecuteTarget(const std::string& target) {
+bool ShellExecuteTarget(const std::string& target, int* launchedPid = nullptr) {
+    if (launchedPid) {
+        *launchedPid = -1;
+    }
     if (target.empty()) {
         return false;
     }
     const std::wstring wide = Utf8ToWide(target);
-    return reinterpret_cast<intptr_t>(ShellExecuteW(
-        nullptr,
-        L"open",
-        wide.c_str(),
-        nullptr,
-        nullptr,
-        SW_SHOWNORMAL)) > 32;
+    SHELLEXECUTEINFOW execute{};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    execute.lpVerb = L"open";
+    execute.lpFile = wide.c_str();
+    execute.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&execute) == FALSE) {
+        return false;
+    }
+    if (execute.hProcess) {
+        if (launchedPid) {
+            const DWORD processId = GetProcessId(execute.hProcess);
+            if (processId > 0) {
+                *launchedPid = static_cast<int>(processId);
+            }
+        }
+        CloseHandle(execute.hProcess);
+    }
+    return true;
 }
 
 bool ActivateCatalogEntry(
@@ -812,26 +837,34 @@ bool ActivateCatalogEntry(
         appInfo.pid = static_cast<int>(pid);
         appInfo.name = entry.displayName;
         appInfo.bundleId = entry.appUserModelId;
+        appInfo.executable = !entry.executablePath.empty()
+            ? std::filesystem::path(entry.executablePath).filename().string()
+            : std::string{};
         return true;
     }
 
     const std::string target = !entry.executablePath.empty()
         ? entry.executablePath
         : entry.parsingName;
-    if (!ShellExecuteTarget(target)) {
+    int launchedPid = -1;
+    if (!ShellExecuteTarget(target, &launchedPid)) {
         return false;
     }
     appInfo.available = true;
+    appInfo.pid = launchedPid;
     appInfo.name = entry.displayName;
     appInfo.bundleId = !entry.appUserModelId.empty()
         ? entry.appUserModelId
         : target;
+    appInfo.executable = !entry.executablePath.empty()
+        ? std::filesystem::path(entry.executablePath).filename().string()
+        : std::string{};
     return true;
 }
 
 bool WakeDesktopSession(bool force) {
     const DesktopSessionState state = GetDesktopSessionState();
-    if (!state.available || !state.onConsole || !state.loginDone ||
+    if (!state.available || (!state.onConsole && !state.interactive) || !state.loginDone ||
         (state.screenLocked && !state.screenSaverActive && !force)) {
         return false;
     }
@@ -970,7 +1003,8 @@ bool ActivateAppByPid(int pid) {
 }
 
 bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
-    for (const auto& window : ListWindows(query)) {
+    const auto directWindows = ListWindows(query);
+    for (const auto& window : directWindows) {
         if (auto hwnd = HwndFromId(window.id)) {
             if (!ActivateWindow(*hwnd)) {
                 continue;
@@ -979,11 +1013,17 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
             return true;
         }
     }
+    if (!directWindows.empty()) {
+        return false;
+    }
 
-    if (ShellExecuteTarget(query)) {
+    int launchedPid = -1;
+    if (ShellExecuteTarget(query, &launchedPid)) {
         appInfo.available = true;
+        appInfo.pid = launchedPid;
         appInfo.name = query;
         appInfo.bundleId = query;
+        appInfo.executable = std::filesystem::path(query).filename().string();
         return true;
     }
 
@@ -992,7 +1032,8 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
         return false;
     }
 
-    for (const auto& window : ListWindows(resolved.entry->displayName)) {
+    const auto catalogWindows = ListWindows(resolved.entry->displayName);
+    for (const auto& window : catalogWindows) {
         if (auto hwnd = HwndFromId(window.id)) {
             if (!ActivateWindow(*hwnd)) {
                 continue;
@@ -1000,6 +1041,9 @@ bool LaunchOrActivateApp(const std::string& query, AppInfo& appInfo) {
             appInfo = AppInfoForWindow(*hwnd);
             return true;
         }
+    }
+    if (!catalogWindows.empty()) {
+        return false;
     }
     return ActivateCatalogEntry(*resolved.entry, appInfo);
 }

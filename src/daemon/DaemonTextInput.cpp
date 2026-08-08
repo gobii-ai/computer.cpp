@@ -94,7 +94,8 @@ json RunWaitCommand(const json& params) {
             auto app = Platform::GetFrontmostApp();
             auto window = Platform::GetActiveWindow();
             matched = matched && ContainsCaseInsensitive(
-                app.name + " " + app.bundleId + " " + window.appClass + " " + window.title,
+                app.name + " " + app.bundleId + " " + app.executable + " " +
+                    window.appClass + " " + window.title,
                 frontmost);
             evidence["frontmostApp"] = AppToJson(app);
             evidence["frontmostWindow"] = WindowToJson(window);

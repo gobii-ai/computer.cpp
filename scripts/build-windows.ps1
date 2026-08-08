@@ -141,8 +141,9 @@ function Invoke-LocalCodeSigning {
         }
 
         $signature = Get-AuthenticodeSignature $artifact.FullName
-        if ($signature.Status -ne "Valid") {
-            throw "The signature on $($artifact.FullName) did not validate: $($signature.StatusMessage)"
+        if (-not $signature.SignerCertificate -or
+            $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+            throw "The signature on $($artifact.FullName) was not created with the requested development certificate: $($signature.StatusMessage)"
         }
     }
 }

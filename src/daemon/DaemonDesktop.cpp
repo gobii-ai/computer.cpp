@@ -114,7 +114,7 @@ json DesktopSessionToJson(const Platform::DesktopSessionState& state) {
     std::string status = "ready";
     if (!state.detectionSupported) {
         status = "unsupported";
-    } else if (!state.available || !state.onConsole || !state.loginDone) {
+    } else if (!state.available || (!state.onConsole && !state.interactive) || !state.loginDone) {
         status = "unavailable";
     } else if (state.screenLocked) {
         status = "locked";
@@ -127,6 +127,7 @@ json DesktopSessionToJson(const Platform::DesktopSessionState& state) {
         {"detectionSupported", state.detectionSupported},
         {"available", state.available},
         {"onConsole", state.onConsole},
+        {"interactive", state.interactive},
         {"loginDone", state.loginDone},
         {"screenLocked", state.screenLocked},
         {"screenSaverActive", state.screenSaverActive},
@@ -151,7 +152,7 @@ std::set<std::string> VisibleWindowIds(const std::vector<Platform::WindowInfo>& 
 bool IsDesktopSessionReady(const Platform::DesktopSessionState& state) {
     return state.detectionSupported &&
         state.available &&
-        state.onConsole &&
+        (state.onConsole || state.interactive) &&
         state.loginDone &&
         !state.screenLocked &&
         !state.screenSaverActive &&
@@ -161,7 +162,7 @@ bool IsDesktopSessionReady(const Platform::DesktopSessionState& state) {
 bool CanAttemptDesktopWake(const Platform::DesktopSessionState& state, bool force) {
     return state.detectionSupported &&
         state.available &&
-        state.onConsole &&
+        (state.onConsole || state.interactive) &&
         state.loginDone &&
         (!state.screenLocked || state.screenSaverActive || force);
 }
@@ -252,7 +253,7 @@ json RunDesktopWakeCommand(const json& params) {
         return Error("desktop session detection and wake are not supported on this platform",
             "desktop_session_unsupported");
     }
-    if (!before.available || !before.onConsole || !before.loginDone) {
+    if (!before.available || (!before.onConsole && !before.interactive) || !before.loginDone) {
         return Error("desktop GUI session is unavailable", "desktop_session_unavailable");
     }
     if (!CanAttemptDesktopWake(before, force)) {
@@ -470,6 +471,12 @@ json RunAppLaunchCommand(const json& params, const std::string& activeControlTok
     }
     auto activeWindow = WaitForOpenedWindow(query, beforeIds);
     if (activeWindow.available && !activeWindow.id.empty()) {
+        if (activeWindow.pid > 0) {
+            app.pid = activeWindow.pid;
+        }
+        if (app.executable.empty()) {
+            app.executable = activeWindow.appClass;
+        }
         RegisterControlSessionResource(activeControlToken, "window", activeWindow.id, app.name, WindowToJson(activeWindow));
     }
     return Ok({{"launched", launched}, {"app", AppToJson(app)}, {"window", WindowToJson(activeWindow)}});

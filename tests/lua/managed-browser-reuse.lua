@@ -70,6 +70,8 @@ ac.request = function(method, params)
       if navigation_mode == "success" or
           (navigation_mode == "retry" and not last_type_used_paste) then
         current_url = typed_url
+      elseif navigation_mode == "unrelated" then
+        current_url = "https://example.test/unrelated"
       end
     end
     return { ok = true, data = {} }
@@ -105,6 +107,30 @@ local failed_navigation = ac.browser.managed.navigate(
   "https://example.test/ignored", options)
 local failed_navigation_modes = table.concat(navigation_type_modes, ",")
 
+current_url = "https://example.test/canonical/"
+navigation_type_modes = {}
+local canonical_navigation = ac.browser.managed.navigate(
+  "https://EXAMPLE.test:443/canonical#section", options)
+local canonical_navigation_modes = table.concat(navigation_type_modes, ",")
+
+current_url = "https://example.test/before-unrelated"
+navigation_type_modes = {}
+navigation_mode = "unrelated"
+local unrelated_navigation = ac.browser.managed.navigate(
+  "https://example.test/expected", options)
+local unrelated_navigation_modes = table.concat(navigation_type_modes, ",")
+
+current_url = "https://example.test/before-accepted-redirect"
+navigation_type_modes = {}
+local redirect_options = {}
+for key, value in pairs(options) do redirect_options[key] = value end
+redirect_options.navigationUrlMatches = function(observed)
+  return observed == "https://example.test/unrelated"
+end
+local redirect_navigation = ac.browser.managed.navigate(
+  "https://example.test/redirecting", redirect_options)
+local redirect_navigation_modes = table.concat(navigation_type_modes, ",")
+
 local root = os.getenv("COMPUTER_CPP_HOME")
 local separator = package.config:sub(1, 1)
 local state_file = io.open(root .. separator .. "managed-browser-surfaces.json", "r")
@@ -136,4 +162,15 @@ return {
   failed_navigation_modes = failed_navigation_modes,
   failed_navigation_target = failed_navigation and failed_navigation.data and failed_navigation.data.targetId,
   failed_navigation_window = failed_navigation and failed_navigation.data and failed_navigation.data.windowId,
+  canonical_navigation_ok = canonical_navigation and canonical_navigation.ok == true,
+  canonical_navigation_attempts = canonical_navigation and canonical_navigation.data and canonical_navigation.data.attempts,
+  canonical_navigation_modes = canonical_navigation_modes,
+  unrelated_navigation_ok = unrelated_navigation and unrelated_navigation.ok == true,
+  unrelated_navigation_code = unrelated_navigation and unrelated_navigation.code,
+  unrelated_navigation_url = unrelated_navigation and unrelated_navigation.data and unrelated_navigation.data.currentUrl,
+  unrelated_navigation_modes = unrelated_navigation_modes,
+  redirect_navigation_ok = redirect_navigation and redirect_navigation.ok == true,
+  redirect_navigation_attempts = redirect_navigation and redirect_navigation.data and redirect_navigation.data.attempts,
+  redirect_navigation_url = redirect_navigation and redirect_navigation.data and redirect_navigation.data.currentUrl,
+  redirect_navigation_modes = redirect_navigation_modes,
 }

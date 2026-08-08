@@ -1524,7 +1524,10 @@ bool Click(double x, double y, const std::string& button, int clickCount) {
     }
     return XTestClick(x, y, button, clickCount);
 }
-int ResolveKeycode(const std::string&) { return -1; }
+int ResolveKeycode(const std::string& keyName) {
+    auto symbol = KeySymForToken(NormalizeKey(keyName));
+    return symbol ? static_cast<int>(*symbol) : -1;
+}
 bool SendHotkey(const std::vector<std::string>& keys, int holdMs) {
     if (keys.empty()) {
         return false;

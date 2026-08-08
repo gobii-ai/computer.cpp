@@ -73,6 +73,12 @@ void TestStringUtils() {
     assert(ComputerCpp::Join(keys, ",") == "Cmd,Shift,G");
 }
 
+void TestPlatformKeyResolution() {
+    assert(ComputerCpp::Platform::ResolveKeycode("primary") >= 0);
+    assert(ComputerCpp::Platform::ResolveKeycode("enter") >= 0);
+    assert(ComputerCpp::Platform::ResolveKeycode("not-a-real-key") < 0);
+}
+
 #if defined(_WIN32)
 class ScopedWindowsInputSender {
 public:
@@ -1332,6 +1338,7 @@ int main() {
     SetEnvValue("COMPUTER_CPP_HOME", tempHome.string());
 
     RunTest("StringUtils", TestStringUtils);
+    RunTest("PlatformKeyResolution", TestPlatformKeyResolution);
 #if defined(_WIN32)
     RunTest("WindowsNativeInputDelivery", TestWindowsNativeInputDelivery);
     RunTest("WindowsAppCatalogMatching", TestWindowsAppCatalogMatching);

@@ -2142,11 +2142,39 @@ local function managed_navigation_current_url(target_id, opts)
   return tostring(result.data.value or result.data.targetUrl or ""), result
 end
 
-local function managed_navigation_changed(target_id, previous_url, opts)
+local function managed_navigation_normalize_url(url)
+  url = tostring(url or ""):gsub("#.*$", "")
+  local scheme, authority, remainder = url:match("^([Hh][Tt][Tt][Pp][Ss]?)://([^/?]*)(.*)$")
+  if not scheme then return url end
+  scheme = scheme:lower()
+  authority = authority:lower()
+  if scheme == "http" then
+    authority = authority:gsub(":80$", "")
+  elseif scheme == "https" then
+    authority = authority:gsub(":443$", "")
+  end
+  local path, query = remainder:match("^([^?]*)(.*)$")
+  path = tostring(path or ""):gsub("/+$", "")
+  if path == "" then path = "/" end
+  return scheme .. "://" .. authority .. path .. tostring(query or "")
+end
+
+local function managed_navigation_matches(current_url, expected_url, opts)
+  if managed_navigation_normalize_url(current_url) ==
+      managed_navigation_normalize_url(expected_url) then return true end
+  if type(opts.navigationUrlMatches) == "function" then
+    local ok, matched = pcall(opts.navigationUrlMatches, current_url, expected_url)
+    if ok and matched == true then return true end
+  end
+  return false
+end
+
+local function managed_navigation_reached(target_id, expected_url, opts)
   local timeout_ms = tonumber(opts.navigationAttemptTimeoutMs) or 2500
   local function inspect()
     local current_url = managed_navigation_current_url(target_id, opts)
-    if current_url ~= nil and current_url ~= previous_url then return current_url end
+    if current_url ~= nil and
+        managed_navigation_matches(current_url, expected_url, opts) then return current_url end
     return false
   end
   if timeout_ms <= 0 then return inspect() or nil end
@@ -2210,13 +2238,13 @@ function ac.browser.managed.navigate(url, opts)
       data = merge(surface, { currentUrl = tostring(surface.currentUrl or ""), attempts = 0 }),
     }
   end
-  if previous_url == url then
+  if managed_navigation_matches(previous_url, url, opts) then
     return managed_navigation_success(surface, previous_url, previous_url, 0)
   end
 
   local first_dispatched = managed_navigation_input(url, true)
   if first_dispatched then
-    local current_url = managed_navigation_changed(target_id, previous_url, opts)
+    local current_url = managed_navigation_reached(target_id, url, opts)
     if current_url then
       return managed_navigation_success(surface, previous_url, current_url, 1)
     end
@@ -2230,13 +2258,13 @@ function ac.browser.managed.navigate(url, opts)
     target_id = tostring(surface.targetId or target_id)
   end
   local observed_url = managed_navigation_current_url(target_id, opts) or previous_url
-  if observed_url ~= previous_url then
+  if managed_navigation_matches(observed_url, url, opts) then
     return managed_navigation_success(surface, previous_url, observed_url, 1)
   end
 
   local second_dispatched = managed_navigation_input(url, false)
   if second_dispatched then
-    local current_url = managed_navigation_changed(target_id, previous_url, opts)
+    local current_url = managed_navigation_reached(target_id, url, opts)
     if current_url then
       return managed_navigation_success(surface, previous_url, current_url, 2)
     end
@@ -2299,7 +2327,9 @@ function ac.desktop.focus_app(app, opts)
     local session = inspected.data and inspected.data.session or {}
     local wake = nil
     if inspected.ok == true and session.detectionSupported == true then
-      wake = ac.request("desktop_wake", { force = true }, { allow_error = true })
+      if session.ready ~= true then
+        wake = ac.request("desktop_wake", { force = false }, { allow_error = true })
+      end
     elseif inspected.ok ~= true then
       wake = inspected
     end

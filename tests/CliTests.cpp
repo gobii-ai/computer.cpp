@@ -3487,6 +3487,17 @@ void TestManagedBrowserSurfacePersistsAndFocusReuses() {
     assert(data["first_navigation_window"] == "4242");
     assert(data["retry_navigation_window"] == data["first_navigation_window"]);
     assert(data["failed_navigation_window"] == data["first_navigation_window"]);
+    assert(data["canonical_navigation_ok"] == true);
+    assert(data["canonical_navigation_attempts"] == 0);
+    assert(data["canonical_navigation_modes"] == "");
+    assert(data["unrelated_navigation_ok"] == false);
+    assert(data["unrelated_navigation_code"] == "browser_navigation_failed");
+    assert(data["unrelated_navigation_url"] == "https://example.test/unrelated");
+    assert(data["unrelated_navigation_modes"] == "paste,direct");
+    assert(data["redirect_navigation_ok"] == true);
+    assert(data["redirect_navigation_attempts"] == 1);
+    assert(data["redirect_navigation_url"] == "https://example.test/unrelated");
+    assert(data["redirect_navigation_modes"] == "paste");
 }
 
 void TestManagedBrowserSubmitsFilledFlattenedProxyAuthPrompt() {
